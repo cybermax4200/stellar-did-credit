@@ -1,6 +1,6 @@
 #![no_std]
 #[allow(unused_imports)]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
 
 /// Storage key variants for the identity-oracle contract.
 #[contracttype]
@@ -33,7 +33,45 @@ pub struct VCRecord {
 pub struct IdentityOracle;
 
 #[contractimpl]
-impl IdentityOracle {}
+impl IdentityOracle {
+    pub fn initialize(_env: Env, _admin: Address) {
+        // TODO: store admin in instance storage
+        panic!("not yet implemented")
+    }
+
+    pub fn register_issuer(_env: Env, _admin: Address, _issuer: Address) {
+        // TODO: require admin auth, store issuer as trusted
+        panic!("not yet implemented")
+    }
+
+    pub fn anchor_did(_env: Env, _subject: Address, _did_doc_cid: String) {
+        // TODO: require subject auth, store CID, emit DIDAnchored event
+        panic!("not yet implemented")
+    }
+
+    pub fn anchor_vc(
+        _env: Env,
+        _issuer: Address,
+        _subject: Address,
+        _vc_hash: BytesN<32>,
+    ) {
+        // TODO: require issuer auth, check issuer is trusted, store VCRecord
+        panic!("not yet implemented")
+    }
+
+    pub fn is_verified(_env: Env, _subject: Address) -> bool {
+        // TODO: return true if subject has >= 1 non-revoked VC
+        panic!("not yet implemented")
+    }
+
+    pub fn get_vc_count(_env: Env, _subject: Address) -> u32 {
+        panic!("not yet implemented")
+    }
+
+    pub fn verify_vc(_env: Env, _subject: Address, _vc_hash: BytesN<32>) -> bool {
+        panic!("not yet implemented")
+    }
+}
 
 #[cfg(test)]
 mod tests {}
