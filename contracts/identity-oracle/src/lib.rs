@@ -112,12 +112,30 @@ impl IdentityOracle {
         false
     }
 
-    pub fn get_vc_count(_env: Env, _subject: Address) -> u32 {
-        panic!("not yet implemented")
+    pub fn get_vc_count(env: Env, subject: Address) -> u32 {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+        anchors.len()
     }
 
-    pub fn verify_vc(_env: Env, _subject: Address, _vc_hash: BytesN<32>) -> bool {
-        panic!("not yet implemented")
+    pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        for record in anchors.iter() {
+            if record.vc_hash == vc_hash && !record.revoked {
+                return true;
+            }
+        }
+        false
     }
 }
 
@@ -190,5 +208,31 @@ mod tests {
         let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://Qm...");
         client.anchor_did(&subject, &cid);
+    }
+
+    #[test]
+    fn test_vc_count_increments_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        assert_eq!(client.get_vc_count(&subject), 0);
+
+        for i in 0..3 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i as u8;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        assert_eq!(client.get_vc_count(&subject), 3);
     }
 }
