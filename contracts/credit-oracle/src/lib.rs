@@ -60,6 +60,14 @@ pub struct ScoringWeights {
     pub repayment_weight: u32,
 }
 
+/// Internal repayment counters for a subject
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentRecord {
+    pub on_time_count: u32,
+    pub total_count: u32,
+}
+
 #[contract]
 pub struct CreditOracle;
 
@@ -103,13 +111,28 @@ impl CreditOracle {
     }
 
     /// Update transaction statistics for a user
-    pub fn update_tx_stats(_env: Env, _user: Address, _stats: TxStats) {
-        panic!("not implemented");
+    pub fn update_tx_stats(env: Env, feeder: Address, subject: Address, stats: TxStats) {
+        feeder.require_auth();
+        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+            panic!("feeder not registered");
+        }
+        env.storage().persistent().set(&DataKey::TxStats(subject), &stats);
     }
 
     /// Record a repayment event for a user
-    pub fn record_repayment(_env: Env, _user: Address, _amount: i128, _on_time: bool) {
-        panic!("not implemented");
+    pub fn record_repayment(env: Env, lender: Address, subject: Address, _amount: i128, on_time: bool) {
+        lender.require_auth();
+        if !env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+            panic!("lender not registered");
+        }
+        let mut record: RepaymentRecord = env.storage().persistent()
+            .get(&DataKey::RepaymentRecord(subject.clone()))
+            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+        if on_time {
+            record.on_time_count += 1;
+        }
+        record.total_count += 1;
+        env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
     }
 
     /// Compute and store credit score for a user
@@ -189,4 +212,59 @@ mod tests {
         });
         assert!(is_trusted);
     }
+
+    #[test]
+    fn test_tx_stats_stored_and_retrieved() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 5000,
+            tx_count_30d: 10,
+            avg_counterparties: 3,
+        });
+
+        let stored: TxStats = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::TxStats(subject.clone())).unwrap()
+        });
+        assert_eq!(stored.volume_30d, 5000);
+        assert_eq!(stored.tx_count_30d, 10);
+    }
+
+    #[test]
+    fn test_repayment_rate_calculated_correctly() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        for _ in 0..8 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+        for _ in 0..2 {
+            client.record_repayment(&lender, &subject, &1000, &false);
+        }
+
+        let record: RepaymentRecord = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::RepaymentRecord(subject.clone())).unwrap()
+        });
+        let rate = record.on_time_count * 10000 / record.total_count;
+        assert_eq!(rate, 8000);
+    }
 }
+
