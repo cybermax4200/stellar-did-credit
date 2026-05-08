@@ -7,5 +7,12 @@ members = [
 ]
 resolver = "2"
 
+[profile.release]
+overflow-checks = true
+opt-level = "z"
+lto = true
+codegen-units = 1
+
 [workspace.dependencies]
-soroban-sdk = { version = "22.0.0", features = ["testutils"] }
+soroban-sdk = { version = "22.0.0" }
+soroban-sdk-testutils = { package = "soroban-sdk", version = "22.0.0", features = ["testutils"] }

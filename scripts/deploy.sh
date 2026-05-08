@@ -5,7 +5,7 @@ NETWORK="testnet"
 SOURCE="deployer"
 
 echo "Building contracts..."
-cargo build --target wasm32-unknown-unknown --release
+stellar contract build
 
 echo "Deploying identity-oracle..."
 IDENTITY_ID=$(stellar contract deploy \

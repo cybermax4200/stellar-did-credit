@@ -14,4 +14,4 @@ dist/
 Thumbs.db
 
 # Deployment artifacts
-deployments.testnet.json
+# deployments.testnet.json  (tracked in repo)
