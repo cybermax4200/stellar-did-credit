@@ -162,11 +162,10 @@ impl CreditOracle {
 
         let vc_score = (vc_count * 20).min(100);
         let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
-        let repay_score = if repayment.total_count == 0 {
-            0
-        } else {
-            (repayment.on_time_count * 10000 / repayment.total_count) / 100
-        };
+        let repay_score = (repayment.on_time_count * 10000)
+            .checked_div(repayment.total_count)
+            .map(|r| r / 100)
+            .unwrap_or(0);
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
         let composite = (vc_score * weights.vc_weight
@@ -180,8 +179,9 @@ impl CreditOracle {
             score,
             last_updated: env.ledger().timestamp(),
             vc_count,
-            repayment_rate: if repayment.total_count == 0 { 0 }
-                            else { repayment.on_time_count * 10000 / repayment.total_count },
+            repayment_rate: (repayment.on_time_count * 10000)
+                                .checked_div(repayment.total_count)
+                                .unwrap_or(0),
             tx_volume_30d: tx_stats.volume_30d,
         });
 

@@ -99,7 +99,7 @@ impl IdentityOracle {
     pub fn mark_vc_revoked(env: Env, issuer: Address, subject: Address, vc_hash: BytesN<32>) {
         issuer.require_auth();
         let key = DataKey::VCAnchors(subject);
-        let mut anchors: Vec<VCRecord> = env
+        let anchors: Vec<VCRecord> = env
             .storage()
             .persistent()
             .get(&key)
