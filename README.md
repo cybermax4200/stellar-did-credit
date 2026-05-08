@@ -2,57 +2,405 @@
 
 # stellar-did-credit
 
-stellar-did-credit is an open protocol built on Stellar and Soroban that lets individuals build a verifiable, self-sovereign credit identity on-chain. It combines decentralised identifiers (DIDs) with on-chain credit attestations so that any wallet address can accumulate a portable, tamper-proof credit history without relying on a centralised bureau.
+A decentralized identity and credit scoring protocol built on Stellar. Users own their financial identity as a cryptographic keypair, collect verifiable credentials from trusted issuers, and receive a portable credit score computed transparently on-chain — no bank account required, no central credit bureau.
 
-The protocol addresses a fundamental gap in global financial inclusion: roughly 1.4 billion adults worldwide have no access to formal banking and therefore no way to prove creditworthiness to lenders, landlords, or employers. Because their financial behaviour — repaying informal loans, paying rent on time, running a small business — is never recorded in a system that others can verify, they are locked out of the credit economy entirely. stellar-did-credit gives those individuals a way to anchor real-world financial behaviour to a DID they control, making their credit history portable, auditable, and independent of any single institution.
+**Status:** This project is in active development and participates in the [Stellar Wave Program on Drips](https://drips.network). Contributors earn USDC rewards for resolving labeled issues. See [Contributing](#contributing) to get started.
 
-## Status
+## Table of contents
 
-| Component           | Status                                      |
-| ------------------- | ------------------------------------------- |
-| identity-oracle     | ✅ Complete                                 |
-| credit-oracle       | ✅ Complete                                 |
-| revocation-registry | ✅ Complete                                 |
-| TypeScript SDK      | 🚧 In progress (`getScore` done, rest open) |
-| CLI tool            | 📋 Planned                                  |
+- [The problem](#the-problem)
+- [How it works](#how-it-works)
+- [Architecture](#architecture)
+- [Contracts](#contracts)
+- [Deployed contracts](#deployed-contracts)
+- [Scoring formula](#scoring-formula)
+- [Quick start](#quick-start)
+- [Running tests](#running-tests)
+- [Project structure](#project-structure)
+- [TypeScript SDK](#typescript-sdk)
+- [Roadmap](#roadmap)
+- [Contributing](#contributing)
+- [License](#license)
+
+---
+
+## The problem
+
+1.4 billion people worldwide are unbanked. Hundreds of millions more are underbanked — they have access to basic accounts but cannot access credit because they have no verifiable financial history. Traditional credit bureaus require years of formal banking records. A smallholder farmer in Nigeria, a gig worker in Kenya, or a merchant in the Philippines may have a decade of reliable financial behavior with zero way to prove it to a lender.
+
+The result: credit is either unavailable or predatory. Lenders price in maximum risk because they cannot assess individual risk. Borrowers pay the cost.
+
+This protocol flips the model. Identity and financial history are owned by the individual, anchored on a public ledger, and verifiable by any lender without a central intermediary.
+
+---
+
+## How it works
+
+The protocol has three steps:
+
+**1. Get a decentralized identity (DID)**
+A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a DID document to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity.
+
+**2. Collect verifiable credentials (VCs)**
+Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
+
+**3. Credit score computed on-chain**
+The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed and upgradeable.
+
+---
+
+## Architecture
+
+```mermaid
+graph TB
+    subgraph Off-chain
+        USER[User / DID keypair]
+        ISSUER[Credential Issuer]
+        IPFS[(IPFS — DID docs & VCs)]
+    end
+
+    subgraph Stellar Ledger
+        IO[identity-oracle\nDID anchor · VC hash registry]
+        CO[credit-oracle\nScore computation · Repayment history]
+        RR[revocation-registry\nVC status list]
+    end
+
+    subgraph Consumers
+        LENDER[DeFi Lender]
+        ANCHOR[Stellar Anchor]
+        VERIFIER[Third-party Verifier]
+    end
+
+    USER    -->|anchor_did CID| IO
+    ISSUER  -->|anchor_vc hash| IO
+    ISSUER  -->|store full VC| IPFS
+    USER    -->|store DID doc| IPFS
+    IO      -->|is_verified check| CO
+    RR      -->|revocation check| IO
+    ISSUER  -->|revoke| RR
+    CO      -->|get_score| LENDER
+    CO      -->|get_score| ANCHOR
+    IO      -->|verify_vc| VERIFIER
+```
+
+---
+
+## Contracts
+
+The protocol is composed of three Soroban smart contracts deployed on the Stellar network.
+
+### identity-oracle
+
+Manages decentralized identifiers and verifiable credential anchoring.
+
+| Function                                    | Description                                    |
+| ------------------------------------------- | ---------------------------------------------- |
+| `initialize(admin)`                         | Sets the contract admin                        |
+| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
+| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
+| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
+| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
+| `get_vc_count(subject)`                     | Returns the number of anchored VCs             |
+| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid          |
+| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                          |
+
+### credit-oracle
+
+Computes and stores credit scores based on on-chain data.
+
+| Function                                             | Description                                        |
+| ---------------------------------------------------- | -------------------------------------------------- |
+| `initialize(admin)`                                  | Sets admin and default scoring weights (40/30/30)  |
+| `register_feeder(admin, feeder)`                     | Registers a trusted transaction stats feeder       |
+| `register_lender(admin, lender)`                     | Registers a trusted lender for repayment recording |
+| `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
+| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
+| `compute_score(subject)`                             | Computes and persists the credit score             |
+| `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
+| `update_weights(weights)`                            | Updates scoring weights (must sum to 100)          |
+
+### revocation-registry
+
+Maintains an on-chain list of revoked credential hashes.
+
+| Function                          | Description                                     |
+| --------------------------------- | ----------------------------------------------- |
+| `initialize(admin)`               | Sets the contract admin                         |
+| `revoke(issuer, vc_hash)`         | Revokes a credential by hash                    |
+| `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
+| `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
+
+---
+
+## Deployed contracts
+
+### Testnet
+
+| Contract            | Address                                                    | Explorer                                                                                                          |
+| ------------------- | ---------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| identity-oracle     | `CATORJPJOUUAH43UVY5WTVW4LF564XGINFPKXACD2DN2VDUXLPOEO26G` | [view](https://stellar.expert/explorer/testnet/contract/CATORJPJOUUAH43UVY5WTVW4LF564XGINFPKXACD2DN2VDUXLPOEO26G) |
+| credit-oracle       | `CBMMX6GJPEGOAQWDXP37RUQMFKWHFH2Z7NXBQA52VV34D2WZHTWTQNAP` | [view](https://stellar.expert/explorer/testnet/contract/CBMMX6GJPEGOAQWDXP37RUQMFKWHFH2Z7NXBQA52VV34D2WZHTWTQNAP) |
+| revocation-registry | `CDNQLXKKECN3AOWWA55KB5MLLDIKKP7S62O3SNVTBSREV3YQI6EAOVQ7` | [view](https://stellar.expert/explorer/testnet/contract/CDNQLXKKECN3AOWWA55KB5MLLDIKKP7S62O3SNVTBSREV3YQI6EAOVQ7) |
+
+Full deployment record: [deployments.testnet.json](deployments.testnet.json). Run `bash scripts/deploy.sh` to deploy your own instance.
+
+---
+
+## Scoring formula
+
+The credit score ranges from 300 (no history) to 850 (exceptional). It is computed from three weighted components:
+
+```
+vc_score    = min(vc_count × 20, 100)
+tx_score    = min(volume_30d_stroops ÷ 100_000_000, 100)   # 1 point per XLM, cap 100
+repay_score = (on_time_count × 10000 ÷ total_count) ÷ 100  # 0–100, integer division
+
+composite   = (vc_score × vc_weight
+             + tx_score × tx_weight
+             + repay_score × repayment_weight) ÷ 100
+
+final_score = clamp(300 + composite × 550 ÷ 100, 300, 850)
+```
+
+Default weights: `vc_weight = 40`, `tx_weight = 30`, `repayment_weight = 30`
+
+**Example scores** (all arithmetic uses integer division, matching the contract):
+
+| Profile     | VCs | 30d Volume | Repayment rate | Score |
+| ----------- | --- | ---------- | -------------- | ----- |
+| New user    | 0   | 0 XLM      | —              | 300   |
+| Early stage | 1   | 5 XLM      | 70%            | 465   |
+| Established | 2   | 20 XLM     | 85%            | 558   |
+| Strong      | 3   | 50 XLM     | 95%            | 668   |
+| Exceptional | 5   | 100+ XLM   | 100%           | 850   |
+
+Full formula documentation with worked examples: [docs/scoring-spec.md](docs/scoring-spec.md)
+
+---
 
 ## Quick start
 
+### Prerequisites
+
+- Rust stable — `rustup update stable`
+- `stellar-cli` 21+ — `cargo install --locked stellar-cli --features opt`
+- Node.js 18+ and pnpm — `npm install -g pnpm`
+- A funded Stellar testnet account — `stellar keys generate --global deployer --network testnet`
+
+### Setup
+
 ```bash
+# Clone the repo
 git clone https://github.com/cybermax4200/stellar-did-credit
 cd stellar-did-credit
-cargo test --workspace
+
+# Install TypeScript dependencies
 pnpm install
+
+# Build and test Rust contracts
+cargo test --workspace
 ```
 
-All 21 contract tests should pass. The TypeScript SDK lives in `packages/sdk` — see [packages/sdk/README.md](packages/sdk/README.md) for usage.
+### Deploy to testnet
 
-## Deployed contracts (Stellar testnet)
+```bash
+# Fund your deployer key
+curl "https://friendbot.stellar.org/?addr=$(stellar keys address deployer)"
 
-| Contract            | Address                                                  | Explorer                                                                                                          |
-| ------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| identity-oracle     | CATORJPJOUUAH43UVY5WTVW4LF564XGINFPKXACD2DN2VDUXLPOEO26G | [view](https://stellar.expert/explorer/testnet/contract/CATORJPJOUUAH43UVY5WTVW4LF564XGINFPKXACD2DN2VDUXLPOEO26G) |
-| credit-oracle       | CBMMX6GJPEGOAQWDXP37RUQMFKWHFH2Z7NXBQA52VV34D2WZHTWTQNAP | [view](https://stellar.expert/explorer/testnet/contract/CBMMX6GJPEGOAQWDXP37RUQMFKWHFH2Z7NXBQA52VV34D2WZHTWTQNAP) |
-| revocation-registry | CDNQLXKKECN3AOWWA55KB5MLLDIKKP7S62O3SNVTBSREV3YQI6EAOVQ7 | [view](https://stellar.expert/explorer/testnet/contract/CDNQLXKKECN3AOWWA55KB5MLLDIKKP7S62O3SNVTBSREV3YQI6EAOVQ7) |
+# Deploy all three contracts
+bash scripts/deploy.sh
+```
 
-Full deployment record: [deployments.testnet.json](deployments.testnet.json)
+Contract addresses will be saved to `deployments.testnet.json`.
 
-## Documentation
+---
 
-- [Architecture overview](docs/architecture.md) — contract design, storage layout, data flow
-- [Scoring specification](docs/scoring-spec.md) — formula, worked examples, edge cases
-- [DID spec](docs/did-spec.md) — DID document format and anchoring conventions
+## Running tests
+
+```bash
+# Run all contract tests (21 tests across 4 crates)
+cargo test --workspace
+
+# Run with output for debugging
+cargo test --workspace -- --nocapture
+
+# Lint check
+cargo clippy --workspace -- -D warnings
+
+# Run a specific contract's tests
+cargo test -p identity-oracle
+cargo test -p credit-oracle
+cargo test -p revocation-registry
+
+# Run integration tests only
+cargo test -p integration-tests
+```
+
+All tests use Soroban's built-in testutils — no live network required.
+
+---
+
+## Project structure
+
+```
+stellar-did-credit/
+├── contracts/
+│   ├── identity-oracle/
+│   │   └── src/lib.rs          # DID anchor + VC hash registry
+│   ├── credit-oracle/
+│   │   └── src/lib.rs          # Score computation + repayment history
+│   ├── revocation-registry/
+│   │   └── src/lib.rs          # VC status list
+│   └── tests/
+│       └── src/integration_test.rs  # Cross-contract integration tests
+├── packages/
+│   └── sdk/
+│       └── src/index.ts        # TypeScript SDK
+├── docs/
+│   ├── architecture.md         # Full component breakdown
+│   ├── did-spec.md             # DID method specification
+│   └── scoring-spec.md         # Scoring formula + worked examples
+├── scripts/
+│   └── deploy.sh               # Testnet deployment script
+├── Cargo.toml                  # Workspace root
+├── pnpm-workspace.yaml
+├── CONTRIBUTING.md
+└── LICENSE                     # Apache-2.0
+```
+
+---
+
+## TypeScript SDK
+
+The `@stellar-did-credit/sdk` package provides a typed client for interacting with all three contracts from a TypeScript application.
+
+```typescript
+import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
+
+const sdk = new StellarDIDCreditSDK({
+  identityOracleId: "CATORJPJOUUAH43UVY5WTVW4LF564XGINFPKXACD2DN2VDUXLPOEO26G",
+  creditOracleId: "CBMMX6GJPEGOAQWDXP37RUQMFKWHFH2Z7NXBQA52VV34D2WZHTWTQNAP",
+  revocationRegistryId:
+    "CDNQLXKKECN3AOWWA55KB5MLLDIKKP7S62O3SNVTBSREV3YQI6EAOVQ7",
+  networkPassphrase: "Test SDF Network ; September 2015",
+  rpcUrl: "https://soroban-testnet.stellar.org",
+});
+
+// Read a credit score (read-only, no fees)
+const score = await sdk.getScore("G...");
+console.log(score.score); // e.g. 612
+```
+
+### SDK status
+
+| Method                           | Status                                                                            |
+| -------------------------------- | --------------------------------------------------------------------------------- |
+| `getScore(address)`              | ✅ Implemented                                                                    |
+| `isVerified(address)`            | 🚧 Open — [Issue #9](https://github.com/cybermax4200/stellar-did-credit/issues/9) |
+| `anchorDID(keypair, cid)`        | 🚧 Open — [Issue #7](https://github.com/cybermax4200/stellar-did-credit/issues/7) |
+| `issueVC(issuer, subject, hash)` | 🚧 Open — [Issue #8](https://github.com/cybermax4200/stellar-did-credit/issues/8) |
+| `verifyVC(subject, hash)`        | 🚧 Open — [Issue #9](https://github.com/cybermax4200/stellar-did-credit/issues/9) |
+| `revokeVC(issuer, hash)`         | 📋 Planned                                                                        |
+
+---
+
+## Component status
+
+| Component               | Status         | Notes                                                                     |
+| ----------------------- | -------------- | ------------------------------------------------------------------------- |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                      |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                           |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                |
+| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open                                                |
+| CLI tool                | 📋 Planned     | [Issue #10](https://github.com/cybermax4200/stellar-did-credit/issues/10) |
+| Cross-contract vc_count | 📋 Planned     | [Issue #13](https://github.com/cybermax4200/stellar-did-credit/issues/13) |
+| ZK proof layer          | 📋 Research    | [Issue #11](https://github.com/cybermax4200/stellar-did-credit/issues/11) |
+| Governance contract     | 📋 Planned     | [Issue #12](https://github.com/cybermax4200/stellar-did-credit/issues/12) |
+
+---
+
+## Roadmap
+
+**Phase 1 — Foundation (current)**
+Three core contracts deployed on testnet. TypeScript SDK for score reading. Passing CI.
+
+**Phase 2 — SDK & tooling (contributors)**
+Full TypeScript SDK with DID creation, VC issuance, and revocation. CLI tool for developers.
+
+**Phase 3 — Cross-contract integration**
+credit-oracle reads `vc_count` directly from identity-oracle via cross-contract call. Score freshness enforcement.
+
+**Phase 4 — Privacy layer**
+ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials.
+
+**Phase 5 — Governance**
+DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
+
+**Phase 6 — Mainnet**
+Security audit. Mainnet deployment. Issuer onboarding program.
+
+---
 
 ## Contributing
 
-This project participates in the Stellar Wave Program on Drips. Contributors earn USDC rewards for resolving labeled issues. See [CONTRIBUTING.md](CONTRIBUTING.md) and the open issues below to get started.
+This project participates in the Stellar Wave Program on Drips. Contributors earn USDC rewards by resolving labeled GitHub issues during weekly sprints.
 
-### Open issues
+### How to contribute
 
-| #                                                                   | Title                                                            | Label              |
-| ------------------------------------------------------------------- | ---------------------------------------------------------------- | ------------------ |
-| [#7](https://github.com/cybermax4200/stellar-did-credit/issues/7)   | Implement `anchorDID()` in TypeScript SDK                        | `good first issue` |
-| [#8](https://github.com/cybermax4200/stellar-did-credit/issues/8)   | Implement `issueVC()` in TypeScript SDK                          | `good first issue` |
-| [#9](https://github.com/cybermax4200/stellar-did-credit/issues/9)   | Implement `verifyVC()` and `isVerified()` in TypeScript SDK      | `good first issue` |
-| [#10](https://github.com/cybermax4200/stellar-did-credit/issues/10) | Build CLI tool (`stellar-did` binary)                            | `enhancement`      |
-| [#11](https://github.com/cybermax4200/stellar-did-credit/issues/11) | Cross-contract: credit-oracle calls identity-oracle for vc_count | `enhancement`      |
+1. Browse open issues — look for `good first issue` to start
+2. Comment on the issue to signal you're working on it
+3. Fork the repo and create a branch: `git checkout -b feat/your-feature`
+4. Write your code with tests — `cargo test --workspace` must pass
+5. Open a pull request referencing the issue number
+
+### Issue complexity levels
+
+| Label     | Points  | Typical scope                                               |
+| --------- | ------- | ----------------------------------------------------------- |
+| `trivial` | 100 pts | Single function, clear spec, minimal context needed         |
+| `medium`  | 150 pts | Multiple functions or cross-package work                    |
+| `high`    | 200 pts | New contract feature, ZK work, or architecture-level change |
+
+### Development requirements
+
+- `cargo clippy --workspace -- -D warnings` must pass with zero warnings
+- Every public contract function must have a `///` doc comment
+- New functions require at least one test
+- No `unwrap()` in contract logic — use `expect("descriptive message")`
+- Conventional commit messages: `feat:`, `fix:`, `test:`, `docs:`, `chore:`
+
+Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
+
+### Open issues for Wave contributors
+
+| #                                                                   | Title                                                               | Complexity |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------- | ---------- |
+| [#7](https://github.com/cybermax4200/stellar-did-credit/issues/7)   | Implement `anchorDID()` in TypeScript SDK                           | Medium     |
+| [#8](https://github.com/cybermax4200/stellar-did-credit/issues/8)   | Implement `issueVC()` in TypeScript SDK                             | Medium     |
+| [#9](https://github.com/cybermax4200/stellar-did-credit/issues/9)   | Implement `verifyVC()` and `isVerified()` in TypeScript SDK         | Trivial    |
+| [#10](https://github.com/cybermax4200/stellar-did-credit/issues/10) | Build `stellar-id did create` CLI command                           | Medium     |
+| [#11](https://github.com/cybermax4200/stellar-did-credit/issues/11) | ZK proof research spike for score disclosure                        | High       |
+| [#12](https://github.com/cybermax4200/stellar-did-credit/issues/12) | Design governance contract for weight updates                       | High       |
+| [#13](https://github.com/cybermax4200/stellar-did-credit/issues/13) | Cross-contract: credit-oracle reads `vc_count` from identity-oracle | High       |
+| [#14](https://github.com/cybermax4200/stellar-did-credit/issues/14) | Add score freshness check and recompute trigger                     | Medium     |
+| [#15](https://github.com/cybermax4200/stellar-did-credit/issues/15) | Write issuer onboarding guide                                       | Trivial    |
+| [#16](https://github.com/cybermax4200/stellar-did-credit/issues/16) | Integration test: full flow against live testnet                    | Medium     |
+
+### Resources
+
+- [Stellar Developer Docs](https://developers.stellar.org)
+- [Soroban Smart Contracts](https://soroban.stellar.org)
+- [W3C DID Specification](https://www.w3.org/TR/did-core/)
+- [W3C Verifiable Credentials](https://www.w3.org/TR/vc-data-model/)
+- [Stellar Laboratory](https://laboratory.stellar.org)
+- [Stellar Expert (Testnet Explorer)](https://stellar.expert/explorer/testnet)
+- [Drips Wave Program](https://drips.network)
+- [Project Architecture](docs/architecture.md)
+- [Scoring Specification](docs/scoring-spec.md)
+- [DID Method Specification](docs/did-spec.md)
+
+---
+
+## License
+
+Apache License 2.0 — see [LICENSE](LICENSE) for full text.
