@@ -12,8 +12,8 @@
 ```bash
 git clone https://github.com/cybermax4200/stellar-did-credit.git
 cd stellar-did-credit
-cargo build --workspace
 pnpm install
+cargo test --workspace
 ```
 
 ## Running tests
