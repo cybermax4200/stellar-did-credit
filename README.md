@@ -103,6 +103,7 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | `get_vc_count(subject)`                     | Returns the number of anchored VCs             |
 | `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid          |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                          |
+| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place            |
 
 ### credit-oracle
 
@@ -118,6 +119,7 @@ Computes and stores credit scores based on on-chain data.
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns `Option<ScoreRecord>` — `None` if score not yet computed |
 | `update_weights(weights)`                            | Updates scoring weights (must sum to 100)          |
+| `upgrade(admin, new_wasm_hash)`                      | Upgrades the contract WASM in-place                |
 
 ### revocation-registry
 
@@ -129,6 +131,7 @@ Maintains an on-chain list of revoked credential hashes.
 | `revoke(issuer, vc_hash)`         | Revokes a credential by hash                    |
 | `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
 | `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
+| `upgrade(admin, new_wasm_hash)`   | Upgrades the contract WASM in-place             |
 
 ---
 

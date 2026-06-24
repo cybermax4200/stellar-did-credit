@@ -55,6 +55,16 @@ impl RevocationRegistry {
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
     }
+
+    /// Upgrade the contract WASM in-place, preserving address and all stored state
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        let stored_admin: Address = env.storage().instance().get(&RevocationKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
 }
 
 #[cfg(test)]

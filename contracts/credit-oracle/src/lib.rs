@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env};
 
 /// Storage keys for the credit oracle contract
 #[contracttype]
@@ -209,6 +209,16 @@ impl CreditOracle {
             .instance()
             .get(&DataKey::Config)
             .unwrap()
+    }
+
+    /// Upgrade the contract WASM in-place, preserving address and all stored state
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
 
