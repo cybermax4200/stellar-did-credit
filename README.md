@@ -39,7 +39,7 @@ This protocol flips the model. Identity and financial history are owned by the i
 The protocol has three steps:
 
 **1. Get a decentralized identity (DID)**
-A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a DID document to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity.
+A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a [DID document](docs/did-spec.md#23-complete-example-document) to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity. See [DID Document Schema](docs/did-spec.md#2-did-document-schema) for the required JSON-LD structure.
 
 **2. Collect verifiable credentials (VCs)**
 Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
