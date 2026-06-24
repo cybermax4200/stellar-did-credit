@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
 
 /// Storage keys for the credit oracle contract
 #[contracttype]
@@ -20,6 +20,10 @@ pub enum DataKey {
     Score(Address),
     /// Cached VC count for a user
     VcCount(Address),
+    /// Pending weights proposed by admin
+    PendingWeights,
+    /// Ledger number when pending weights become effective
+    PendingWeightsEffectiveLedger,
 }
 
 /// Credit score record with metadata
@@ -60,6 +64,16 @@ pub struct ScoringWeights {
     pub tx_weight: u32,
     /// Weight for repayment history component
     pub repayment_weight: u32,
+}
+
+/// Pending weights proposal with timelock
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingWeightsRecord {
+    /// Proposed weights
+    pub weights: ScoringWeights,
+    /// Ledger number when these weights become effective
+    pub effective_ledger: u32,
 }
 
 /// Internal repayment counters for a subject
@@ -205,12 +219,72 @@ impl CreditOracle {
         env.storage().instance().set(&DataKey::Config, &weights);
     }
 
+    /// Propose new weights with timelock (~24 hours)
+    pub fn propose_weights(env: Env, admin: Address, weights: ScoringWeights) {
+        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+            panic!("weights must sum to 100");
+        }
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+
+        const TIMELOCK_LEDGERS: u32 = 17280; // approximately 24 hours at 5-second blocks
+        let current_ledger = env.ledger().sequence();
+        let effective_ledger = current_ledger + TIMELOCK_LEDGERS;
+
+        let pending = PendingWeightsRecord {
+            weights: weights.clone(),
+            effective_ledger,
+        };
+
+        env.storage().instance().set(&DataKey::PendingWeights, &pending);
+        env.events().publish(
+            (symbol_short!("WtProp"),),
+            (weights.vc_weight, weights.tx_weight, weights.repayment_weight, effective_ledger),
+        );
+    }
+
+    /// Apply pending weights after timelock expires
+    pub fn apply_weights(env: Env, admin: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+
+        let pending: PendingWeightsRecord = env.storage()
+            .instance()
+            .get(&DataKey::PendingWeights)
+            .expect("no pending weights");
+
+        let current_ledger = env.ledger().sequence();
+        if current_ledger < pending.effective_ledger {
+            panic!("timelock not yet expired");
+        }
+
+        let weights = pending.weights.clone();
+        env.storage().instance().set(&DataKey::Config, &weights);
+        env.storage().instance().remove(&DataKey::PendingWeights);
+
+        env.events().publish(
+            (symbol_short!("WtApply"),),
+            (weights.vc_weight, weights.tx_weight, weights.repayment_weight),
+        );
+    }
+
     /// Get current scoring weights
     pub fn get_scoring_weights(env: Env) -> ScoringWeights {
         env.storage()
             .instance()
             .get(&DataKey::Config)
             .unwrap()
+    }
+
+    /// Get pending weights (if any)
+    pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
+        env.storage().instance().get(&DataKey::PendingWeights)
     }
 }
 
@@ -402,6 +476,82 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         client.update_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
+    }
+
+    #[test]
+    fn test_propose_weights_stores_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let new_weights = ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 };
+        client.propose_weights(&admin, &new_weights);
+
+        let original_weights = client.get_scoring_weights();
+        assert_eq!(original_weights.vc_weight, 40);
+        assert_eq!(original_weights.tx_weight, 30);
+        assert_eq!(original_weights.repayment_weight, 30);
+
+        let pending = client.get_pending_weights();
+        assert!(pending.is_some());
+        let pending_record = pending.unwrap();
+        assert_eq!(pending_record.weights.vc_weight, 50);
+        assert_eq!(pending_record.weights.tx_weight, 30);
+        assert_eq!(pending_record.weights.repayment_weight, 20);
+    }
+
+    #[test]
+    #[should_panic(expected = "timelock not yet expired")]
+    fn test_apply_weights_fails_before_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let new_weights = ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 };
+        client.propose_weights(&admin, &new_weights);
+
+        client.apply_weights(&admin);
+    }
+
+    #[test]
+    fn test_apply_weights_succeeds_after_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let new_weights = ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 };
+        client.propose_weights(&admin, &new_weights);
+
+        env.as_contract(&contract_id, || {
+            let pending: PendingWeightsRecord = env.storage()
+                .instance()
+                .get(&DataKey::PendingWeights)
+                .unwrap();
+            let effective_ledger = pending.effective_ledger;
+
+            env.ledger().with_mut(|mut ledger| {
+                ledger.sequence = effective_ledger;
+            });
+        });
+
+        client.apply_weights(&admin);
+
+        let updated_weights = client.get_scoring_weights();
+        assert_eq!(updated_weights.vc_weight, 50);
+        assert_eq!(updated_weights.tx_weight, 30);
+        assert_eq!(updated_weights.repayment_weight, 20);
     }
 }
 
