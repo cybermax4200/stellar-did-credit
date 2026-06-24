@@ -81,6 +81,8 @@ pub struct CreditOracle;
 #[contractimpl]
 impl CreditOracle {
     /// Initialize the contract with admin and default scoring weights
+    ///
+    /// Security pattern: check_already_initialized → admin.require_auth() → set_admin
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");

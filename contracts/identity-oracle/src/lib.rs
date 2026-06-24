@@ -34,6 +34,9 @@ pub struct IdentityOracle;
 
 #[contractimpl]
 impl IdentityOracle {
+    /// Initialize the contract with an admin address.
+    ///
+    /// Security pattern: check_already_initialized → admin.require_auth() → set_admin
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");

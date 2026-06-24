@@ -30,6 +30,28 @@ cargo test --workspace
 - Follow conventional commit format (see below)
 - Reference the issue number in your PR description
 
+## Auth pattern for initialize functions
+
+All `initialize` functions in protocol contracts **must** follow this exact order:
+
+```rust
+// Security pattern: check_already_initialized → admin.require_auth() → set_admin
+pub fn initialize(env: Env, admin: Address) {
+    if env.storage().instance().has(&DataKey::Admin) {
+        panic!("already initialized");
+    }
+    admin.require_auth();
+    env.storage().instance().set(&DataKey::Admin, &admin);
+}
+```
+
+Rationale:
+1. **Check already-initialized first** — rejects duplicate calls cheaply, before any auth overhead
+2. **`require_auth()` second** — verifies the caller is authorized before any state is written
+3. **Write state last** — storage is only touched after all checks pass
+
+Do not reorder these steps. Inconsistent ordering makes security audits harder and can introduce subtle vulnerabilities. New contract functions that set privileged state must follow the same pattern.
+
 ## Commit format
 
 ```

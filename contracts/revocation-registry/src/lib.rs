@@ -15,6 +15,9 @@ pub struct RevocationRegistry;
 
 #[contractimpl]
 impl RevocationRegistry {
+    /// Initialize the contract with an admin address.
+    ///
+    /// Security pattern: check_already_initialized → admin.require_auth() → set_admin
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&RevocationKey::Admin) {
             panic!("already initialized");
