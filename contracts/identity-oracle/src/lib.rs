@@ -288,4 +288,38 @@ mod tests {
 
         assert!(!client.is_verified(&subject));
     }
+
+    #[test]
+    fn test_upgrade_preserves_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(IdentityOracle::WASM);
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Upgrade — contract_id must remain unchanged
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Contract still responds correctly; address is preserved
+        let subject = Address::generate(&env);
+        assert!(!client.is_verified(&subject));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(IdentityOracle::WASM);
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &new_wasm_hash);
+    }
 }

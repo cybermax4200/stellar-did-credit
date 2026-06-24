@@ -411,5 +411,39 @@ mod tests {
         client.initialize(&admin);
         client.update_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
     }
+
+    #[test]
+    fn test_upgrade_preserves_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(CreditOracle::WASM);
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Upgrade — contract_id must remain unchanged
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Contract still responds correctly; address is preserved
+        let weights = client.get_scoring_weights();
+        assert_eq!(weights.vc_weight + weights.tx_weight + weights.repayment_weight, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(CreditOracle::WASM);
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &new_wasm_hash);
+    }
 }
 

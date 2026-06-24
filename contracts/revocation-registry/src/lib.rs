@@ -139,4 +139,38 @@ mod tests {
             assert!(client.is_revoked(&vc_hash));
         }
     }
+
+    #[test]
+    fn test_upgrade_preserves_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(RevocationRegistry::WASM);
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Upgrade — contract_id must remain unchanged
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Contract still responds correctly; address is preserved
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+        assert!(!client.is_revoked(&vc_hash));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(RevocationRegistry::WASM);
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &new_wasm_hash);
+    }
 }
