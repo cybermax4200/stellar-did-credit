@@ -18,13 +18,50 @@ The DID method name is `stellar`. The method-specific identifier is composed of 
 
 DID documents are JSON-LD files stored on IPFS. They MUST comply with the W3C DID Core specification.
 
-### 2.1 Required Fields
+### 2.1 DID Document Schema
 
-- `id`: The DID itself.
-- `verificationMethod`: An array of public keys used for authentication and verification.
-- `authentication`: References to verification methods allowed for authentication.
+The DID document uses the JSON-LD format to define decentralized identifiers and their associated metadata. All DID documents MUST conform to the W3C DID Core specification.
 
-### 2.2 Example Document
+#### 2.1.1 Core Fields (Required)
+
+| Field | Type | Description | Reference |
+|-------|------|-------------|-----------|
+| `@context` | Array of URIs | JSON-LD contexts that define the vocabulary | [W3C DID Core - Context](https://www.w3.org/TR/did-core/#contexts) |
+| `id` | String (DID) | The DID identifier that corresponds to this document | [W3C DID Core - DID Subject](https://www.w3.org/TR/did-core/#did-subject) |
+| `verificationMethod` | Array of Objects | Array of verification methods used for authentication and verification | [W3C DID Core - Verification Methods](https://www.w3.org/TR/did-core/#verification-methods) |
+| `authentication` | Array of Strings/Objects | Array of references to verification methods for authentication purposes | [W3C DID Core - Authentication](https://www.w3.org/TR/did-core/#authentication) |
+
+#### 2.1.2 Optional Fields
+
+| Field | Type | Description | Reference |
+|-------|------|-------------|-----------|
+| `service` | Array of Objects | Array of service endpoints for interaction | [W3C DID Core - Service Endpoints](https://www.w3.org/TR/did-core/#service-endpoints) |
+| `assertionMethod` | Array of Strings/Objects | Array of references to verification methods used for assertions | [W3C DID Core - Assertion Method](https://www.w3.org/TR/did-core/#assertion) |
+| `keyAgreement` | Array of Strings/Objects | Array of references to verification methods for key agreement | [W3C DID Core - Key Agreement](https://www.w3.org/TR/did-core/#key-agreement) |
+| `capabilityInvocation` | Array of Strings/Objects | Array of references to verification methods for capability invocation | [W3C DID Core - Capability Invocation](https://www.w3.org/TR/did-core/#capability-invocation) |
+| `capabilityDelegation` | Array of Strings/Objects | Array of references to verification methods for capability delegation | [W3C DID Core - Capability Delegation](https://www.w3.org/TR/did-core/#capability-delegation) |
+
+#### 2.1.3 Verification Method Object Structure
+
+Each verification method in the `verificationMethod` array MUST contain:
+
+```json
+{
+  "id": "did:stellar:testnet:GABC123...#keys-1",
+  "type": "Ed25519VerificationKey2020",
+  "controller": "did:stellar:testnet:GABC123...",
+  "publicKeyMultibase": "z6MkmL..."
+}
+```
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `id` | String | Fragment identifier combining the DID and a key identifier |
+| `type` | String | The type of key material (e.g., Ed25519VerificationKey2020) |
+| `controller` | String | The DID that controls this verification method |
+| `publicKeyMultibase` | String | The public key encoded in multibase format |
+
+### 2.2 Complete Example Document
 
 ```json
 {
@@ -32,19 +69,49 @@ DID documents are JSON-LD files stored on IPFS. They MUST comply with the W3C DI
     "https://www.w3.org/ns/did/v1",
     "https://w3id.org/security/suites/ed25519-2020/v1"
   ],
-  "id": "did:stellar:testnet:GABC123...",
+  "id": "did:stellar:testnet:GABC123XYZ789...",
   "verificationMethod": [
     {
-      "id": "did:stellar:testnet:GABC123...#keys-1",
+      "id": "did:stellar:testnet:GABC123XYZ789...#keys-1",
       "type": "Ed25519VerificationKey2020",
-      "controller": "did:stellar:testnet:GABC123...",
-      "publicKeyMultibase": "z6MkmL..."
+      "controller": "did:stellar:testnet:GABC123XYZ789...",
+      "publicKeyMultibase": "z6MkmL7XEep4mNh4xhCB8EXD2xRfB7bqr7V8zEQ8aK9TqzpN"
+    },
+    {
+      "id": "did:stellar:testnet:GABC123XYZ789...#keys-2",
+      "type": "Ed25519VerificationKey2020",
+      "controller": "did:stellar:testnet:GABC123XYZ789...",
+      "publicKeyMultibase": "z6MkjHCYK5qNh7F3Ac9qZ2eqQ4xpN1R5vD3sM2L8nJqZ9Pxk"
     }
   ],
-  "authentication": ["did:stellar:testnet:GABC123...#keys-1"],
-  "assertionMethod": ["did:stellar:testnet:GABC123...#keys-1"]
+  "authentication": [
+    "did:stellar:testnet:GABC123XYZ789...#keys-1"
+  ],
+  "assertionMethod": [
+    "did:stellar:testnet:GABC123XYZ789...#keys-1"
+  ],
+  "keyAgreement": [
+    "did:stellar:testnet:GABC123XYZ789...#keys-2"
+  ],
+  "service": [
+    {
+      "id": "did:stellar:testnet:GABC123XYZ789...#endpoint-1",
+      "type": "VerifiableCredentialService",
+      "serviceEndpoint": "https://issuer.example.com/credentials"
+    }
+  ]
 }
 ```
+
+### 2.3 JSON Schema Validation
+
+The JSON-LD document SHOULD validate against a JSON Schema to ensure structural integrity. Key validation rules:
+
+- The `@context` field MUST be an array containing at minimum `https://www.w3.org/ns/did/v1`
+- The `id` field MUST be a valid DID matching the format `did:stellar:(mainnet|testnet):[A-Z0-9]{56}`
+- All fragments in `verificationMethod[].id` MUST be unique within the document
+- The `controller` field in each verification method MUST reference a valid DID
+- Verification method references in `authentication`, `assertionMethod`, etc. MUST correspond to entries in `verificationMethod`
 
 ## 3. Operations (CRUD)
 
