@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env, Symbol};
 
 /// Storage keys for the credit oracle contract
 #[contracttype]
@@ -116,6 +116,28 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedLender(lender), &true);
+    }
+
+    /// Deregister a trusted feeder address
+    pub fn deregister_feeder(env: Env, admin: Address, feeder: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedFeeder(feeder.clone()));
+        env.events().publish((symbol_short!("FdrDeReg"),), (feeder,));
+    }
+
+    /// Deregister a trusted lender address
+    pub fn deregister_lender(env: Env, admin: Address, lender: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
+        env.events().publish((symbol_short!("LndDeReg"),), (lender,));
     }
 
     /// Update transaction statistics for a user
@@ -519,6 +541,58 @@ mod tests {
         assert_eq!(current_weights.vc_weight, 50);
         assert_eq!(current_weights.tx_weight, 25);
         assert_eq!(current_weights.repayment_weight, 25);
+    }
+
+    #[test]
+    #[should_panic(expected = "feeder not registered")]
+    fn test_deregistered_feeder_cannot_update_tx_stats() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 5000,
+            tx_count_30d: 10,
+            avg_counterparties: 3,
+        });
+
+        client.deregister_feeder(&admin, &feeder);
+
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 6000,
+            tx_count_30d: 11,
+            avg_counterparties: 4,
+        });
+    }
+
+    #[test]
+    #[should_panic(expected = "lender not registered")]
+    fn test_deregistered_lender_cannot_record_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
+
+        client.deregister_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
     }
 }
 
