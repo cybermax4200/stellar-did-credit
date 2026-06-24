@@ -1,4 +1,5 @@
 #![no_std]
+#![warn(missing_docs)]
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, Env};
 
 /// Storage keys for the credit oracle contract
