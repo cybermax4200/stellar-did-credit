@@ -1,6 +1,6 @@
 # Scoring Specification
 
-The credit-oracle contract computes a score in the range **300–850**, matching the conventional credit score scale. The formula is deterministic, fully on-chain, and uses only data that has been explicitly submitted by trusted parties (feeders and lenders).
+The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`MAX_SCORE` (850)**, matching the conventional credit score scale. The formula is deterministic, fully on-chain, and uses only data that has been explicitly submitted by trusted parties (feeders and lenders).
 
 ---
 
@@ -55,10 +55,10 @@ composite = (vc_score × vc_weight + tx_score × tx_weight + repay_score × repa
 The composite is mapped onto the 300–850 range and clamped:
 
 ```
-score = clamp(300 + composite × 550 ÷ 100, 300, 850)
+score = clamp(MIN_SCORE + composite × 550 ÷ 100, MIN_SCORE, MAX_SCORE)
 ```
 
-The 550-point spread means a perfect composite of 100 yields 300 + 550 = 850.
+The 550-point spread means a perfect composite of 100 yields `MIN_SCORE` + 550 = `MAX_SCORE`.
 
 ---
 
@@ -85,10 +85,10 @@ repay_score = 0  (no repayment history)
 
 composite = (0×40 + 0×30 + 0×30) ÷ 100 = 0
 
-score = clamp(300 + 0×550÷100, 300, 850) = 300
+score = clamp(MIN_SCORE + 0×550÷100, MIN_SCORE, MAX_SCORE) = MIN_SCORE
 ```
 
-**Result: 300** — the floor. Every new address starts here.
+**Result: `MIN_SCORE` (300)** — the floor. Every new address starts here.
 
 ---
 

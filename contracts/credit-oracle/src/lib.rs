@@ -70,6 +70,11 @@ pub struct RepaymentRecord {
     pub total_count: u32,
 }
 
+/// Minimum credit score (no history)
+pub const MIN_SCORE: u32 = 300;
+/// Maximum credit score (exceptional history)
+pub const MAX_SCORE: u32 = 850;
+
 #[contract]
 pub struct CreditOracle;
 
@@ -173,7 +178,7 @@ impl CreditOracle {
             + repay_score * weights.repayment_weight)
             / 100;
 
-        let score = (300 + composite * 550 / 100).clamp(300, 850);
+        let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
         env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
             score,
@@ -342,7 +347,7 @@ mod tests {
         client.initialize(&admin);
 
         let score = client.compute_score(&subject);
-        assert_eq!(score, 300);
+        assert_eq!(score, MIN_SCORE);
     }
 
     #[test]
@@ -363,7 +368,7 @@ mod tests {
         }
 
         let score = client.compute_score(&subject);
-        assert!(score > 300);
+        assert!(score > MIN_SCORE);
     }
 
     #[test]
@@ -395,8 +400,8 @@ mod tests {
         }
 
         let score = client.compute_score(&subject);
-        assert!(score >= 300);
-        assert!(score <= 850);
+        assert!(score >= MIN_SCORE);
+        assert!(score <= MAX_SCORE);
     }
 
     #[test]

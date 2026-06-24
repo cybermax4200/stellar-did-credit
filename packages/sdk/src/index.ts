@@ -11,6 +11,9 @@ import {
   xdr,
 } from "@stellar/stellar-sdk";
 
+export const MIN_SCORE = 300;
+export const MAX_SCORE = 850;
+
 export interface ScoreRecord {
   score: number;
   lastUpdated: number;
