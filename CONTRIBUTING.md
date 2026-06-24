@@ -29,6 +29,7 @@ cargo test --workspace
 - Clippy must be clean (`cargo clippy --workspace -- -D warnings`)
 - Follow conventional commit format (see below)
 - Reference the issue number in your PR description
+- Any PR that changes contract behavior, SDK methods, or public APIs must add an entry under `[Unreleased]` in [CHANGELOG.md](../CHANGELOG.md)
 
 ## Commit format
 
