@@ -116,7 +116,7 @@ Computes and stores credit scores based on on-chain data.
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
 | `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
-| `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
+| `get_score(subject)`                                 | Returns `Option<ScoreRecord>` — `None` if score not yet computed |
 | `update_weights(weights)`                            | Updates scoring weights (must sum to 100)          |
 
 ### revocation-registry

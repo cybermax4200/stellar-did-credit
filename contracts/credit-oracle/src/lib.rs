@@ -188,11 +188,9 @@ impl CreditOracle {
         score
     }
 
-    /// Get credit score for a user
-    pub fn get_score(env: Env, subject: Address) -> ScoreRecord {
-        env.storage().persistent()
-            .get(&DataKey::Score(subject))
-            .expect("score not computed")
+    /// Get credit score for a user; returns None if score has not been computed yet
+    pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
+        env.storage().persistent().get(&DataKey::Score(subject))
     }
 
     /// Update scoring weights (must sum to 100)
