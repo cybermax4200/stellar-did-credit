@@ -19,16 +19,49 @@ cargo test --workspace
 ## Running tests
 
 ```bash
-cargo test --workspace
+pnpm test
 ```
+
+This runs all Rust and TypeScript tests. See [Scripts](#scripts) below for details.
+
+## Test snapshots
+
+Soroban tests use snapshots stored in `test_snapshots/` directories to capture expected contract state for deterministic verification. Snapshots are committed alongside code changes to ensure tests remain reproducible across environments.
+
+### Updating snapshots
+
+If you modify a Soroban contract (or its test), the snapshot may change. Update it with:
+
+```bash
+UPDATE_EXPECT=true cargo test --workspace
+```
+
+**Important:** Snapshot files must be committed in the same PR as the code change that causes them to change. Stale snapshots are a common source of CI failures and reviewer confusion.
+
+For more details, see the [Soroban testutils snapshot documentation](https://docs.rs/soroban-sdk/latest/soroban_sdk/testutils/index.html).
+
+## Scripts
+
+Root-level commands for testing, linting, and building all Rust and TypeScript packages:
+
+```bash
+pnpm test    # Run Rust and TypeScript tests
+pnpm lint    # Run Clippy and linters
+pnpm build   # Build Rust and TypeScript packages
+```
+
+Each command:
+- Exits with non-zero status if any sub-command fails
+- Runs Rust tests first, then TypeScript tests
+- Is the recommended way to validate before opening a PR
 
 ## PR guidelines
 
-- One issue per PR
-- All tests must pass (`cargo test --workspace`)
-- Clippy must be clean (`cargo clippy --workspace -- -D warnings`)
+- Link the issue(s) in your PR description
+- All tests must pass (`pnpm test`)
+- Linting must pass (`pnpm lint`)
+- Snapshot files must be committed if code changes them
 - Follow conventional commit format (see below)
-- Reference the issue number in your PR description
 
 ## Commit format
 
