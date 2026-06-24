@@ -28,6 +28,14 @@ export interface ProtocolConfig {
   rpcUrl: string;
 }
 
+/** Thrown when a score has not been computed for the requested address. */
+export class ScoreNotComputedError extends Error {
+  constructor() {
+    super("Score has not been computed for this address. Call computeScore() first.");
+    this.name = "ScoreNotComputedError";
+  }
+}
+
 /** Zero-balance placeholder account used for read-only simulations. */
 const SIM_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
@@ -180,6 +188,7 @@ export class StellarDIDCreditSDK {
    *
    * @param subjectAddress - Stellar G... address of the subject
    * @returns Parsed ScoreRecord
+   * @throws {ScoreNotComputedError} If the score has not been computed for this address
    */
   async getScore(subjectAddress: string): Promise<ScoreRecord> {
     // 1. Create RPC server
@@ -205,6 +214,9 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (sim.error && sim.error.includes("score not computed")) {
+        throw new ScoreNotComputedError();
+      }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
 

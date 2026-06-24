@@ -18,7 +18,7 @@ The DID method name is `stellar`. The method-specific identifier is composed of 
 
 DID documents are JSON-LD files stored on IPFS. They MUST comply with the W3C DID Core specification.
 
-### 2.1 Required Fields
+### 2.1 DID Document Schema
 
 - **`@context`** (array): JSON-LD context URLs. MUST include `https://www.w3.org/ns/did/v1` and any credential-specific contexts (e.g., `https://w3id.org/security/suites/ed25519-2020/v1` for Ed25519 keys).
   - Reference: [W3C DID Core — Context](https://www.w3.org/TR/did-core/#context)
@@ -154,6 +154,16 @@ DID documents are JSON-LD files stored on IPFS. They MUST comply with the W3C DI
   }
 }
 ```
+
+### 2.3 JSON Schema Validation
+
+The JSON-LD document SHOULD validate against a JSON Schema to ensure structural integrity. Key validation rules:
+
+- The `@context` field MUST be an array containing at minimum `https://www.w3.org/ns/did/v1`
+- The `id` field MUST be a valid DID matching the format `did:stellar:(mainnet|testnet):[A-Z0-9]{56}`
+- All fragments in `verificationMethod[].id` MUST be unique within the document
+- The `controller` field in each verification method MUST reference a valid DID
+- Verification method references in `authentication`, `assertionMethod`, etc. MUST correspond to entries in `verificationMethod`
 
 ## 3. Operations (CRUD)
 
