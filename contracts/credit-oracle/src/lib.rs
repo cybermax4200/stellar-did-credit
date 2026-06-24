@@ -160,7 +160,7 @@ impl CreditOracle {
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
-        let vc_score = (vc_count * 20).min(100);
+        let vc_score = vc_count.saturating_mul(20).min(100);
         let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
         let repay_score = (repayment.on_time_count * 10000)
             .checked_div(repayment.total_count)
@@ -402,6 +402,26 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         client.update_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
+    }
+
+    #[test]
+    fn test_vc_score_saturating_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.set_vc_count(&feeder, &subject, &u32::MAX);
+
+        let score = client.compute_score(&subject);
+        assert!(score <= 850);
+        assert!(score >= 300);
     }
 }
 
