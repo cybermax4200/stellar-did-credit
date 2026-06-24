@@ -1,4 +1,5 @@
 #![no_std]
+#![warn(missing_docs)]
 #[allow(unused_imports)]
 use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Vec};
 
@@ -34,6 +35,7 @@ pub struct IdentityOracle;
 
 #[contractimpl]
 impl IdentityOracle {
+    /// Initialize the contract with an administrator address.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&DataKey::Admin) {
             panic!("already initialized");
@@ -42,6 +44,7 @@ impl IdentityOracle {
         env.storage().instance().set(&DataKey::Admin, &admin);
     }
 
+    /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     pub fn register_issuer(env: Env, admin: Address, issuer: Address) {
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         if admin != stored_admin {
@@ -53,6 +56,7 @@ impl IdentityOracle {
             .publish((symbol_short!("IssReg"),), issuer);
     }
 
+    /// Deregister a trusted credential issuer, preventing future credential anchoring.
     pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) {
         let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
         if admin != stored_admin {
@@ -64,6 +68,7 @@ impl IdentityOracle {
             .publish((symbol_short!("IssDeReg"),), issuer);
     }
 
+    /// Anchor a DID document for a subject using an IPFS CID.
     pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) {
         subject.require_auth();
         env.storage()
@@ -73,6 +78,7 @@ impl IdentityOracle {
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
     }
 
+    /// Anchor a verifiable credential (VC) for a subject issued by a trusted issuer.
     pub fn anchor_vc(
         env: Env,
         issuer: Address,
@@ -109,6 +115,7 @@ impl IdentityOracle {
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
     }
 
+    /// Mark a previously anchored VC as revoked by its issuer.
     pub fn mark_vc_revoked(env: Env, issuer: Address, subject: Address, vc_hash: BytesN<32>) {
         issuer.require_auth();
         let key = DataKey::VCAnchors(subject);
@@ -128,6 +135,7 @@ impl IdentityOracle {
         env.storage().persistent().set(&key, &updated);
     }
 
+    /// Check if a subject has at least one non-revoked verifiable credential anchored.
     pub fn is_verified(env: Env, subject: Address) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -144,6 +152,7 @@ impl IdentityOracle {
         false
     }
 
+    /// Get the count of all verifiable credentials (revoked or not) for a subject.
     pub fn get_vc_count(env: Env, subject: Address) -> u32 {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -154,6 +163,7 @@ impl IdentityOracle {
         anchors.len()
     }
 
+    /// Verify if a specific VC hash is anchored and not revoked for a subject.
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env

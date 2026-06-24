@@ -1,12 +1,17 @@
 #![no_std]
+#![warn(missing_docs)]
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
 };
 
+/// Storage keys for revocation registry contract.
 #[contracttype]
 pub enum RevocationKey {
+    /// Contract administrator address.
     Admin,
+    /// Revocation status for a VC hash.
     Status(BytesN<32>),    // vc_hash → bool
+    /// Address of issuer who revoked the VC.
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
 }
 
@@ -15,6 +20,7 @@ pub struct RevocationRegistry;
 
 #[contractimpl]
 impl RevocationRegistry {
+    /// Initialize the revocation registry with an administrator address.
     pub fn initialize(env: Env, admin: Address) {
         if env.storage().instance().has(&RevocationKey::Admin) {
             panic!("already initialized");
@@ -23,6 +29,7 @@ impl RevocationRegistry {
         env.storage().instance().set(&RevocationKey::Admin, &admin);
     }
 
+    /// Revoke a single verifiable credential by its hash.
     pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) {
         issuer.require_auth();
         env.storage()
@@ -35,6 +42,7 @@ impl RevocationRegistry {
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
     }
 
+    /// Check if a verifiable credential has been revoked.
     pub fn is_revoked(env: Env, vc_hash: BytesN<32>) -> bool {
         env.storage()
             .persistent()
@@ -42,6 +50,7 @@ impl RevocationRegistry {
             .unwrap_or(false)
     }
 
+    /// Revoke multiple verifiable credentials in a single batch operation.
     pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) {
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
