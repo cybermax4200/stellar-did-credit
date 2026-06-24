@@ -33,7 +33,7 @@ graph TD
     FEEDER  -->|set_vc_count\nupdate_tx_stats| CR
     APP     -->|record_repayment| CR
     APP     -->|compute_score| CR
-    CR      -.->|future: cross-contract\nget_vc_count| ID
+get_active_vc_count| ID
 
     SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| ID
     SDK     -->|getScore| CR
@@ -58,7 +58,7 @@ Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors f
 | `anchor_vc(issuer, subject, vc_hash)`       | issuer   | Records a SHA-256 hash of an off-chain VC                   |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | issuer   | Marks a specific VC as revoked                              |
 | `is_verified(subject)`                      | anyone   | Returns true if the subject has at least one non-revoked VC |
-| `get_vc_count(subject)`                     | anyone   | Returns total anchored VC count (including revoked)         |
+| `get_active_vc_count(subject)`           | anyone   | Returns anchored VC count excluding revoked entries         |
 | `verify_vc(subject, vc_hash)`               | anyone   | Returns true if a specific VC exists and is not revoked     |
 
 **Storage layout**
@@ -141,8 +141,9 @@ sequenceDiagram
     participant IdentityOracle
 
     Caller->>CreditOracle: compute_score(subject)
-    CreditOracle->>IdentityOracle: get_vc_count(subject)
+    CreditOracle->>IdentityOracle: get_active_vc_count(subject)
     IdentityOracle-->>CreditOracle: u32
+
     CreditOracle->>CreditOracle: run scoring formula
     CreditOracle-->>Caller: score: u32
 ```

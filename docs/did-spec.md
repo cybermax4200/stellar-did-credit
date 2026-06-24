@@ -14,54 +14,43 @@ The DID method name is `stellar`. The method-specific identifier is composed of 
 **Example:**
 `did:stellar:testnet:GABC123...`
 
-## 2. DID Document Structure
+## 2. DID Document Schema
 
 DID documents are JSON-LD files stored on IPFS. They MUST comply with the W3C DID Core specification.
 
 ### 2.1 DID Document Schema
 
-The DID document uses the JSON-LD format to define decentralized identifiers and their associated metadata. All DID documents MUST conform to the W3C DID Core specification.
+- **`@context`** (array): JSON-LD context URLs. MUST include `https://www.w3.org/ns/did/v1` and any credential-specific contexts (e.g., `https://w3id.org/security/suites/ed25519-2020/v1` for Ed25519 keys).
+  - Reference: [W3C DID Core — Context](https://www.w3.org/TR/did-core/#context)
 
-#### 2.1.1 Core Fields (Required)
+- **`id`** (string): The DID identifier. MUST match the DID being resolved: `did:stellar:<network>:<account_address>`. This prevents substitution attacks.
+  - Reference: [W3C DID Core — Identifier](https://www.w3.org/TR/did-core/#did-identifier)
 
-| Field | Type | Description | Reference |
-|-------|------|-------------|-----------|
-| `@context` | Array of URIs | JSON-LD contexts that define the vocabulary | [W3C DID Core - Context](https://www.w3.org/TR/did-core/#contexts) |
-| `id` | String (DID) | The DID identifier that corresponds to this document | [W3C DID Core - DID Subject](https://www.w3.org/TR/did-core/#did-subject) |
-| `verificationMethod` | Array of Objects | Array of verification methods used for authentication and verification | [W3C DID Core - Verification Methods](https://www.w3.org/TR/did-core/#verification-methods) |
-| `authentication` | Array of Strings/Objects | Array of references to verification methods for authentication purposes | [W3C DID Core - Authentication](https://www.w3.org/TR/did-core/#authentication) |
+- **`verificationMethod`** (array): An array of public keys and cryptographic material used for authentication and verification. Each entry describes one key with:
+  - `id` (string): Unique identifier for this method, typically `<did>#<fragment>` (e.g., `did:stellar:testnet:GABC123...#keys-1`).
+  - `type` (string): The cryptographic suite type (e.g., `Ed25519VerificationKey2020`).
+  - `controller` (string): The DID that controls this key, typically the subject's own DID.
+  - `publicKeyMultibase` (string): The public key encoded in multibase format (e.g., `z6MkmL...` for Ed25519).
+  - Reference: [W3C DID Core — Verification Method](https://www.w3.org/TR/did-core/#verification-method)
 
-#### 2.1.2 Optional Fields
+- **`authentication`** (array): An array of references to verification methods in this document that are allowed for authentication. Typically references entries from `verificationMethod` by their `id`.
+  - Reference: [W3C DID Core — Authentication](https://www.w3.org/TR/did-core/#authentication)
 
-| Field | Type | Description | Reference |
-|-------|------|-------------|-----------|
-| `service` | Array of Objects | Array of service endpoints for interaction | [W3C DID Core - Service Endpoints](https://www.w3.org/TR/did-core/#service-endpoints) |
-| `assertionMethod` | Array of Strings/Objects | Array of references to verification methods used for assertions | [W3C DID Core - Assertion Method](https://www.w3.org/TR/did-core/#assertion) |
-| `keyAgreement` | Array of Strings/Objects | Array of references to verification methods for key agreement | [W3C DID Core - Key Agreement](https://www.w3.org/TR/did-core/#key-agreement) |
-| `capabilityInvocation` | Array of Strings/Objects | Array of references to verification methods for capability invocation | [W3C DID Core - Capability Invocation](https://www.w3.org/TR/did-core/#capability-invocation) |
-| `capabilityDelegation` | Array of Strings/Objects | Array of references to verification methods for capability delegation | [W3C DID Core - Capability Delegation](https://www.w3.org/TR/did-core/#capability-delegation) |
+### 2.2 Optional Fields
 
-#### 2.1.3 Verification Method Object Structure
+- **`service`** (array): An array of service endpoints for off-chain interactions (e.g., messaging, data retrieval). Each entry describes one service with:
+  - `id` (string): Unique identifier (e.g., `did:stellar:testnet:GABC123...#credentials`).
+  - `type` (string): The service type (e.g., `CredentialService`, `MessagingService`).
+  - `serviceEndpoint` (string or object): The URL or endpoint configuration for this service.
+  - Reference: [W3C DID Core — Service Endpoint](https://www.w3.org/TR/did-core/#service-endpoint)
 
-Each verification method in the `verificationMethod` array MUST contain:
+- **`assertionMethod`** (array): References to verification methods allowed for assertion (signing claims or credentials). Typically used by issuers.
+  - Reference: [W3C DID Core — Assertion Method](https://www.w3.org/TR/did-core/#assertion-method)
 
-```json
-{
-  "id": "did:stellar:testnet:GABC123...#keys-1",
-  "type": "Ed25519VerificationKey2020",
-  "controller": "did:stellar:testnet:GABC123...",
-  "publicKeyMultibase": "z6MkmL..."
-}
-```
+- **`keyAgreement`** (array): References to verification methods for key agreement (encryption). Used for encrypted communications.
+  - Reference: [W3C DID Core — Key Agreement](https://www.w3.org/TR/did-core/#key-agreement)
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `id` | String | Fragment identifier combining the DID and a key identifier |
-| `type` | String | The type of key material (e.g., Ed25519VerificationKey2020) |
-| `controller` | String | The DID that controls this verification method |
-| `publicKeyMultibase` | String | The public key encoded in multibase format |
-
-### 2.2 Complete Example Document
+### 2.3 Complete Example Document
 
 ```json
 {
@@ -69,37 +58,100 @@ Each verification method in the `verificationMethod` array MUST contain:
     "https://www.w3.org/ns/did/v1",
     "https://w3id.org/security/suites/ed25519-2020/v1"
   ],
-  "id": "did:stellar:testnet:GABC123XYZ789...",
+  "id": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP",
   "verificationMethod": [
     {
-      "id": "did:stellar:testnet:GABC123XYZ789...#keys-1",
+      "id": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#keys-1",
       "type": "Ed25519VerificationKey2020",
-      "controller": "did:stellar:testnet:GABC123XYZ789...",
-      "publicKeyMultibase": "z6MkmL7XEep4mNh4xhCB8EXD2xRfB7bqr7V8zEQ8aK9TqzpN"
+      "controller": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP",
+      "publicKeyMultibase": "z6MkmL7R6S8TuvA2FzTvxY9ZaAb2CdEfG3HiJkLmNoPqRsT"
     },
     {
-      "id": "did:stellar:testnet:GABC123XYZ789...#keys-2",
+      "id": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#keys-2",
       "type": "Ed25519VerificationKey2020",
-      "controller": "did:stellar:testnet:GABC123XYZ789...",
-      "publicKeyMultibase": "z6MkjHCYK5qNh7F3Ac9qZ2eqQ4xpN1R5vD3sM2L8nJqZ9Pxk"
+      "controller": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP",
+      "publicKeyMultibase": "z6NnmN8S9VwBgHcIjKlMnOpQrStUvWxYzAbCdEfGhIjKlM"
     }
   ],
   "authentication": [
-    "did:stellar:testnet:GABC123XYZ789...#keys-1"
+    "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#keys-1"
   ],
   "assertionMethod": [
-    "did:stellar:testnet:GABC123XYZ789...#keys-1"
+    "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#keys-1"
   ],
   "keyAgreement": [
-    "did:stellar:testnet:GABC123XYZ789...#keys-2"
+    "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#keys-2"
   ],
   "service": [
     {
-      "id": "did:stellar:testnet:GABC123XYZ789...#endpoint-1",
-      "type": "VerifiableCredentialService",
+      "id": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#credentials",
+      "type": "CredentialService",
       "serviceEndpoint": "https://issuer.example.com/credentials"
+    },
+    {
+      "id": "did:stellar:testnet:GABC123DEFG456HIJ789KLMNOP234RST567UVWXYZ890ABCDEFGH234IJKLMNOP#messaging",
+      "type": "MessagingService",
+      "serviceEndpoint": "https://messaging.example.com/inbox"
     }
   ]
+}
+```
+
+### 2.4 JSON Schema for Validation
+
+```json
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["@context", "id", "verificationMethod", "authentication"],
+  "properties": {
+    "@context": {
+      "type": "array",
+      "items": { "type": "string" },
+      "minItems": 1
+    },
+    "id": {
+      "type": "string",
+      "pattern": "^did:stellar:(mainnet|testnet):[GAID][A-Z0-9]{55}$"
+    },
+    "verificationMethod": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "controller", "publicKeyMultibase"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "controller": { "type": "string" },
+          "publicKeyMultibase": { "type": "string" }
+        }
+      }
+    },
+    "authentication": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "assertionMethod": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "keyAgreement": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "service": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "type", "serviceEndpoint"],
+        "properties": {
+          "id": { "type": "string" },
+          "type": { "type": "string" },
+          "serviceEndpoint": {}
+        }
+      }
+    }
+  }
 }
 ```
 

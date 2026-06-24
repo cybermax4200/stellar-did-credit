@@ -1,23 +1,6 @@
-#![no_std]
-#![warn(missing_docs)]
+                  #![no_std]
 #[allow(unused_imports)]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
-
-/// Error types for the identity-oracle contract.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum IdentityOracleError {
-    /// Contract is already initialized.
-    AlreadyInitialized = 1,
-    /// Caller is not authorized to perform this action.
-    NotAuthorized = 2,
-    /// Issuer is not registered with the contract.
-    IssuerNotRegistered = 3,
-    /// The CID format is invalid.
-    InvalidCID = 4,
-    /// No verifiable credentials found for subject.
-    VCNotFound = 5,
-}
+use soroban_sdk::{contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, String, Vec, Symbol};
 
 /// Storage key variants for the identity-oracle contract.
 #[contracttype]
@@ -87,8 +70,21 @@ impl IdentityOracle {
         Ok(())
     }
 
-    /// Anchor a DID document for a subject using an IPFS CID.
-    pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) -> Result<(), IdentityOracleError> {
+    /// Deregister a trusted issuer
+    ///
+    /// Removes the issuer's trusted status. This does NOT retroactively revoke existing VCs
+    /// anchored by this issuer — the deregistration only prevents the issuer from anchoring new VCs.
+    pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
+        env.events().publish((symbol_short!("IssDeReg"),), (issuer,));
+    }
+
+    pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) {
         subject.require_auth();
 
         // Validate CID minimum length
@@ -190,8 +186,8 @@ impl IdentityOracle {
         false
     }
 
-    /// Get the count of all verifiable credentials (revoked or not) for a subject.
-    pub fn get_vc_count(env: Env, subject: Address) -> u32 {
+    /// Returns the total number of anchored VC records for `subject`, including revoked entries.
+    pub fn get_total_vc_count(env: Env, subject: Address) -> u32 {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
             .storage()
@@ -201,7 +197,32 @@ impl IdentityOracle {
         anchors.len()
     }
 
-    /// Verify if a specific VC hash is anchored and not revoked for a subject.
+    /// Returns the number of anchored VC records for `subject` that are **not revoked**.
+    pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut count: u32 = 0;
+        for record in anchors.iter() {
+            if !record.revoked {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    /// Backwards-compatible wrapper.
+    ///
+    /// NOTE: This includes revoked entries. Prefer `get_active_vc_count` for scoring/verification.
+    pub fn get_vc_count(env: Env, subject: Address) -> u32 {
+        Self::get_total_vc_count(env, subject)
+    }
+
+
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -430,11 +451,46 @@ mod tests {
     }
 
     #[test]
-    fn test_revoked_vc_fails_is_verified() {
+    fn test_get_active_vc_count_excludes_revoked() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
         let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+
+        // Anchor 3 VCs
+        for i in 0..3u8 {
+            let hash_arr = [i; 32];
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        // Revoke 2 of them
+        for i in 0..2u8 {
+            let hash_arr = [i; 32];
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+        }
+
+        // Only 1 should remain active
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
+    fn test_revoked_vc_fails_is_verified() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
 
         let admin = Address::generate(&env);
         let _ = client.initialize(&admin);
@@ -451,5 +507,31 @@ mod tests {
         let _ = client.mark_vc_revoked(&issuer, &subject, &vc_hash);
 
         assert!(!client.is_verified(&subject));
+    }
+
+    #[test]
+    #[should_panic(expected = "issuer not registered")]
+    fn test_deregistered_issuer_cannot_anchor_vc() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+
+        client.deregister_issuer(&admin, &issuer);
+
+        let new_vc_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &new_vc_hash);
     }
 }
