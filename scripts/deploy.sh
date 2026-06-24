@@ -43,9 +43,10 @@ REVOCATION_ID=$(stellar contract deploy \
 echo "revocation-registry: $REVOCATION_ID"
 
 echo "Saving to deployments.testnet.json..."
-cat > deployments.testnet.json << EOF
+TEMP_FILE=$(mktemp)
+cat > "$TEMP_FILE" << EOF
 {
-  "network": "testnet",
+  "network": "$NETWORK",
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "contracts": {
     "identity-oracle": "$IDENTITY_ID",
@@ -54,5 +55,6 @@ cat > deployments.testnet.json << EOF
   }
 }
 EOF
+mv "$TEMP_FILE" "deployments.${NETWORK}.json"
 
-echo "Done."
+echo "Done. Contracts deployed to deployments.${NETWORK}.json"
