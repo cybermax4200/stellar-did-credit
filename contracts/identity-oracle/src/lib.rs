@@ -71,6 +71,22 @@ impl IdentityOracle {
     /// Anchor a DID document for a subject using an IPFS CID.
     pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) {
         subject.require_auth();
+
+        // Validate CID minimum length
+        if did_doc_cid.len() < 7 {
+            panic!("invalid cid");
+        }
+
+        // Validate CID prefix
+        let cid_str = did_doc_cid.clone();
+        let starts_with_valid = cid_str.starts_with(&String::from_str(&env, "ipfs://"))
+            || cid_str.starts_with(&String::from_str(&env, "bafy"))
+            || cid_str.starts_with(&String::from_str(&env, "Qm"));
+
+        if !starts_with_valid {
+            panic!("invalid cid");
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::DIDDocument(subject.clone()), &did_doc_cid);
@@ -295,6 +311,65 @@ mod tests {
         let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://Qm...");
         client.anchor_did(&subject, &cid);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid cid")]
+    fn test_anchor_did_rejects_empty_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "");
+        client.anchor_did(&subject, &cid);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid cid")]
+    fn test_anchor_did_rejects_single_space_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, " ");
+        client.anchor_did(&subject, &cid);
+    }
+
+    #[test]
+    #[should_panic(expected = "invalid cid")]
+    fn test_anchor_did_rejects_invalid_prefix() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "invalid-cid-data");
+        client.anchor_did(&subject, &cid);
+    }
+
+    #[test]
+    fn test_anchor_did_accepts_valid_ipfs_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym");
+        client.anchor_did(&subject, &cid);
+
+        let subject2 = Address::generate(&env);
+        let cid2 = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        client.anchor_did(&subject2, &cid2);
+
+        let subject3 = Address::generate(&env);
+        let cid3 = String::from_str(&env, "QmVocdeKSNbd9jkc3pDjq9FdAVLpiHrfQFwcJMgB7aXZi3");
+        client.anchor_did(&subject3, &cid3);
     }
 
     #[test]
