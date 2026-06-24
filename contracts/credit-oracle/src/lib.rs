@@ -113,7 +113,19 @@ impl CreditOracle {
             panic!("not authorized");
         }
         admin.require_auth();
-        env.storage().persistent().set(&DataKey::TrustedFeeder(feeder), &true);
+        env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+        env.events().publish((symbol_short!("FdrReg"),), feeder);
+    }
+
+    /// Deregister a trusted feeder address
+    pub fn deregister_feeder(env: Env, admin: Address, feeder: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedFeeder(feeder.clone()));
+        env.events().publish((symbol_short!("FdrDeReg"),), feeder);
     }
 
     /// Register a trusted lender address
@@ -123,7 +135,19 @@ impl CreditOracle {
             panic!("not authorized");
         }
         admin.require_auth();
-        env.storage().persistent().set(&DataKey::TrustedLender(lender), &true);
+        env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
+        env.events().publish((symbol_short!("LndReg"),), lender);
+    }
+
+    /// Deregister a trusted lender address
+    pub fn deregister_lender(env: Env, admin: Address, lender: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
+        env.events().publish((symbol_short!("LndDeReg"),), lender);
     }
 
     /// Update transaction statistics for a user
@@ -552,6 +576,110 @@ mod tests {
         assert_eq!(updated_weights.vc_weight, 50);
         assert_eq!(updated_weights.tx_weight, 30);
         assert_eq!(updated_weights.repayment_weight, 20);
+    }
+
+    #[test]
+    fn test_deregister_feeder_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let is_trusted_before: bool = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::TrustedFeeder(feeder.clone())).unwrap_or(false)
+        });
+        assert!(is_trusted_before);
+
+        client.deregister_feeder(&admin, &feeder);
+
+        let is_trusted_after: bool = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::TrustedFeeder(feeder.clone())).unwrap_or(false)
+        });
+        assert!(!is_trusted_after);
+    }
+
+    #[test]
+    #[should_panic(expected = "feeder not registered")]
+    fn test_deregistered_feeder_cannot_update_stats() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 5000,
+            tx_count_30d: 10,
+            avg_counterparties: 3,
+        });
+
+        client.deregister_feeder(&admin, &feeder);
+
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 6000,
+            tx_count_30d: 11,
+            avg_counterparties: 4,
+        });
+    }
+
+    #[test]
+    fn test_deregister_lender_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        let is_trusted_before: bool = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::TrustedLender(lender.clone())).unwrap_or(false)
+        });
+        assert!(is_trusted_before);
+
+        client.deregister_lender(&admin, &lender);
+
+        let is_trusted_after: bool = env.as_contract(&contract_id, || {
+            env.storage().persistent().get(&DataKey::TrustedLender(lender.clone())).unwrap_or(false)
+        });
+        assert!(!is_trusted_after);
+    }
+
+    #[test]
+    #[should_panic(expected = "lender not registered")]
+    fn test_deregistered_lender_cannot_record_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
+
+        client.deregister_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
     }
 }
 
