@@ -9,6 +9,7 @@ import {
   nativeToScVal,
   Address,
   xdr,
+  Keypair,
 } from "@stellar/stellar-sdk";
 
 export interface ScoreRecord {
@@ -33,16 +34,143 @@ const SIM_ACCOUNT = "GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
 export class StellarDIDCreditSDK {
   constructor(private config: ProtocolConfig) {}
 
+  /**
+   * Anchor a DID document on-chain by storing its IPFS CID.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the subject
+   * keypair to authorize the operation.
+   *
+   * @param subjectKeypair - Stellar keypair of the subject (private + public key)
+   * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
+   * @returns Transaction hash on successful submission
+   */
   async anchorDID(subjectKeypair: any, didDocCid: string): Promise<string> {
-    throw new Error("not implemented");
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const publicKey =
+      subjectKeypair.publicKey instanceof Function
+        ? subjectKeypair.publicKey()
+        : subjectKeypair.publicKey;
+
+    // Get the current account sequence number
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "anchor_did",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(didDocCid),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    // Simulate to ensure the call succeeds
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    // Apply simulation result and prepare the transaction
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
+      tx,
+      sim,
+    ).build();
+    preparedTx.sign(subjectKeypair);
+
+    // Submit to the network
+    const response = await server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+    }
+
+    return response.hash;
   }
 
+  /**
+   * Issue a verifiable credential by anchoring its hash on-chain.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the issuer
+   * keypair to authorize the operation. The issuer must be registered with the contract.
+   *
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param subjectAddress - Stellar G... address of the credential subject
+   * @param vcHash - SHA-256 hash of the verifiable credential
+   * @returns Transaction hash on successful submission
+   */
   async issueVC(
     issuerKeypair: any,
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
-    throw new Error("not implemented");
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const publicKey =
+      issuerKeypair.publicKey instanceof Function
+        ? issuerKeypair.publicKey()
+        : issuerKeypair.publicKey;
+
+    // Get the current account sequence number
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+
+    // Convert vcHash Buffer to ScVal
+    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "anchor_vc",
+          new Address(publicKey).toScVal(),
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    // Simulate to ensure the call succeeds
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    // Apply simulation result and prepare the transaction
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
+      tx,
+      sim,
+    ).build();
+    preparedTx.sign(issuerKeypair);
+
+    // Submit to the network
+    const response = await server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+    }
+
+    return response.hash;
   }
 
   /**
@@ -94,12 +222,93 @@ export class StellarDIDCreditSDK {
     return parseScoreRecord(resultScVal);
   }
 
+  /**
+   * Verify that a specific VC hash is valid and not revoked for the given subject.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @param vcHash - SHA-256 hash of the credential
+   * @returns true if the credential is valid and not revoked
+   */
   async verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean> {
-    throw new Error("not implemented");
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "verify_vc",
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as boolean;
   }
 
+  /**
+   * Check if a subject address has at least one non-revoked verifiable credential.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns true if subject has ≥ 1 non-revoked credential
+   */
   async isVerified(subjectAddress: string): Promise<boolean> {
-    throw new Error("not implemented");
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("is_verified", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as boolean;
   }
 }
 
