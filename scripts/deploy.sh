@@ -1,8 +1,20 @@
 #!/bin/bash
-set -e
+set -euo pipefail
 
-NETWORK="testnet"
+NETWORK="${NETWORK:-testnet}"
 SOURCE="deployer"
+
+# Validate network selection
+if [[ "$NETWORK" == "mainnet" ]] && [[ "${FORCE_MAINNET:-}" != "1" ]]; then
+  echo "Error: Refusing to deploy to mainnet without --force-mainnet flag"
+  exit 1
+fi
+
+# Warn if default network differs from target
+DEFAULT_NETWORK=$(stellar keys list --network testnet 2>/dev/null | head -1 || echo "testnet")
+if [[ "$DEFAULT_NETWORK" != "$NETWORK" ]]; then
+  echo "Warning: Default network ($DEFAULT_NETWORK) differs from target network ($NETWORK)"
+fi
 
 echo "Building contracts..."
 stellar contract build
@@ -12,6 +24,8 @@ IDENTITY_ID=$(stellar contract deploy \
   --wasm target/wasm32-unknown-unknown/release/identity_oracle.wasm \
   --source $SOURCE \
   --network $NETWORK)
+echo "identity-oracle: $IDENTITY_ID"
+
 echo "identity-oracle: $IDENTITY_ID"
 
 echo "Deploying credit-oracle..."
