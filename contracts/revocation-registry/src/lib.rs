@@ -1,8 +1,18 @@
 #![no_std]
 #![warn(missing_docs)]
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
+    contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, Vec,
 };
+
+/// Error types for the revocation registry contract.
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+pub enum RevocationRegistryError {
+    /// Contract is already initialized.
+    AlreadyInitialized = 1,
+    /// Caller is not authorized to perform this action.
+    NotAuthorized = 2,
+}
 
 /// Storage keys for revocation registry contract.
 #[contracttype]
@@ -21,16 +31,17 @@ pub struct RevocationRegistry;
 #[contractimpl]
 impl RevocationRegistry {
     /// Initialize the revocation registry with an administrator address.
-    pub fn initialize(env: Env, admin: Address) {
+    pub fn initialize(env: Env, admin: Address) -> Result<(), RevocationRegistryError> {
         if env.storage().instance().has(&RevocationKey::Admin) {
-            panic!("already initialized");
+            return Err(RevocationRegistryError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
+        Ok(())
     }
 
     /// Revoke a single verifiable credential by its hash.
-    pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) {
+    pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
         env.storage()
             .persistent()
@@ -40,6 +51,7 @@ impl RevocationRegistry {
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
+        Ok(())
     }
 
     /// Check if a verifiable credential has been revoked.
@@ -51,7 +63,7 @@ impl RevocationRegistry {
     }
 
     /// Revoke multiple verifiable credentials in a single batch operation.
-    pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) {
+    pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
             env.storage()
@@ -63,6 +75,7 @@ impl RevocationRegistry {
         }
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
+        Ok(())
     }
 }
 
@@ -82,7 +95,8 @@ mod tests {
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
 
         assert!(!client.is_revoked(&vc_hash));
-        client.revoke(&issuer, &vc_hash);
+        let result = client.revoke(&issuer, &vc_hash);
+        assert!(result.is_ok());
         assert!(client.is_revoked(&vc_hash));
     }
 
@@ -114,7 +128,7 @@ mod tests {
         let env2 = Env::default();
         let contract_id2 = env2.register_contract(None, RevocationRegistry);
         let client2 = RevocationRegistryClient::new(&env2, &contract_id2);
-        client2.revoke(&issuer, &vc_hash);
+        let _ = client2.revoke(&issuer, &vc_hash);
     }
 
     #[test]
@@ -132,7 +146,8 @@ mod tests {
             vc_hashes.push_back(BytesN::from_array(&env, &hash_arr));
         }
 
-        client.batch_revoke(&issuer, &vc_hashes);
+        let result = client.batch_revoke(&issuer, &vc_hashes);
+        assert!(result.is_ok());
 
         for vc_hash in vc_hashes.iter() {
             assert!(client.is_revoked(&vc_hash));
