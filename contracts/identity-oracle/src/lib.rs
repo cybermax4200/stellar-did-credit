@@ -48,7 +48,20 @@ impl IdentityOracle {
             panic!("not authorized");
         }
         admin.require_auth();
-        env.storage().persistent().set(&DataKey::TrustedIssuer(issuer), &true);
+        env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
+        env.events()
+            .publish((symbol_short!("IssReg"),), issuer);
+    }
+
+    pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
+        env.events()
+            .publish((symbol_short!("IssDeReg"),), issuer);
     }
 
     pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) {
@@ -193,6 +206,51 @@ mod tests {
         let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
         client.anchor_vc(&issuer, &subject, &vc_hash);
+    }
+
+    #[test]
+    fn test_deregister_issuer_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer.clone());
+
+        client.deregister_issuer(&admin, &issuer);
+
+        let is_trusted: bool = env.as_contract(&contract_id, || {
+            env.storage().persistent().has(&DataKey::TrustedIssuer(issuer.clone()))
+        });
+        assert!(!is_trusted);
+    }
+
+    #[test]
+    #[should_panic(expected = "issuer not registered")]
+    fn test_deregistered_issuer_cannot_anchor_vc() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer.clone());
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer.clone(), &subject, &vc_hash);
+
+        client.deregister_issuer(&admin, &issuer.clone());
+
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
     }
 
     #[test]
