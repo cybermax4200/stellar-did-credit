@@ -425,3 +425,146 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod prop_tests {
+    use super::*;
+    use proptest::prelude::*;
+    use soroban_sdk::testutils::Address as _;
+
+    proptest! {
+        #[test]
+        fn proptest_score_always_in_range(
+            vc_count in 0u32..=5u32,
+            volume_30d in 0i128..=1_000_000_000_000i128,
+            on_time in 0u32..=1000u32,
+            total in 1u32..=1001u32,
+        ) {
+            if on_time > total {
+                return Ok(());
+            }
+
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let feeder = Address::generate(&env);
+            let lender = Address::generate(&env);
+            let subject = Address::generate(&env);
+
+            client.initialize(&admin);
+            client.register_feeder(&admin, &feeder);
+            client.register_lender(&admin, &lender);
+            client.set_vc_count(&feeder, &subject, &vc_count);
+            client.update_tx_stats(&feeder, &subject, &TxStats {
+                volume_30d,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            });
+
+            for _ in 0..on_time {
+                client.record_repayment(&lender, &subject, &1000, &true);
+            }
+            for _ in on_time..total {
+                client.record_repayment(&lender, &subject, &1000, &false);
+            }
+
+            let score = client.compute_score(&subject);
+            prop_assert!(score >= 300, "Score {} is below 300", score);
+            prop_assert!(score <= 850, "Score {} exceeds 850", score);
+        }
+
+        #[test]
+        fn proptest_score_monotone_on_repayment(
+            vc_count in 0u32..=5u32,
+            volume_30d in 0i128..=1_000_000_000_000i128,
+            on_time_pct_1 in 0u32..=100u32,
+            on_time_pct_2 in 0u32..=100u32,
+        ) {
+            if on_time_pct_1 > on_time_pct_2 {
+                return Ok(());
+            }
+
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let feeder = Address::generate(&env);
+            let lender = Address::generate(&env);
+
+            client.initialize(&admin);
+            client.register_feeder(&admin, &feeder);
+            client.register_lender(&admin, &lender);
+            client.set_vc_count(&feeder, &admin, &vc_count);
+            client.update_tx_stats(&feeder, &admin, &TxStats {
+                volume_30d,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            });
+
+            // First scenario with lower repayment rate
+            let on_time_1 = (100u32 * on_time_pct_1) / 100;
+            for _ in 0..on_time_1 {
+                client.record_repayment(&lender, &admin, &1000, &true);
+            }
+            for _ in on_time_1..100 {
+                client.record_repayment(&lender, &admin, &1000, &false);
+            }
+            let score_1 = client.compute_score(&admin);
+
+            // Second scenario with higher repayment rate (new subject to avoid record accumulation)
+            let subject_2 = Address::generate(&env);
+            client.set_vc_count(&feeder, &subject_2, &vc_count);
+            client.update_tx_stats(&feeder, &subject_2, &TxStats {
+                volume_30d,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            });
+            let on_time_2 = (100u32 * on_time_pct_2) / 100;
+            for _ in 0..on_time_2 {
+                client.record_repayment(&lender, &subject_2, &1000, &true);
+            }
+            for _ in on_time_2..100 {
+                client.record_repayment(&lender, &subject_2, &1000, &false);
+            }
+            let score_2 = client.compute_score(&subject_2);
+
+            prop_assert!(score_1 <= score_2, "Score decreased with higher repayment rate: {} -> {}", score_1, score_2);
+        }
+
+        #[test]
+        fn proptest_no_panic_on_any_valid_weights(
+            a in 0u32..=100u32,
+            b in 0u32..=100u32,
+        ) {
+            let c = 100u32.saturating_sub(a.saturating_add(b));
+            if a.saturating_add(b).saturating_add(c) != 100 {
+                return Ok(());
+            }
+
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            // Should not panic
+            client.update_weights(&ScoringWeights {
+                vc_weight: a,
+                tx_weight: b,
+                repayment_weight: c,
+            });
+
+            let subject = Address::generate(&env);
+            let score = client.compute_score(&subject);
+            prop_assert!(score >= 300);
+            prop_assert!(score <= 850);
+        }
+    }
+}
+
