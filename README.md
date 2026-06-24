@@ -97,6 +97,7 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | ------------------------------------------- | ---------------------------------------------- |
 | `initialize(admin)`                         | Sets the contract admin                        |
 | `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
+| `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
 | `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
 | `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
 | `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
@@ -112,12 +113,16 @@ Computes and stores credit scores based on on-chain data.
 | ---------------------------------------------------- | -------------------------------------------------- |
 | `initialize(admin)`                                  | Sets admin and default scoring weights (40/30/30)  |
 | `register_feeder(admin, feeder)`                     | Registers a trusted transaction stats feeder       |
+| `deregister_feeder(admin, feeder)`                   | Revokes a trusted feeder (no retroactive effect)   |
 | `register_lender(admin, lender)`                     | Registers a trusted lender for repayment recording |
+| `deregister_lender(admin, lender)`                   | Revokes a trusted lender (no retroactive effect)   |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
 | `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
-| `update_weights(weights)`                            | Updates scoring weights (must sum to 100)          |
+| `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
+| `apply_weights()`                                    | Applies pending weights after timelock expires     |
+| `get_scoring_weights()`                              | Returns current scoring weights                    |
 
 ### revocation-registry
 
