@@ -152,6 +152,35 @@ score = clamp(300 + 94×550÷100, 300, 850)
 
 ---
 
+### Example 4: 5 VCs, 100 XLM volume, 100% repayment → score 850
+
+| Input           | Value                              |
+| --------------- | ---------------------------------- |
+| vc_count        | 5                                  |
+| volume_30d      | 10,000,000,000 stroops (100 XLM)   |
+| on_time / total | 100 / 100                          |
+
+**Calculation:**
+
+```
+vc_score    = min(5 × 20, 100) = min(100, 100) = 100
+tx_score    = min(10_000_000_000 ÷ 100_000_000, 100) = min(100, 100) = 100
+repay_score = (100 × 10000 ÷ 100) ÷ 100 = 10000 ÷ 100 = 100
+
+composite = (100×40 + 100×30 + 100×30) ÷ 100
+          = (4000 + 3000 + 3000) ÷ 100
+          = 10000 ÷ 100
+          = 100
+
+score = clamp(300 + 100×550÷100, 300, 850)
+      = clamp(300 + 550, 300, 850)
+      = 850
+```
+
+**Result: 850** — the maximum. All three components are capped at 100, composite reaches 100, and the final score hits the ceiling exactly.
+
+---
+
 ## Edge cases
 
 ### Stale score (`last_updated` more than 30 days ago)

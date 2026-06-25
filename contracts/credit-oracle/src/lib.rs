@@ -508,6 +508,37 @@ mod tests {
     }
 
     #[test]
+    fn test_exceptional_score_equals_850() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let _ = client.initialize(&admin);
+        let _ = client.register_feeder(&admin, &feeder);
+        let _ = client.register_lender(&admin, &lender);
+
+        // 5 VCs, 100 XLM volume, 100% repayment (100/100)
+        let _ = client.set_vc_count(&feeder, &subject, &5);
+        let _ = client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 10_000_000_000i128,
+            tx_count_30d: 100,
+            avg_counterparties: 10,
+        });
+        for _ in 0..100 {
+            let _ = client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert_eq!(score, 850);
+    }
+
+    #[test]
     fn test_weights_must_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
@@ -517,6 +548,68 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         client.propose_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
+    }
+
+    #[test]
+    fn test_score_in_range_for_all_weight_boundaries() {
+        // Mathematical invariant: with valid weights (summing to 100) and all component
+        // scores at their maximum of 100, composite = (100*w_vc + 100*w_tx + 100*w_rep) / 100
+        // = 100*(w_vc+w_tx+w_rep)/100 = 100. Therefore score = clamp(850, 300, 850) = 850,
+        // and the clamp is always a no-op for any valid weight distribution.
+        let weight_combos: &[(u32, u32, u32)] = &[
+            (100, 0, 0),
+            (0, 100, 0),
+            (0, 0, 100),
+            (50, 50, 0),
+            (50, 0, 50),
+            (0, 50, 50),
+            (34, 33, 33),
+            (40, 30, 30),
+        ];
+
+        for &(vc_w, tx_w, rep_w) in weight_combos {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let feeder = Address::generate(&env);
+            let lender = Address::generate(&env);
+            let subject = Address::generate(&env);
+
+            let _ = client.initialize(&admin);
+            let _ = client.register_feeder(&admin, &feeder);
+            let _ = client.register_lender(&admin, &lender);
+
+            client.propose_weights(&ScoringWeights {
+                vc_weight: vc_w,
+                tx_weight: tx_w,
+                repayment_weight: rep_w,
+            });
+            env.ledger().set_sequence_number(env.ledger().sequence() + TIMELOCK_LEDGERS + 1);
+            client.apply_weights();
+
+            let _ = client.set_vc_count(&feeder, &subject, &5);
+            let _ = client.update_tx_stats(&feeder, &subject, &TxStats {
+                volume_30d: 10_000_000_000i128,
+                tx_count_30d: 100,
+                avg_counterparties: 10,
+            });
+            for _ in 0..100 {
+                let _ = client.record_repayment(&lender, &subject, &1000, &true);
+            }
+
+            let score = client.compute_score(&subject);
+            assert!(
+                score >= 300 && score <= 850,
+                "score {} out of range for weights ({},{},{})",
+                score,
+                vc_w,
+                tx_w,
+                rep_w
+            );
+        }
     }
 
     #[test]

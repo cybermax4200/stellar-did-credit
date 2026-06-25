@@ -84,6 +84,12 @@ impl IdentityOracle {
         env.events().publish((symbol_short!("IssDeReg"),), (issuer,));
     }
 
+    /// Anchor a DID document CID for `subject`, storing the IPFS CID on-chain.
+    ///
+    /// **Overwrite behaviour is intentional**: calling `anchor_did` again with a new CID
+    /// replaces the previous entry. This supports key rotation and DID document updates
+    /// (see `docs/did-spec.md` § 3.3). No history is retained on-chain — the previous CID
+    /// is permanently overwritten. A `DIDAnch` event is emitted on every successful call.
     pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) {
         subject.require_auth();
 
@@ -507,6 +513,33 @@ mod tests {
         let _ = client.mark_vc_revoked(&issuer, &subject, &vc_hash);
 
         assert!(!client.is_verified(&subject));
+    }
+
+    #[test]
+    fn test_anchor_did_overwrite() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid1 = String::from_str(&env, "bafyaaaaaaaaaaaa");
+        let cid2 = String::from_str(&env, "bafybbbbbbbbbbbb");
+
+        let _ = client.anchor_did(&subject, &cid1);
+        let _ = client.anchor_did(&subject, &cid2);
+
+        // second CID must overwrite the first
+        let stored: String = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::DIDDocument(subject.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored, cid2);
+
+        // DIDAnch event emitted for each call
+        assert_eq!(env.events().all().len(), 2);
     }
 
     #[test]
