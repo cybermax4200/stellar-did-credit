@@ -508,6 +508,37 @@ mod tests {
     }
 
     #[test]
+    fn test_exceptional_score_equals_850() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        let _ = client.initialize(&admin);
+        let _ = client.register_feeder(&admin, &feeder);
+        let _ = client.register_lender(&admin, &lender);
+
+        // 5 VCs, 100 XLM volume, 100% repayment (100/100)
+        let _ = client.set_vc_count(&feeder, &subject, &5);
+        let _ = client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 10_000_000_000i128,
+            tx_count_30d: 100,
+            avg_counterparties: 10,
+        });
+        for _ in 0..100 {
+            let _ = client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert_eq!(score, 850);
+    }
+
+    #[test]
     fn test_weights_must_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
