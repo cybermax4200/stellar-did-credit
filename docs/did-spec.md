@@ -185,6 +185,8 @@ To resolve a `did:stellar` identifier:
 
 ### 3.3 Update
 
+**DID documents in this protocol are mutable.** Subjects may call `anchor_did` as many times as they wish to update their DID document (e.g., to rotate keys, add service endpoints, or update metadata). Each call silently overwrites the previous on-chain CID — no history is retained. A `DIDAnch` event is emitted on every successful update so off-chain indexers can track changes.
+
 1. The subject generates a new DID Document (e.g., to rotate keys or add service endpoints).
 2. The subject uploads the new document to IPFS.
 3. The subject calls `anchor_did` with the new CID. This overwrites the previous state in the contract.
