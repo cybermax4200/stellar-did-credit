@@ -243,7 +243,7 @@ impl CreditOracle {
             + repay_score * weights.repayment_weight)
             / 100;
 
-        let score = (300 + composite * 550 / 100).clamp(300, 850);
+        let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
         env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
             score,
@@ -258,11 +258,9 @@ impl CreditOracle {
         score
     }
 
-    /// Get credit score for a user
-    pub fn get_score(env: Env, subject: Address) -> ScoreRecord {
-        env.storage().persistent()
-            .get(&DataKey::Score(subject))
-            .expect("score not computed")
+    /// Get credit score for a user; returns None if score has not been computed yet
+    pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
+        env.storage().persistent().get(&DataKey::Score(subject))
     }
 
     /// Propose new scoring weights with timelock
@@ -450,7 +448,7 @@ mod tests {
         let _ = client.initialize(&admin);
 
         let score = client.compute_score(&subject);
-        assert_eq!(score, 300);
+        assert_eq!(score, MIN_SCORE);
     }
 
     #[test]
@@ -471,7 +469,7 @@ mod tests {
         }
 
         let score = client.compute_score(&subject);
-        assert!(score > 300);
+        assert!(score > MIN_SCORE);
     }
 
     #[test]
@@ -503,8 +501,8 @@ mod tests {
         }
 
         let score = client.compute_score(&subject);
-        assert!(score >= 300);
-        assert!(score <= 850);
+        assert!(score >= MIN_SCORE);
+        assert!(score <= MAX_SCORE);
     }
 
     #[test]
@@ -642,6 +640,40 @@ mod tests {
         client.deregister_lender(&admin, &lender);
 
         client.record_repayment(&lender, &subject, &1000, &true);
+    }
+
+    #[test]
+    fn test_upgrade_preserves_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(CreditOracle::WASM);
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Upgrade — contract_id must remain unchanged
+        client.upgrade(&admin, &new_wasm_hash);
+
+        // Contract still responds correctly; address is preserved
+        let weights = client.get_scoring_weights();
+        assert_eq!(weights.vc_weight + weights.tx_weight + weights.repayment_weight, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let new_wasm_hash = env.deployer().upload_contract_wasm(CreditOracle::WASM);
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &new_wasm_hash);
     }
 }
 

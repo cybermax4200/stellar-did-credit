@@ -12,6 +12,9 @@ import {
   Keypair,
 } from "@stellar/stellar-sdk";
 
+export const MIN_SCORE = 300;
+export const MAX_SCORE = 850;
+
 export interface ScoreRecord {
   score: number;
   lastUpdated: number;
@@ -231,7 +234,7 @@ export class StellarDIDCreditSDK {
 
     // 5. Parse the ScoreRecord struct.
     //    Soroban structs are returned as ScMap with symbol keys.
-    return parseScoreRecord(resultScVal);
+    return parseScoreRecord(resultScVal, subjectAddress);
   }
 
   /**
@@ -324,14 +327,25 @@ export class StellarDIDCreditSDK {
   }
 }
 
-/**
- * Parse a Soroban ScVal representing a ScoreRecord struct into the TS interface.
- * The contract returns a struct as an ScMap with ScSymbol keys.
- */
-function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord {
-  // scValToNative converts ScMap → plain object, ScU32 → number, ScI128 → bigint, etc.
-  const raw = scValToNative(scVal) as Record<string, unknown>;
+/** Thrown when get_score is called for an address that has no computed score yet. */
+export class ScoreNotComputedError extends Error {
+  constructor(address: string) {
+    super(`No score computed for address: ${address}`);
+    this.name = "ScoreNotComputedError";
+  }
+}
 
+/**
+ * Parse a Soroban ScVal representing an Option<ScoreRecord>.
+ * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
+ */
+function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+  const native = scValToNative(scVal);
+  // Option::None is represented as null/undefined by scValToNative
+  if (native === null || native === undefined) {
+    throw new ScoreNotComputedError(subjectAddress);
+  }
+  const raw = native as Record<string, unknown>;
   return {
     score: Number(raw["score"]),
     lastUpdated: Number(raw["last_updated"]),
