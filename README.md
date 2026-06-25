@@ -39,7 +39,7 @@ This protocol flips the model. Identity and financial history are owned by the i
 The protocol has three steps:
 
 **1. Get a decentralized identity (DID)**
-A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a DID document to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity.
+A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a [DID document](docs/did-spec.md#23-complete-example-document) to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity. See [DID Document Schema](docs/did-spec.md#2-did-document-schema) for the required JSON-LD structure.
 
 **2. Collect verifiable credentials (VCs)**
 Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
@@ -97,6 +97,7 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | ------------------------------------------- | ---------------------------------------------- |
 | `initialize(admin)`                         | Sets the contract admin                        |
 | `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
+| `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
 | `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
 | `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
 | `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
@@ -113,13 +114,16 @@ Computes and stores credit scores based on on-chain data.
 | ---------------------------------------------------- | -------------------------------------------------- |
 | `initialize(admin)`                                  | Sets admin and default scoring weights (40/30/30)  |
 | `register_feeder(admin, feeder)`                     | Registers a trusted transaction stats feeder       |
+| `deregister_feeder(admin, feeder)`                   | Revokes a trusted feeder (no retroactive effect)   |
 | `register_lender(admin, lender)`                     | Registers a trusted lender for repayment recording |
+| `deregister_lender(admin, lender)`                   | Revokes a trusted lender (no retroactive effect)   |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
 | `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
-| `get_score(subject)`                                 | Returns `Option<ScoreRecord>` — `None` if score not yet computed |
-| `update_weights(weights)`                            | Updates scoring weights (must sum to 100)          |
-| `upgrade(admin, new_wasm_hash)`                      | Upgrades the contract WASM in-place                |
+| `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
+| `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
+| `apply_weights()`                                    | Applies pending weights after timelock expires     |
+| `get_scoring_weights()`                              | Returns current scoring weights                    |
 
 ### revocation-registry
 
@@ -200,8 +204,8 @@ cd stellar-did-credit
 # Install TypeScript dependencies
 pnpm install
 
-# Build and test Rust contracts
-cargo test --workspace
+# Run all tests
+pnpm test
 ```
 
 ### Deploy to testnet
@@ -220,15 +224,26 @@ Contract addresses will be saved to `deployments.testnet.json`.
 
 ## Running tests
 
+Run all Rust and TypeScript tests:
+
 ```bash
-# Run all contract tests (21 tests across 4 crates)
+pnpm test
+```
+
+For individual commands:
+
+```bash
+# Run all Rust contract tests (including integration tests)
 cargo test --workspace
 
 # Run with output for debugging
 cargo test --workspace -- --nocapture
 
-# Lint check
-cargo clippy --workspace -- -D warnings
+# Lint Rust contracts and TypeScript
+pnpm lint
+
+# Build release binaries
+pnpm build
 
 # Run a specific contract's tests
 cargo test -p identity-oracle

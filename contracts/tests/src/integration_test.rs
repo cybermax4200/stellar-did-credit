@@ -145,4 +145,131 @@ mod tests {
             initial_score
         );
     }
+
+    #[test]
+    fn test_batch_revoke_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // 1. Register and initialize all 3 contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // 2. Register issuer
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        // 3. Create subject and DID
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmBatchTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        // 4. Anchor 5 VCs for the subject
+        let mut vc_hashes = soroban_sdk::Vec::new(&env);
+        for i in 0..5u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            identity.anchor_vc(&issuer, &subject, &vc_hash);
+            vc_hashes.push_back(vc_hash);
+        }
+
+        // 5. Assert is_verified is true (5 active VCs)
+        assert!(identity.is_verified(&subject));
+
+        // 6. Assert get_vc_count returns 5
+        assert_eq!(identity.get_vc_count(&subject), 5);
+
+        // 7. Create a vector of the first 3 hashes to batch revoke
+        let mut batch_revoke_hashes = soroban_sdk::Vec::new(&env);
+        for i in 0..3usize {
+            batch_revoke_hashes.push_back(vc_hashes.get(i as u32).unwrap());
+        }
+
+        // 8. Batch revoke the 3 VCs on revocation-registry
+        revocation.batch_revoke(&issuer, &batch_revoke_hashes);
+
+        // 9. Assert is_revoked returns true for each of the 3 revoked hashes
+        for i in 0..3usize {
+            let revoked_hash = vc_hashes.get(i as u32).unwrap();
+            assert!(
+                revocation.is_revoked(&revoked_hash),
+                "VC hash {} should be revoked",
+                i
+            );
+        }
+
+        // 10. Assert is_revoked returns false for the 2 non-revoked hashes
+        for i in 3..5usize {
+            let active_hash = vc_hashes.get(i as u32).unwrap();
+            assert!(
+                !revocation.is_revoked(&active_hash),
+                "VC hash {} should not be revoked",
+                i
+            );
+        }
+
+        // 11. Mark the 3 VCs as revoked on identity-oracle
+        for i in 0..3usize {
+            let revoked_hash = vc_hashes.get(i as u32).unwrap();
+            identity.mark_vc_revoked(&issuer, &subject, &revoked_hash);
+        }
+
+        // 12. Assert is_verified is still true (2 active VCs remain)
+        assert!(
+            identity.is_verified(&subject),
+            "Subject should still be verified with 2 active VCs"
+        );
+
+        // 13. Assert get_vc_count returns 5 (total count unchanged)
+        assert_eq!(
+            identity.get_vc_count(&subject),
+            5,
+            "Total VC count should remain 5"
+        );
+
+        // 14. Setup credit-oracle to test score changes
+        let lender = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
+
+        // 15. Set initial VC count to 5 and compute score
+        credit.set_vc_count(&feeder, &subject, &5);
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+        let score_with_5_vcs = credit.compute_score(&subject);
+
+        // 16. Update VC count to 2 (after batch revocation) and recompute score
+        credit.set_vc_count(&feeder, &subject, &2);
+        let score_with_2_vcs = credit.compute_score(&subject);
+
+        // 17. Assert score decreased due to fewer active VCs
+        assert!(
+            score_with_2_vcs < score_with_5_vcs,
+            "Score with 2 VCs ({}) should be less than score with 5 VCs ({})",
+            score_with_2_vcs,
+            score_with_5_vcs
+        );
+    }
 }

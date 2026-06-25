@@ -168,7 +168,7 @@ If a subject's VCs are all revoked in identity-oracle, `is_verified` returns `fa
 
 **Implication:** a lender should always check `is_verified` on identity-oracle independently of the credit score. A high score with `is_verified = false` indicates the feeder has not yet synced the revocation.
 
-In the future cross-contract version, `compute_score` will call `get_vc_count` directly, eliminating this lag.
+In the future cross-contract version, `compute_score` will call `get_active_vc_count` directly, eliminating this lag.
 
 ### Feeder not updated (inputs never set)
 
