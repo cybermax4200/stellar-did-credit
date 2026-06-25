@@ -220,3 +220,11 @@ By anchoring the DID to a Stellar address, the identity is permanently linked to
 ## 6. Reference Implementation
 
 The canonical implementation of the anchor contract is located in `contracts/identity-oracle/`.
+
+## 7. Protocol Limits
+
+### 7.1 Verifiable Credential Limit
+
+Each subject address may have at most **50 verifiable credentials** anchored on-chain (`MAX_VC_PER_SUBJECT = 50`). This limit exists because all VC records for a subject are stored in a single Soroban persistent ledger entry, which has a maximum size of ~64 KB. Exceeding 50 entries risks hitting this limit and causing `anchor_vc` to fail.
+
+If a subject reaches the limit, `anchor_vc` will panic with `"vc limit reached"`. Issuers should deactivate or revoke stale credentials before issuing new ones to subjects approaching the cap.

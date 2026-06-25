@@ -19,10 +19,19 @@ pub enum RevocationRegistryError {
 pub enum RevocationKey {
     /// Contract administrator address.
     Admin,
+    /// Whether the contract is paused.
+    Paused,
     /// Revocation status for a VC hash.
     Status(BytesN<32>),    // vc_hash → bool
     /// Address of issuer who revoked the VC.
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
+}
+
+fn check_not_paused(env: &Env) {
+    let paused: bool = env.storage().instance().get(&RevocationKey::Paused).unwrap_or(false);
+    if paused {
+        panic!("contract paused");
+    }
 }
 
 #[contract]
@@ -40,8 +49,25 @@ impl RevocationRegistry {
         Ok(())
     }
 
+    /// Pause the contract, blocking all state-mutating functions. Admin only.
+    pub fn pause(env: Env, admin: Address) {
+        let stored_admin: Address = env.storage().instance().get(&RevocationKey::Admin).expect("not initialized");
+        if admin != stored_admin { panic!("not authorized"); }
+        admin.require_auth();
+        env.storage().instance().set(&RevocationKey::Paused, &true);
+    }
+
+    /// Unpause the contract, restoring normal operation. Admin only.
+    pub fn unpause(env: Env, admin: Address) {
+        let stored_admin: Address = env.storage().instance().get(&RevocationKey::Admin).expect("not initialized");
+        if admin != stored_admin { panic!("not authorized"); }
+        admin.require_auth();
+        env.storage().instance().set(&RevocationKey::Paused, &false);
+    }
+
     /// Revoke a single verifiable credential by its hash.
     pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
+        check_not_paused(&env);
         issuer.require_auth();
         env.storage()
             .persistent()
@@ -64,6 +90,7 @@ impl RevocationRegistry {
 
     /// Revoke multiple verifiable credentials in a single batch operation.
     pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) -> Result<(), RevocationRegistryError> {
+        check_not_paused(&env);
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
             env.storage()
@@ -196,5 +223,36 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
         client.upgrade(&non_admin, &new_wasm_hash);
+    }
+
+    #[test]
+    #[should_panic(expected = "contract paused")]
+    fn test_paused_contract_rejects_mutations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+        let issuer = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.revoke(&issuer, &vc_hash);
+    }
+
+    #[test]
+    fn test_unpause_restores_functionality() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.pause(&admin);
+        client.unpause(&admin);
+        let issuer = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[2u8; 32]);
+        let result = client.revoke(&issuer, &vc_hash);
+        assert!(result.is_ok());
     }
 }
