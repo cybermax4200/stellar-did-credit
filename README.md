@@ -202,8 +202,8 @@ cd stellar-did-credit
 # Install TypeScript dependencies
 pnpm install
 
-# Build and test Rust contracts
-cargo test --workspace
+# Run all tests
+pnpm test
 ```
 
 ### Deploy to testnet
@@ -222,15 +222,26 @@ Contract addresses will be saved to `deployments.testnet.json`.
 
 ## Running tests
 
+Run all Rust and TypeScript tests:
+
 ```bash
-# Run all contract tests (21 tests across 4 crates)
+pnpm test
+```
+
+For individual commands:
+
+```bash
+# Run all Rust contract tests (including integration tests)
 cargo test --workspace
 
 # Run with output for debugging
 cargo test --workspace -- --nocapture
 
-# Lint check
-cargo clippy --workspace -- -D warnings
+# Lint Rust contracts and TypeScript
+pnpm lint
+
+# Build release binaries
+pnpm build
 
 # Run a specific contract's tests
 cargo test -p identity-oracle
