@@ -2,9 +2,7 @@
   "name": "stellar-did-credit",
   "private": true,
   "packageManager": "pnpm@9.0.0",
-  "scripts": {
-    "test": "cargo test --workspace && pnpm -r test",
-    "lint": "cargo clippy --workspace -- -D warnings && pnpm -r lint",
-    "build": "cargo build --release && pnpm -r build"
+  "devDependencies": {
+    "@types/node": "^26.0.0"
   }
 }
