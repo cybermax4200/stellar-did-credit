@@ -29,14 +29,8 @@ export interface ProtocolConfig {
   revocationRegistryId: string;
   networkPassphrase: string;
   rpcUrl: string;
-}
-
-/** Thrown when a score has not been computed for the requested address. */
-export class ScoreNotComputedError extends Error {
-  constructor() {
-    super("Score has not been computed for this address. Call computeScore() first.");
-    this.name = "ScoreNotComputedError";
-  }
+  /** Funded account used as fee source for read-only simulations. Required on non-testnet networks. */
+  simulationAccount?: string;
 }
 
 /** Zero-balance placeholder account used for read-only simulations. */
@@ -44,6 +38,18 @@ const SIM_ACCOUNT = "GAAZI4TCR3TY5OJHCTJC2A4QSY6CJWJH5IAJTGKIN2ER7LBNVKOCCWN";
 
 export class StellarDIDCreditSDK {
   constructor(private config: ProtocolConfig) {}
+
+  private getSimulationAccount(): string {
+    if (this.config.simulationAccount) {
+      return this.config.simulationAccount;
+    }
+    if (this.config.networkPassphrase === Networks.TESTNET) {
+      return SIM_ACCOUNT;
+    }
+    throw new Error(
+      "simulationAccount must be provided in ProtocolConfig for non-testnet networks",
+    );
+  }
 
   /**
    * Anchor a DID document on-chain by storing its IPFS CID.
@@ -200,9 +206,9 @@ export class StellarDIDCreditSDK {
     // 2. Instantiate the credit-oracle contract
     const contract = new Contract(this.config.creditOracleId);
 
-    // 3. Build a read-only transaction — use a well-known funded account as the fee source
-    //    for simulation; no actual submission occurs.
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    // 3. Build a read-only transaction — use the resolved simulation account as the fee
+    //    source; no actual submission occurs.
+    const sourceAccount = new Account(this.getSimulationAccount(), "0");
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
@@ -218,7 +224,7 @@ export class StellarDIDCreditSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
-        throw new ScoreNotComputedError();
+        throw new ScoreNotComputedError(subjectAddress);
       }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
@@ -250,7 +256,7 @@ export class StellarDIDCreditSDK {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const sourceAccount = new Account(this.getSimulationAccount(), "0");
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -297,7 +303,7 @@ export class StellarDIDCreditSDK {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const sourceAccount = new Account(SIM_ACCOUNT, "0");
+    const sourceAccount = new Account(this.getSimulationAccount(), "0");
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
@@ -329,8 +335,12 @@ export class StellarDIDCreditSDK {
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
 export class ScoreNotComputedError extends Error {
-  constructor(address: string) {
-    super(`No score computed for address: ${address}`);
+  constructor(address?: string) {
+    super(
+      address
+        ? `No score computed for address: ${address}`
+        : "Score has not been computed for this address. Call computeScore() first.",
+    );
     this.name = "ScoreNotComputedError";
   }
 }
