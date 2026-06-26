@@ -355,7 +355,7 @@ ZK proof circuit for selective score disclosure — prove "score > 650" without 
 DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
 
 **Phase 6 — Mainnet**
-Security audit. Mainnet deployment. Issuer onboarding program.
+Security audit. Mainnet deployment — see [mainnet deployment guide](docs/mainnet-deployment.md). Issuer onboarding program.
 
 ---
 
