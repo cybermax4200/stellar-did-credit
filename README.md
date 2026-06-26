@@ -2,6 +2,8 @@
 
 # stellar-did-credit
 
+<!-- test: verify fork PR visibility -->
+
 A decentralized identity and credit scoring protocol built on Stellar. Users own their financial identity as a cryptographic keypair, collect verifiable credentials from trusted issuers, and receive a portable credit score computed transparently on-chain — no bank account required, no central credit bureau.
 
 **Status:** This project is in active development. See [Contributing](#contributing) to get started.
