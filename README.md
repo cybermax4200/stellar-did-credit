@@ -2,6 +2,8 @@
 
 # stellar-did-credit
 
+<!-- test: verify fork PR visibility -->
+
 A decentralized identity and credit scoring protocol built on Stellar. Users own their financial identity as a cryptographic keypair, collect verifiable credentials from trusted issuers, and receive a portable credit score computed transparently on-chain — no bank account required, no central credit bureau.
 
 **Status:** This project is in active development. See [Contributing](#contributing) to get started.
@@ -355,7 +357,7 @@ ZK proof circuit for selective score disclosure — prove "score > 650" without 
 DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
 
 **Phase 6 — Mainnet**
-Security audit. Mainnet deployment. Issuer onboarding program.
+Security audit. Mainnet deployment — see [mainnet deployment guide](docs/mainnet-deployment.md). Issuer onboarding program.
 
 ---
 
