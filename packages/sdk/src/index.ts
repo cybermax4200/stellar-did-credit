@@ -328,14 +328,24 @@ export class ScoreNotComputedError extends Error {
 /**
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
  * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
+ * @internal Exported for testing purposes only
  */
-function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+export function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
     throw new ScoreNotComputedError(subjectAddress);
   }
   const raw = native as Record<string, unknown>;
+  
+  // Validate that all required fields are present
+  const requiredFields = ["score", "last_updated", "vc_count", "repayment_rate", "tx_volume_30d"];
+  for (const field of requiredFields) {
+    if (!(field in raw)) {
+      throw new Error(`parseScoreRecord: missing field '${field}' in ScoreRecord`);
+    }
+  }
+  
   return {
     score: Number(raw["score"]),
     lastUpdated: Number(raw["last_updated"]),
