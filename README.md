@@ -317,7 +317,7 @@ console.log(score.score); // e.g. 612
 | `isVerified(address)`            | 🚧 Open        |
 | `anchorDID(keypair, cid)`        | 🚧 Open        |
 | `issueVC(issuer, subject, hash)` | 🚧 Open        |
-| `verifyVC(subject, hash)`        | 🚧 Open        |
+| `verifyVC(subject, hash)`        | ✅ Implemented |
 | `revokeVC(issuer, hash)`         | 📋 Planned     |
 
 ---

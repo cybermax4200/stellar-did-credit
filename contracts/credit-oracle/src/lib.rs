@@ -192,9 +192,14 @@ impl CreditOracle {
         if !env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
             return Err(CreditOracleError::LenderNotRegistered);
         }
-        let mut record: RepaymentRecord = env.storage().persistent()
+        let mut record: RepaymentRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+            .unwrap_or(RepaymentRecord {
+                on_time_count: 0,
+                total_count: 0,
+            });
         if on_time {
             record.on_time_count += 1;
         }
@@ -215,15 +220,28 @@ impl CreditOracle {
 
     /// Compute and store credit score for a user
     pub fn compute_score(env: Env, subject: Address) -> u32 {
-        let tx_stats: TxStats = env.storage().persistent()
+        let tx_stats: TxStats = env
+            .storage()
+            .persistent()
             .get(&DataKey::TxStats(subject.clone()))
-            .unwrap_or(TxStats { volume_30d: 0, tx_count_30d: 0, avg_counterparties: 0 });
+            .unwrap_or(TxStats {
+                volume_30d: 0,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            });
 
-        let repayment: RepaymentRecord = env.storage().persistent()
+        let repayment: RepaymentRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+            .unwrap_or(RepaymentRecord {
+                on_time_count: 0,
+                total_count: 0,
+            });
 
-        let vc_count: u32 = env.storage().persistent()
+        let vc_count: u32 = env
+            .storage()
+            .persistent()
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
@@ -242,15 +260,18 @@ impl CreditOracle {
 
         let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
-        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
-            score,
-            last_updated: env.ledger().timestamp(),
-            vc_count,
-            repayment_rate: (repayment.on_time_count * 10000)
-                                .checked_div(repayment.total_count)
-                                .unwrap_or(0),
-            tx_volume_30d: tx_stats.volume_30d,
-        });
+        env.storage().persistent().set(
+            &DataKey::Score(subject.clone()),
+            &ScoreRecord {
+                score,
+                last_updated: env.ledger().timestamp(),
+                vc_count,
+                repayment_rate: (repayment.on_time_count * 10000)
+                    .checked_div(repayment.total_count)
+                    .unwrap_or(0),
+                tx_volume_30d: tx_stats.volume_30d,
+            },
+        );
 
         score
     }
@@ -266,7 +287,11 @@ impl CreditOracle {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         stored_admin.require_auth();
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
@@ -312,10 +337,12 @@ impl CreditOracle {
 
     /// Get current scoring weights
     pub fn get_scoring_weights(env: Env) -> ScoringWeights {
-        env.storage()
-            .instance()
-            .get(&DataKey::Config)
-            .unwrap()
+        env.storage().instance().get(&DataKey::Config).unwrap()
+    }
+
+    /// Get pending weights (if any)
+    pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
+        env.storage().instance().get(&DataKey::PendingWeights)
     }
 
     /// Get pending weights (if any)
@@ -325,7 +352,11 @@ impl CreditOracle {
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         if admin != stored_admin {
             panic!("not authorized");
         }
@@ -383,7 +414,10 @@ mod tests {
         client.register_lender(&admin, &lender);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::TrustedLender(lender.clone())).unwrap_or(false)
+            env.storage()
+                .persistent()
+                .get(&DataKey::TrustedLender(lender.clone()))
+                .unwrap_or(false)
         });
         assert!(is_trusted);
     }
@@ -401,14 +435,21 @@ mod tests {
 
         client.initialize(&admin);
         client.register_feeder(&admin, &feeder);
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 5000,
-            tx_count_30d: 10,
-            avg_counterparties: 3,
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 5000,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
 
         let stored: TxStats = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::TxStats(subject.clone())).unwrap()
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject.clone()))
+                .unwrap()
         });
         assert_eq!(stored.volume_30d, 5000);
         assert_eq!(stored.tx_count_30d, 10);
@@ -436,7 +477,10 @@ mod tests {
         }
 
         let record: RepaymentRecord = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::RepaymentRecord(subject.clone())).unwrap()
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap()
         });
         let rate = record.on_time_count * 10000 / record.total_count;
         assert_eq!(rate, 8000);
@@ -632,4 +676,3 @@ mod tests {
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
     }
 }
-
