@@ -22,6 +22,10 @@ A decentralized identity and credit scoring protocol built on Stellar. Users own
 - [Contributing](#contributing)
 - [License](#license)
 
+**For deployers:**
+
+- [Mainnet Deployment Guide](docs/mainnet-deployment.md) — Security checklist, admin key ceremony, feeder onboarding, and incident response
+
 ---
 
 ## The problem
@@ -93,18 +97,18 @@ The protocol is composed of three Soroban smart contracts deployed on the Stella
 
 Manages decentralized identifiers and verifiable credential anchoring.
 
-| Function                                    | Description                                    |
-| ------------------------------------------- | ---------------------------------------------- |
-| `initialize(admin)`                         | Sets the contract admin                        |
-| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
+| Function                                    | Description                                     |
+| ------------------------------------------- | ----------------------------------------------- |
+| `initialize(admin)`                         | Sets the contract admin                         |
+| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                        |
 | `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
-| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
-| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
-| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
-| `get_vc_count(subject)`                     | Returns the number of anchored VCs             |
-| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid          |
-| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                          |
-| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place            |
+| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
+| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
+| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
+| `get_vc_count(subject)`                     | Returns the number of anchored VCs              |
+| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
+| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
+| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
 
 ### credit-oracle
 
@@ -355,7 +359,7 @@ ZK proof circuit for selective score disclosure — prove "score > 650" without 
 DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
 
 **Phase 6 — Mainnet**
-Security audit. Mainnet deployment. Issuer onboarding program.
+Security audit. [Mainnet deployment](docs/mainnet-deployment.md). Issuer onboarding program.
 
 ---
 
