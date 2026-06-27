@@ -3,7 +3,7 @@
 //!
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
+    contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, Vec,
 };
 
 /// Error types for the revocation registry contract.
@@ -24,7 +24,7 @@ pub enum RevocationKey {
     /// Contract administrator address.
     Admin,
     /// Revocation status for a VC hash.
-    Status(BytesN<32>), // vc_hash → bool
+    Status(BytesN<32>),    // vc_hash → bool
     /// Address of issuer who revoked the VC.
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
 }
@@ -46,11 +46,7 @@ impl RevocationRegistry {
     }
 
     /// Revoke a single verifiable credential by its hash.
-    pub fn revoke(
-        env: Env,
-        issuer: Address,
-        vc_hash: BytesN<32>,
-    ) -> Result<(), RevocationRegistryError> {
+    pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
         env.storage()
             .persistent()
@@ -72,11 +68,7 @@ impl RevocationRegistry {
     }
 
     /// Revoke multiple verifiable credentials in a single batch operation.
-    pub fn batch_revoke(
-        env: Env,
-        issuer: Address,
-        vc_hashes: Vec<BytesN<32>>,
-    ) -> Result<(), RevocationRegistryError> {
+    pub fn batch_revoke(env: Env, issuer: Address, vc_hashes: Vec<BytesN<32>>) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
             env.storage()

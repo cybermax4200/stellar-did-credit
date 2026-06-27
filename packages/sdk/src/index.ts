@@ -208,7 +208,7 @@ export class StellarDIDCreditSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
-        throw new ScoreNotComputedError(subjectAddress);
+        throw new ScoreNotComputedError();
       }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
@@ -237,10 +237,6 @@ export class StellarDIDCreditSDK {
    * @returns true if the credential is valid and not revoked
    */
   async verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean> {
-    if (vcHash.length !== 32) {
-      throw new Error("vcHash must be exactly 32 bytes");
-    }
-
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
@@ -276,12 +272,7 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    const result = scValToNative(resultScVal);
-    if (typeof result !== "boolean") {
-      throw new Error("verify_vc returned a non-boolean result");
-    }
-
-    return result;
+    return scValToNative(resultScVal) as boolean;
   }
 
   /**
