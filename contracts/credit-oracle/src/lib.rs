@@ -39,6 +39,8 @@ pub enum DataKey {
     Score(Address),
     /// Cached VC count for a user
     VcCount(Address),
+    /// Optional identity-oracle contract ID for cross-contract VC count lookup
+    IdentityOracleId(Address),
     /// Pending weights awaiting timelock
     PendingWeights,
     /// Ledger number when pending weights become effective
@@ -204,12 +206,26 @@ impl CreditOracle {
     }
 
     /// Cache VC count for a subject (feeder-only)
+    /// Deprecated: prefer configuring an `IdentityOracleId` and using the
+    /// cross-contract lookup via `set_identity_oracle` + `compute_score`.
     pub fn set_vc_count(env: Env, feeder: Address, subject: Address, count: u32) -> Result<(), CreditOracleError> {
         feeder.require_auth();
         if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
         env.storage().persistent().set(&DataKey::VcCount(subject), &count);
+        Ok(())
+    }
+
+    /// Set the `identity-oracle` contract ID that `compute_score` will call
+    /// to obtain the live VC count. Only the admin can set this.
+    pub fn set_identity_oracle(env: Env, admin: Address, identity_oracle_id: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
     }
 
@@ -223,9 +239,15 @@ impl CreditOracle {
             .get(&DataKey::RepaymentRecord(subject.clone()))
             .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
 
-        let vc_count: u32 = env.storage().persistent()
-            .get(&DataKey::VcCount(subject.clone()))
-            .unwrap_or(0u32);
+        // Prefer live lookup from identity-oracle when configured; fall back
+        // to the cached `VcCount` for backward compatibility.
+        let vc_count: u32 = if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
+            env.invoke_contract(&identity_id, &symbol_short!("get_vc_count"), (subject.clone(),))
+        } else {
+            env.storage().persistent()
+                .get(&DataKey::VcCount(subject.clone()))
+                .unwrap_or(0u32)
+        };
 
         let vc_score = (vc_count * 20).min(100);
         let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
