@@ -1,5 +1,8 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    String, Vec,
+};
 
 /// Error types for the identity-oracle contract.
 #[contracterror]
@@ -72,35 +75,57 @@ impl IdentityOracle {
     }
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
-    pub fn register_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+    pub fn register_issuer(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+    ) -> Result<(), IdentityOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         if admin != stored_admin {
             return Err(IdentityOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
-        env.events()
-            .publish((symbol_short!("IssReg"),), issuer);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TrustedIssuer(issuer.clone()), &true);
+        env.events().publish((symbol_short!("IssReg"),), issuer);
         Ok(())
     }
 
     /// Deregister a trusted credential issuer, preventing future credential anchoring.
     ///
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
-    pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+    pub fn deregister_issuer(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+    ) -> Result<(), IdentityOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         if admin != stored_admin {
             return Err(IdentityOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
-        env.events()
-            .publish((symbol_short!("IssDeReg"),), issuer);
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedIssuer(issuer.clone()));
+        env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
     }
 
     /// Anchor a DID document on-chain by storing its IPFS CID.
-    pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) -> Result<(), IdentityOracleError> {
+    pub fn anchor_did(
+        env: Env,
+        subject: Address,
+        did_doc_cid: String,
+    ) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
         let len = did_doc_cid.len();
@@ -111,7 +136,7 @@ impl IdentityOracle {
         // Accept "ipfs://", "bafy", or "Qm" prefixes
         let ipfs_prefix = String::from_str(&env, "ipfs://");
         let bafy_prefix = String::from_str(&env, "bafy");
-        let qm_prefix   = String::from_str(&env, "Qm");
+        let qm_prefix = String::from_str(&env, "Qm");
 
         let valid = cid_starts_with(&env, &did_doc_cid, &ipfs_prefix)
             || cid_starts_with(&env, &did_doc_cid, &bafy_prefix)
@@ -168,7 +193,12 @@ impl IdentityOracle {
     }
 
     /// Mark a previously anchored VC as revoked by its issuer.
-    pub fn mark_vc_revoked(env: Env, issuer: Address, subject: Address, vc_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
+    pub fn mark_vc_revoked(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), IdentityOracleError> {
         issuer.require_auth();
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -246,7 +276,6 @@ impl IdentityOracle {
         Self::get_total_vc_count(env, subject)
     }
 
-
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -265,7 +294,11 @@ impl IdentityOracle {
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         if admin != stored_admin {
             panic!("not authorized");
         }
@@ -326,7 +359,9 @@ mod tests {
         client.deregister_issuer(&admin, &issuer);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage().persistent().has(&DataKey::TrustedIssuer(issuer.clone()))
+            env.storage()
+                .persistent()
+                .has(&DataKey::TrustedIssuer(issuer.clone()))
         });
         assert!(!is_trusted);
     }
@@ -436,11 +471,17 @@ mod tests {
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
-        let cid = String::from_str(&env, "ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym");
+        let cid = String::from_str(
+            &env,
+            "ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym",
+        );
         client.anchor_did(&subject, &cid);
 
         let subject2 = Address::generate(&env);
-        let cid2 = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        let cid2 = String::from_str(
+            &env,
+            "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4",
+        );
         client.anchor_did(&subject2, &cid2);
 
         let subject3 = Address::generate(&env);
