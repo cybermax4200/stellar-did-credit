@@ -177,12 +177,17 @@ impl IdentityOracle {
             .get(&key)
             .unwrap_or(Vec::new(&env));
 
+        let mut found = false;
         let mut updated = Vec::new(&env);
         for mut record in anchors.iter() {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 record.revoked = true;
+                found = true;
             }
             updated.push_back(record);
+        }
+        if !found {
+            panic!("vc not found");
         }
         env.storage().persistent().set(&key, &updated);
         Ok(())
@@ -536,6 +541,25 @@ mod tests {
         client.initialize(&admin);
         // Pass a zeroed hash — upgrade will fail on auth check before using it
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    #[test]
+    #[should_panic(expected = "vc not found")]
+    fn test_mark_vc_revoked_panics_for_unknown_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.mark_vc_revoked(&issuer, &subject, &vc_hash);
     }
 
     #[test]
