@@ -13,6 +13,8 @@ pub enum IdentityOracleError {
     IssuerNotRegistered = 3,
     /// The provided CID is invalid.
     InvalidCID = 4,
+    /// A VC with the same hash has already been anchored for this subject.
+    DuplicateVC = 5,
 }
 
 /// Storage key variants for the identity-oracle contract.
@@ -151,6 +153,13 @@ impl IdentityOracle {
             .persistent()
             .get(&key)
             .unwrap_or(Vec::new(&env));
+
+        // Reject duplicate vc_hash for this subject
+        for i in 0..anchors.len() {
+            if anchors.get(i).unwrap().vc_hash == vc_hash {
+                return Err(IdentityOracleError::DuplicateVC);
+            }
+        }
 
         let record = VCRecord {
             vc_hash: vc_hash.clone(),
@@ -441,6 +450,34 @@ mod tests {
         let subject3 = Address::generate(&env);
         let cid3 = String::from_str(&env, "QmVocdeKSNbd9jkc3pDjq9FdAVLpiHrfQFwcJMgB7aXZi3");
         client.anchor_did(&subject3, &cid3);
+    }
+
+    #[test]
+    fn test_anchor_vc_rejects_duplicate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        // First anchor succeeds
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+        assert_eq!(client.get_vc_count(&subject), 1);
+
+        // Second anchor with same hash must fail
+        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash);
+        assert_eq!(result, Err(Ok(IdentityOracleError::DuplicateVC)));
+
+        // Count stays at 1
+        assert_eq!(client.get_vc_count(&subject), 1);
     }
 
     #[test]
