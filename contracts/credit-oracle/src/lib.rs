@@ -4,6 +4,10 @@ use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_sh
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
+/// ~1 year at 5 s/ledger.  Applied to every persistent write and instance storage.
+pub const PERSISTENT_LEDGER_TTL: u32 = 6_307_200;
+pub const INSTANCE_LEDGER_TTL: u32 = 6_307_200;
+
 /// Error types for the credit-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -125,6 +129,7 @@ impl CreditOracle {
             repayment_weight: 30,
         };
         env.storage().instance().set(&DataKey::Config, &default_weights);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -136,6 +141,8 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+        env.storage().persistent().extend_ttl(&DataKey::TrustedFeeder(feeder.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -160,6 +167,8 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
+        env.storage().persistent().extend_ttl(&DataKey::TrustedLender(lender.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -182,7 +191,9 @@ impl CreditOracle {
         if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::TxStats(subject), &stats);
+        env.storage().persistent().set(&DataKey::TxStats(subject.clone()), &stats);
+        env.storage().persistent().extend_ttl(&DataKey::TxStats(subject), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -199,7 +210,9 @@ impl CreditOracle {
             record.on_time_count += 1;
         }
         record.total_count += 1;
-        env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
+        env.storage().persistent().set(&DataKey::RepaymentRecord(subject.clone()), &record);
+        env.storage().persistent().extend_ttl(&DataKey::RepaymentRecord(subject), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -209,7 +222,9 @@ impl CreditOracle {
         if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::VcCount(subject), &count);
+        env.storage().persistent().set(&DataKey::VcCount(subject.clone()), &count);
+        env.storage().persistent().extend_ttl(&DataKey::VcCount(subject), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -251,6 +266,8 @@ impl CreditOracle {
                                 .unwrap_or(0),
             tx_volume_30d: tx_stats.volume_30d,
         });
+        env.storage().persistent().extend_ttl(&DataKey::Score(subject.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
 
         score
     }
@@ -616,6 +633,48 @@ mod tests {
         client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    #[test]
+    fn test_ttl_extended_on_persistent_writes() {
+        use soroban_sdk::testutils::Ledger as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+        client.set_vc_count(&feeder, &subject, &3);
+        client.update_tx_stats(&feeder, &subject, &TxStats { volume_30d: 500_000_000, tx_count_30d: 5, avg_counterparties: 2 });
+        client.record_repayment(&lender, &subject, &1000, &true);
+        client.compute_score(&subject);
+
+        // Simulate ~1 year passing (just under TTL ceiling).
+        let jump = PERSISTENT_LEDGER_TTL - 1;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+
+        // Score record and repayment record must still be readable.
+        let score_record = client.get_score(&subject).expect("score was evicted");
+        assert!(score_record.score >= MIN_SCORE);
+
+        let repayment: RepaymentRecord = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .expect("repayment record was evicted")
+        });
+        assert_eq!(repayment.total_count, 1);
     }
 
     #[test]

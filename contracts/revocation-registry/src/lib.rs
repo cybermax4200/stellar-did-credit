@@ -6,6 +6,10 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, Vec,
 };
 
+/// ~1 year at 5 s/ledger.  Applied to every persistent write and instance storage.
+pub const PERSISTENT_LEDGER_TTL: u32 = 6_307_200;
+pub const INSTANCE_LEDGER_TTL: u32 = 6_307_200;
+
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -42,6 +46,7 @@ impl RevocationRegistry {
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -51,9 +56,12 @@ impl RevocationRegistry {
         env.storage()
             .persistent()
             .set(&RevocationKey::Status(vc_hash.clone()), &true);
+        env.storage().persistent().extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
         env.storage()
             .persistent()
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+        env.storage().persistent().extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -74,10 +82,13 @@ impl RevocationRegistry {
             env.storage()
                 .persistent()
                 .set(&RevocationKey::Status(vc_hash.clone()), &true);
+            env.storage().persistent().extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
             env.storage()
                 .persistent()
                 .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+            env.storage().persistent().extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
         }
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
         Ok(())
@@ -179,5 +190,70 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    #[test]
+    fn test_ttl_extended_on_revoke() {
+        use soroban_sdk::testutils::Ledger as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[0xABu8; 32]);
+        client.revoke(&issuer, &vc_hash);
+
+        // Simulate ~1 year passing (just under the TTL ceiling).
+        let jump = PERSISTENT_LEDGER_TTL - 1;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+
+        // Revocation status entry must still be present — not evicted.
+        assert!(
+            client.is_revoked(&vc_hash),
+            "revocation status entry was evicted before TTL expired"
+        );
+    }
+
+    #[test]
+    fn test_ttl_extended_on_batch_revoke() {
+        use soroban_sdk::testutils::Ledger as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        let mut vc_hashes = Vec::new(&env);
+        for i in 0..3u8 {
+            let mut arr = [0u8; 32];
+            arr[0] = i;
+            vc_hashes.push_back(BytesN::from_array(&env, &arr));
+        }
+        client.batch_revoke(&issuer, &vc_hashes);
+
+        let jump = PERSISTENT_LEDGER_TTL - 1;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+
+        for vc_hash in vc_hashes.iter() {
+            assert!(
+                client.is_revoked(&vc_hash),
+                "batch-revoked entry was evicted before TTL expired"
+            );
+        }
     }
 }

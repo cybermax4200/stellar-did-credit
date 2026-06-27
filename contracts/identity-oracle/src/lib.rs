@@ -1,6 +1,14 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
 
+/// ~1 year at 5 s/ledger: 365 × 24 × 3600 / 5 = 6_307_200 ledgers.
+/// Used as both `min_ttl` and `max_ttl` so every write resets the full year.
+pub const PERSISTENT_LEDGER_TTL: u32 = 6_307_200;
+
+/// TTL for instance storage (Admin key).  Keep the contract itself alive as
+/// long as its persistent entries.
+pub const INSTANCE_LEDGER_TTL: u32 = 6_307_200;
+
 /// Error types for the identity-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -70,6 +78,7 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -81,6 +90,8 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
+        env.storage().persistent().extend_ttl(&DataKey::TrustedIssuer(issuer.clone()), PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events()
             .publish((symbol_short!("IssReg"),), issuer);
         Ok(())
@@ -126,6 +137,12 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::DIDDocument(subject.clone()), &did_doc_cid);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DIDDocument(subject.clone()),
+            PERSISTENT_LEDGER_TTL,
+            PERSISTENT_LEDGER_TTL,
+        );
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
         Ok(())
@@ -170,6 +187,8 @@ impl IdentityOracle {
 
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
 
         env.events()
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
@@ -194,6 +213,8 @@ impl IdentityOracle {
             updated.push_back(record);
         }
         env.storage().persistent().set(&key, &updated);
+        env.storage().persistent().extend_ttl(&key, PERSISTENT_LEDGER_TTL, PERSISTENT_LEDGER_TTL);
+        env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL);
         Ok(())
     }
 
@@ -589,5 +610,45 @@ mod tests {
             env.storage().instance().get(&DataKey::Admin).unwrap()
         });
         assert_eq!(stored, admin);
+    }
+
+    #[test]
+    fn test_ttl_extended_on_persistent_writes() {
+        use soroban_sdk::testutils::Ledger as _;
+
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTTLtest");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Simulate ~1 year passing (just under the TTL ceiling).
+        let jump = PERSISTENT_LEDGER_TTL - 1;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+
+        // All entries must still be readable — they were not evicted.
+        assert!(client.is_verified(&subject));
+        let stored_cid: String = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::DIDDocument(subject.clone()))
+                .expect("DID document was evicted")
+        });
+        assert_eq!(stored_cid, cid);
     }
 }
