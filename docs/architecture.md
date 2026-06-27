@@ -177,3 +177,50 @@ Anyone (the subject, a lender, or an application) calls `compute_score(subject)`
 ### 6. Consumer reads the score
 
 A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord`. The SDK's `getScore()` method does this via a read-only simulation — no transaction fees required.
+
+---
+
+## Persistent-storage TTL strategy
+
+### Background
+
+Soroban ledger entries have a finite time-to-live (TTL). A persistent entry that is not accessed or extended within its TTL window will be **archived** (evicted from the live state). Archived entries can be restored via `RestoreFootprintOp`, but this requires off-chain tooling and introduces operational risk. For a credit-identity protocol where DID documents and VC anchors are the source of truth, silent eviction would be a critical failure.
+
+### TTL constants
+
+Every contract defines two constants in its top-level `lib.rs`:
+
+```rust
+/// ~1 year at 5 s/ledger: 365 × 24 × 3600 / 5 = 6_307_200 ledgers.
+pub const PERSISTENT_LEDGER_TTL: u32 = 6_307_200;
+pub const INSTANCE_LEDGER_TTL:   u32 = 6_307_200;
+```
+
+The value `6_307_200` is based on a 5-second ledger close time and gives approximately one year of liveness per write. Both `min_ttl` and `max_ttl` are set to the same value so that every write resets the clock to a full year, regardless of remaining TTL.
+
+### Coverage
+
+`extend_ttl` is called **after every persistent write** across all three contracts:
+
+| Contract              | Keys extended on write                                                                |
+| --------------------- | ------------------------------------------------------------------------------------- |
+| `identity-oracle`     | `TrustedIssuer(addr)`, `DIDDocument(addr)`, `VCAnchors(addr)`                        |
+| `credit-oracle`       | `TrustedFeeder(addr)`, `TrustedLender(addr)`, `TxStats(addr)`, `RepaymentRecord(addr)`, `VcCount(addr)`, `Score(addr)` |
+| `revocation-registry` | `Status(hash)`, `IssuerOfVC(hash)`                                                    |
+
+Instance storage (holding `Admin` and `Config`) is also extended on every mutating call via `env.storage().instance().extend_ttl(INSTANCE_LEDGER_TTL, INSTANCE_LEDGER_TTL)`. This keeps the contract instance itself alive as long as its persistent entries.
+
+### Why extend on every write, not just on first write?
+
+Setting TTL only on creation leaves long-lived entries at risk if the protocol goes dormant for a year. Extending on every write means active contracts naturally maintain their liveness. Entries that are never touched again (e.g., a DID document anchored once and never updated) will eventually be eligible for archival after one full year of inactivity — which is a reasonable and explicit product decision rather than an accidental loss.
+
+### Read-path refreshes (future work)
+
+High-traffic read paths (`is_verified`, `get_score`, `is_revoked`) do not currently extend TTL because they are read-only simulations and do not submit transactions. In a future version, a dedicated `refresh_ttl(subject)` entry-point can be added to allow anyone to pay the fee to extend critical entries without side-effects.
+
+### Test coverage
+
+Each contract has at least one test named `test_ttl_extended_on_*` that:
+1. Writes one or more persistent entries.
+2. Advances the ledger sequence by `PERSISTENT_LEDGER_TTL - 1` using `env.ledger().set_sequence_number`.
+3. Asserts the entries are still readable, confirming the TTL extension took effect.
