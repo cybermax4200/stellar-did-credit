@@ -41,11 +41,29 @@ interface ScoreRecord {
 }
 ```
 
+### `verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean>`
+
+Checks whether a specific 32-byte credential hash is valid for a subject. Uses a read-only simulation against the identity-oracle contract.
+
+```typescript
+const isValid = await sdk.verifyVC("G...", vcHash);
+```
+
+## SDK status
+
+| Method                           | Status         |
+| -------------------------------- | -------------- |
+| `getScore(address)`              | ✅ Implemented |
+| `verifyVC(subject, hash)`        | ✅ Implemented |
+| `isVerified(address)`            | 🚧 Open        |
+| `anchorDID(keypair, cid)`        | 🚧 Open        |
+| `issueVC(issuer, subject, hash)` | 🚧 Open        |
+| `revokeVC(issuer, hash)`         | 📋 Planned     |
+
 ### Other methods (coming soon)
 
 - `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain
 - `issueVC(issuerKeypair, subjectAddress, vcHash)` — anchor a verifiable credential
-- `verifyVC(subjectAddress, vcHash)` — check if a specific VC is valid
 - `isVerified(subjectAddress)` — check if a subject has any active VC
 
 ## Error handling
