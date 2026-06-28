@@ -250,3 +250,9 @@ caller-supplied `admin` to preserve the existing API surface.
 - `require_auth()` is always called on the *stored* admin, not on an
   unvalidated caller-supplied value.
 - The public function signatures are unchanged; no SDK or script updates needed.
+
+---
+
+## Event Indexing
+
+For a detailed catalog of events emitted by the smart contracts and instructions on subscribing to them for off-chain sync, see the [Event Indexing Guide](event-indexing.md).
