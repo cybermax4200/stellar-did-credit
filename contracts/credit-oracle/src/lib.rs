@@ -334,7 +334,7 @@ impl CreditOracle {
             .unwrap_or(0);
         // Counterparty diversity bonus: up to 10 points for avg_counterparties >= 10.
         // This rewards users who transact with many distinct counterparties.
-        let counterparty_bonus = if tx_stats.avg_counterparties >= 10 {
+        let counterparty_bonus: u32 = if tx_stats.avg_counterparties >= 10 {
             10
         } else {
             0
