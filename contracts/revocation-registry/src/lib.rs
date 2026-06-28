@@ -292,27 +292,27 @@ assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
         }
     }
 
-    #[test]
-    fn test_admin_transfer_two_step() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
-        let client = RevocationRegistryClient::new(&env, &contract_id);
+  #[test]
+fn test_admin_transfer_two_step() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RevocationRegistry);
+    let client = RevocationRegistryClient::new(&env, &contract_id);
 
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
+    let admin1 = Address::generate(&env);
+    let admin2 = Address::generate(&env);
 
-        client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
-        client.accept_admin(&admin2);
+    client.initialize(&admin1);
+    client.propose_new_admin(&admin1, &admin2);
+    client.accept_admin(&admin2);
 
-        // new admin can upgrade
-        client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
+    // new admin can upgrade
+    client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
 
-        // old admin cannot upgrade
-      let res = client.try_revoke(&issuer_b, &vc_hash);
-assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
-    }
+    // old admin cannot upgrade
+    let res = client.try_upgrade(&admin1, &BytesN::from_array(&env, &[0u8; 32]));
+    assert_eq!(res, Err(Ok(RevocationRegistryError::NotAuthorized)));
+}
 
     #[test]
     #[should_panic(expected = "not authorized")]

@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -354,9 +354,9 @@ pub fn accept_admin(env: Env, proposed: Address) {
         .storage()
         .instance()
         .get(&Symbol::new(&env, "proposed_admin"))
-        .unwrap_or_else(|| panic_with_error!(&env, IdentityOracleError::Unauthorized));
+        .unwrap_or_else(|| panic_with_error!(&env, IdentityOracleError::NotAuthorized));
     if stored != proposed {
-        panic_with_error!(&env, IdentityOracleError::Unauthorized);
+        panic_with_error!(&env, IdentityOracleError::NotAuthorized);
     }
     env.storage()
         .instance()
