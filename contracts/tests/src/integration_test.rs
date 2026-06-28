@@ -171,12 +171,12 @@ mod tests {
         let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
 
         // First revoke by issuer_a registers the authority.
-       revocation.revoke(&issuer_a, &vc_hash);
+        revocation.revoke(&issuer_a, &vc_hash);
         assert!(revocation.is_revoked(&vc_hash));
 
         // Second revoke by issuer_b must fail.
-      let res = revocation.try_revoke(&issuer_b, &vc_hash);
-assert_eq!(res, Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch)));
+        let res = revocation.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(res, Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch)));
     }
 
     #[test]

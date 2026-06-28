@@ -342,29 +342,20 @@ impl IdentityOracle {
     }
 
     pub fn propose_new_admin(env: Env, current_admin: Address, proposed: Address) {
-    current_admin.require_auth();
-    env.storage()
-        .instance()
-        .set(&Symbol::new(&env, "proposed_admin"), &proposed);
-}
-
-pub fn accept_admin(env: Env, proposed: Address) {
-    proposed.require_auth();
-    let stored: Address = env
-        .storage()
-        .instance()
-        .get(&Symbol::new(&env, "proposed_admin"))
-        .unwrap_or_else(|| panic_with_error!(&env, IdentityOracleError::Unauthorized));
-    if stored != proposed {
-        panic_with_error!(&env, IdentityOracleError::Unauthorized);
+        current_admin.require_auth();
+        // store proposed admin in contract storage
+        env.storage().instance().set(&Symbol::new(&env, "proposed_admin"), &proposed);
     }
-    env.storage()
-        .instance()
-        .set(&Symbol::new(&env, "admin"), &proposed);
-    env.storage()
-        .instance()
-        .remove(&Symbol::new(&env, "proposed_admin"));
-}
+
+    pub fn accept_admin(env: Env, proposed: Address) {
+        proposed.require_auth();
+        let stored: Address = env.storage().instance()
+            .get(&Symbol::new(&env, "proposed_admin"))
+            .expect(ContractError::Unauthorized);
+        assert!(stored == proposed, /* ContractError::Unauthorized */);
+        env.storage().instance().set(&Symbol::new(&env, "admin"), &proposed);
+        env.storage().instance().remove(&Symbol::new(&env, "proposed_admin"));
+    }
 }
 
 
