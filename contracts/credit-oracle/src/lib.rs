@@ -848,6 +848,10 @@ mod tests {
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
             env.storage().instance().extend_ttl(jump, jump);
+            // Persistent entries (TrustedFeeder, TrustedLender) would be
+            // archived after the ledger jump without this TTL extension.
+            env.storage().persistent().extend_ttl(&DataKey::TrustedFeeder(feeder.clone()), jump, jump);
+            env.storage().persistent().extend_ttl(&DataKey::TrustedLender(lender.clone()), jump, jump);
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
