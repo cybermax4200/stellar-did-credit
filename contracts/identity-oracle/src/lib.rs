@@ -351,7 +351,7 @@ impl IdentityOracle {
         proposed.require_auth();
         let stored: Address = env.storage().instance()
             .get(&Symbol::new(&env, "proposed_admin"))
-            .expect(ContractError::Unauthorized);
+          .unwrap_or_else(|| panic_with_error!(&env, IdentityOracleError::NoPendingAdmin));
         assert!(stored == proposed, /* ContractError::Unauthorized */);
         env.storage().instance().set(&Symbol::new(&env, "admin"), &proposed);
         env.storage().instance().remove(&Symbol::new(&env, "proposed_admin"));
