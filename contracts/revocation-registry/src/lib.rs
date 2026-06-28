@@ -301,17 +301,18 @@ mod tests {
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
 
         client.initialize(&admin1);
         client.propose_new_admin(&admin1, &admin2);
         client.accept_admin(&admin2);
 
-        // new admin can upgrade
-        client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
+        // new admin can perform admin-gated actions
+        client.propose_new_admin(&admin2, &admin3);
 
-        // old admin cannot upgrade
-        let res = client.try_upgrade(&admin1, &BytesN::from_array(&env, &[1u8; 32]));
-        assert!(res.is_err());
+        // old admin cannot perform admin-gated actions
+        let res = client.try_propose_new_admin(&admin1, &admin3);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::NotAuthorized)));
     }
 
     #[test]
