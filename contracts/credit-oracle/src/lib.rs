@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal, Symbol, Val, Vec as SorobanVec};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -72,7 +72,7 @@ pub enum DataKey {
     /// Cached VC count for a user
     VcCount(Address),
     /// Optional identity-oracle contract ID for cross-contract VC count lookup
-    IdentityOracleId(Address),
+    IdentityOracleId,
     /// Pending weights awaiting timelock
     PendingWeights,
     /// Ledger number when pending weights become effective
@@ -293,7 +293,8 @@ impl CreditOracle {
         // Prefer live lookup from identity-oracle when configured; fall back
         // to the cached `VcCount` for backward compatibility.
         let vc_count: u32 = if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
-            env.invoke_contract(&identity_id, &symbol_short!("get_vc_count"), (subject.clone(),))
+            let args: SorobanVec<Val> = SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
+            env.invoke_contract(&identity_id, &Symbol::new(&env, "get_vc_count"), args)
         } else {
             env.storage().persistent()
                 .get(&DataKey::VcCount(subject.clone()))

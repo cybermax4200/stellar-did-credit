@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -361,20 +361,12 @@ impl IdentityOracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    pub fn propose_new_admin(env: Env, current_admin: Address, proposed: Address) {
-        current_admin.require_auth();
-        // store proposed admin in contract storage
-        env.storage().instance().set(&Symbol::new(&env, "proposed_admin"), &proposed);
-    }
-
-    pub fn accept_admin(env: Env, proposed: Address) {
-        proposed.require_auth();
-        let stored: Address = env.storage().instance()
-            .get(&Symbol::new(&env, "proposed_admin"))
-          .unwrap_or_else(|| env.panic_with_error(IdentityOracleError::NoPendingAdmin));
-        assert!(stored == proposed, /* ContractError::Unauthorized */);
-        env.storage().instance().set(&Symbol::new(&env, "admin"), &proposed);
-        env.storage().instance().remove(&Symbol::new(&env, "proposed_admin"));
+    /// Return the list of all currently registered trusted issuers.
+    pub fn list_issuers(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuersIndex)
+            .unwrap_or(Vec::new(&env))
     }
 }
 
