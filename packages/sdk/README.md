@@ -29,7 +29,7 @@ console.log(score.score); // e.g. 612
 
 ### `computeScore(payerKeypair: any, subjectAddress: string): Promise<ScoreRecord>`
 
-Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the persisted `ScoreRecord` via `getScore`. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
+Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the full persisted `ScoreRecord` via `getScore` so callers do not need an extra fetch. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
 
 ```typescript
 const score = await sdk.computeScore(payerKeypair, "G...");
