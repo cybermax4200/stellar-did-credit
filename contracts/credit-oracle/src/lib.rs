@@ -1,6 +1,32 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
 
+// ---------------------------------------------------------------------------
+// Auth helper
+// ---------------------------------------------------------------------------
+
+/// Load the stored admin address and call `require_auth()` on it.
+///
+/// This is the single canonical admin-auth pattern used by every admin-gated
+/// function in this contract:
+///
+/// 1. Read the `Admin` key from instance storage (panics if not yet
+///    initialized, which should never happen in normal operation).
+/// 2. Call `require_auth()` so Soroban validates the invoker's signature.
+/// 3. Return the address so callers can use it for equality checks if needed.
+///
+/// All admin functions call this helper instead of duplicating the two-step
+/// lookup + auth inline.
+fn require_admin(env: &Env) -> Address {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not initialized");
+    admin.require_auth();
+    admin
+}
+
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
@@ -128,49 +154,54 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Register a trusted feeder address
+    /// Register a trusted feeder address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        // Verify that the supplied `admin` matches storage and has signed the tx.
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
 
-    /// Deregister a trusted feeder address
+    /// Deregister a trusted feeder address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().remove(&DataKey::TrustedFeeder(feeder.clone()));
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
 
-    /// Register a trusted lender address
+    /// Register a trusted lender address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
 
-    /// Deregister a trusted lender address
+    /// Deregister a trusted lender address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
@@ -213,7 +244,30 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Compute and store credit score for a user
+    /// Compute and store the credit score for `subject`.
+    ///
+    /// # Open-call design (no auth required)
+    ///
+    /// This function intentionally requires **no authorization**. Any address on
+    /// any ledger may call it for any subject. The rationale is:
+    ///
+    /// - **Benefit to subject.** Score computation is a pure read + write of
+    ///   on-chain data that already belongs to the subject. There is no way to
+    ///   harm a subject by computing their score with the data currently in
+    ///   storage.
+    /// - **Lender convenience.** A lender or application can refresh a score
+    ///   immediately before reading it without needing the subject's signature.
+    /// - **Feeder tooling.** The off-chain feeder that keeps `TxStats` and
+    ///   `VcCount` current can also drive score refresh in the same transaction.
+    ///
+    /// # Known gap — recomputation spam (Issue 78)
+    ///
+    /// Because there is no cooldown, a subject (or anyone) could call
+    /// `compute_score` many times in rapid succession to land on a favourable
+    /// `last_updated` ledger timestamp. A minimum recomputation interval (e.g.
+    /// one ledger per subject) would close this gap. Full implementation is
+    /// tracked in Issue 78; it is logged here as a known limitation of the
+    /// current version.
     pub fn compute_score(env: Env, subject: Address) -> u32 {
         let tx_stats: TxStats = env.storage().persistent()
             .get(&DataKey::TxStats(subject.clone()))
@@ -260,14 +314,15 @@ impl CreditOracle {
         env.storage().persistent().get(&DataKey::Score(subject))
     }
 
-    /// Propose new scoring weights with timelock
-    /// Propose new scoring weights with timelock
+    /// Propose new scoring weights with timelock.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        stored_admin.require_auth();
+        // require_admin loads the stored admin and calls require_auth() on it.
+        require_admin(&env);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -324,12 +379,13 @@ impl CreditOracle {
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             panic!("not authorized");
         }
-        admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
