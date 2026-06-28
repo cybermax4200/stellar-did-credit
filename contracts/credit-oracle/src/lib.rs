@@ -403,6 +403,18 @@ impl CreditOracle {
         );
     }
 
+    /// Set the identity-oracle contract ID for cross-contract VC count lookup.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn set_identity_oracle(env: Env, admin: Address, identity_oracle: Address) -> Result<(), CreditOracleError> {
+        let stored = require_admin(&env);
+        if admin != stored {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle);
+        Ok(())
+    }
+
     /// Get current scoring weights
     pub fn get_scoring_weights(env: Env) -> ScoringWeights {
         env.storage()
