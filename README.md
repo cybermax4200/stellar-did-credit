@@ -226,10 +226,20 @@ Contract addresses will be saved to `deployments.testnet.json`.
 
 ## Running tests
 
-Run all Rust and TypeScript tests:
+The primary way to run the full test suite (Rust contracts and TypeScript packages) from the project root:
 
 ```bash
 pnpm test
+```
+
+This runs `cargo test --workspace` followed by TypeScript tests in all workspace packages.
+
+Other root-level commands:
+
+```bash
+pnpm lint    # Clippy + package linters
+pnpm build   # Release Rust build + TypeScript compile
+pnpm fmt     # Format Rust and TypeScript sources
 ```
 
 For individual commands:

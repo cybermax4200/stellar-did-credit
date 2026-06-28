@@ -3,7 +3,11 @@
   "private": true,
   "packageManager": "pnpm@9.0.0",
   "scripts": {
-    "prepare": "lefthook install"
+    "prepare": "lefthook install",
+    "test": "cargo test --workspace && pnpm -r test",
+    "build": "cargo build --release && pnpm -r build",
+    "lint": "cargo clippy --workspace -- -D warnings && pnpm -r lint",
+    "fmt": "cargo fmt --all && pnpm -r fmt"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
