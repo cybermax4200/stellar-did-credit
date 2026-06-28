@@ -77,6 +77,46 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_contract_vc_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Configure credit-oracle to call identity-oracle directly
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Do not set cached VcCount; compute_score should read identity-oracle
+        let score_live = credit.compute_score(&subject);
+        assert!(score_live > 300, "expected live score > 300, got {}", score_live);
+
+        // Now set the cached value to 0 to ensure the cross-contract path is used
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&admin, &feeder);
+        credit.set_vc_count(&feeder, &subject, &0);
+        let score_after_cached_zero = credit.compute_score(&subject);
+        assert_eq!(score_live, score_after_cached_zero, "expected compute_score to prefer identity-oracle over cached VcCount");
+    }
+
+    #[test]
     fn test_revoked_vc_lowers_score() {
         let env = Env::default();
         env.mock_all_auths();

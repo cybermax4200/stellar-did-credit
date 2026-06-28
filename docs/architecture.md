@@ -151,7 +151,7 @@ sequenceDiagram
     CreditOracle-->>Caller: score: u32
 ```
 
-This will require credit-oracle to store the identity-oracle contract ID and use `env.invoke_contract`. The feeder role for VC count will be deprecated once this is live.
+Credit-oracle now stores the `identity-oracle` contract ID and uses `env.invoke_contract` to obtain live VC counts. The feeder role for VC count is deprecated when this cross-contract path is configured.
 
 ---
 
