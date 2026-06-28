@@ -84,6 +84,8 @@ graph TB
     IO      -->|verify_vc| VERIFIER
 ```
 
+For detailed integration steps, see the [Issuer Integration Guide](docs/issuer-guide.md) and the [Lender Integration Guide](docs/lender-guide.md).
+
 ---
 
 ## Contracts
@@ -414,6 +416,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [DID Method Specification](docs/did-spec.md)
 - [Issuer Integration Guide](docs/issuer-guide.md)
+- [Lender Integration Guide](docs/lender-guide.md)
 
 ---
 
