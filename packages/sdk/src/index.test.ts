@@ -83,6 +83,63 @@ describe("StellarDIDCreditSDK", () => {
     mockLastContractCall = undefined;
   });
 
+  describe("isVerified", () => {
+    it("test_isVerified_returns_true_when_subject_has_active_credential", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(true);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_isVerified_returns_false_when_subject_has_no_active_credential", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+    });
+
+    it("test_isVerified_throws_on_simulation_error", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "contract not found",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
+        "Simulation failed: contract not found",
+      );
+    });
+
+    it("test_isVerified_calls_identity_oracle_contract", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await sdk.isVerified(subjectAddress);
+
+      // Verify the subject address was passed as the sole argument
+      expect(mockLastContractCall?.args[0]).toEqual({ address: subjectAddress });
+    });
+  });
+
   describe("verifyVC", () => {
     it("test_verifyVC_true_for_valid_hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
