@@ -15,6 +15,13 @@ If you need a throwaway key for testing, generate one with `stellar keys generat
 
 ---
 
+## Reporting vulnerabilities
+
+**Do not open a public issue for security bugs.**
+Please use [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new) to report vulnerabilities privately. See [SECURITY.md](../SECURITY.md) for scope, response SLA, and disclosure policy.
+
+---
+
 ## Prerequisites
 
 - Rust stable (`rustup update stable`)
