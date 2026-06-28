@@ -187,6 +187,39 @@ mod tests {
     }
 
     #[test]
+    fn test_only_registered_issuer_can_revoke_vc_hash_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup: register and initialize all 3 contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let _identity = IdentityOracleClient::new(&env, &identity_id);
+        let _credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        // Two different issuers
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+
+        // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        // First revoke by issuer_a registers the authority.
+        revocation.revoke(&issuer_a, &vc_hash);
+        assert!(revocation.is_revoked(&vc_hash));
+
+        // Second revoke by issuer_b must fail.
+        let res = revocation.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(res, Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch)));
+    }
+
+    #[test]
     fn test_batch_revoke_integration() {
         let env = Env::default();
         env.mock_all_auths();
