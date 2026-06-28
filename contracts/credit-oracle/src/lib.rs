@@ -77,43 +77,60 @@ pub enum DataKey {
     PendingWeightsEffectiveLedger,
 }
 
-/// Credit score record with metadata
+/// Credit score record with metadata, returned by `get_score`.
+///
+/// This record captures the state of the score at computation time, enabling
+/// consumers to detect stale scores and understand what inputs were used.
 #[contracttype]
 #[derive(Clone)]
 pub struct ScoreRecord {
-    /// Credit score value
+    /// Credit score value, bounded to `MIN_SCORE`–`MAX_SCORE`.
     pub score: u32,
-    /// Timestamp of last update
+    /// Ledger timestamp (Unix seconds) of the last score computation.
     pub last_updated: u64,
-    /// Number of verified credentials
+    /// Number of verified credentials counted toward the score.
     pub vc_count: u32,
-    /// Repayment rate in basis points (0-10000)
+    /// Repayment rate in basis points (0-10000). On-chain mirror of the
+    /// repayment component calculation.
     pub repayment_rate: u32,
-    /// Transaction volume in last 30 days
+    /// 30-day transaction volume in stroops. On-chain mirror of the transaction
+    /// volume component calculation.
     pub tx_volume_30d: i128,
 }
 
 /// Transaction statistics for a user
+///
+/// All fields are used in the credit scoring formula. See `compute_score` for
+/// how each field contributes to the final score.
 #[contracttype]
 #[derive(Clone)]
 pub struct TxStats {
-    /// Total transaction volume in last 30 days
+    /// Total transaction volume in last 30 days. Used for the transaction volume
+    /// component (up to 100 points based on volume tier).
     pub volume_30d: i128,
-    /// Transaction count in last 30 days
+    /// Transaction count in last 30 days. Currently unused but retained for
+    /// future scoring extensions.
     pub tx_count_30d: u32,
-    /// Average number of counterparties
+    /// Average number of distinct counterparties. Provides a bonus of up to 10
+    /// points when >= 10 counterparties on average, rewarding transaction
+    /// diversity.
     pub avg_counterparties: u32,
 }
 
-/// Weights used in credit score calculation
+/// Weights used in credit score calculation. Must sum to 100.
+///
+/// Each weight determines the contribution of its component to the final composite.
 #[contracttype]
 #[derive(Clone)]
 pub struct ScoringWeights {
-    /// Weight for verified credentials component
+    /// Weight for verified credentials component. Controls how much VC score
+    /// influences the composite (0–100).
     pub vc_weight: u32,
-    /// Weight for transaction history component
+    /// Weight for transaction history component. Controls the combined influence
+    /// of volume and counterparty diversity (0–100).
     pub tx_weight: u32,
-    /// Weight for repayment history component
+    /// Weight for repayment history component. Controls how much repayment score
+    /// influences the composite (0–100).
     pub repayment_weight: u32,
 }
 
@@ -127,11 +144,15 @@ pub struct PendingWeightsRecord {
     pub effective_ledger: u32,
 }
 
-/// Internal repayment counters for a subject
+/// Internal repayment counters for a subject.
+///
+/// Used to compute the repayment score component (0–100 based on on-time rate).
 #[contracttype]
 #[derive(Clone)]
 pub struct RepaymentRecord {
+    /// Number of repayments made on time. Higher ratio with total_count improves score.
     pub on_time_count: u32,
+    /// Total number of repayments recorded. Used as divisor for on-time rate calculation.
     pub total_count: u32,
 }
 
@@ -300,6 +321,13 @@ impl CreditOracle {
             .checked_div(repayment.total_count)
             .map(|r| r / 100)
             .unwrap_or(0);
+        // Counterparty diversity bonus: up to 10 points for avg_counterparties >= 10.
+        // This rewards users who transact with many distinct counterparties.
+        let counterparty_bonus = if tx_stats.avg_counterparties >= 10 {
+            10
+        } else {
+            0
+        };
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
         // Each component is already clamped to ≤ 100 and weights sum to 100,
@@ -308,6 +336,7 @@ impl CreditOracle {
         let composite = vc_score.saturating_mul(weights.vc_weight)
             .saturating_add(tx_score.saturating_mul(weights.tx_weight))
             .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
+            .saturating_add(counterparty_bonus.saturating_mul(weights.tx_weight))
             / 100;
 
         // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range;
@@ -562,6 +591,50 @@ mod tests {
 
         let score = client.compute_score(&subject);
         assert_eq!(score, MIN_SCORE);
+    }
+
+    #[test]
+    fn test_counterparty_bonus_adds_points() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        // Set up identical scores except for counterparty diversity
+        client.set_vc_count(&feeder, &subject, &3);
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 3_000_000_000i128,
+            tx_count_30d: 100,
+            avg_counterparties: 5, // below threshold - no bonus
+        });
+        for _ in 0..8 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+        let score_without_bonus = client.compute_score(&subject);
+
+        // Same config but with diverse counterparties
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 3_000_000_000i128,
+            tx_count_30d: 100,
+            avg_counterparties: 12, // at or above threshold - bonus applies
+        });
+        let score_with_bonus = client.compute_score(&subject);
+
+        // Score with bonus should be higher (by ~30 points with default tx_weight=30)
+        assert!(
+            score_with_bonus > score_without_bonus,
+            "expected bonus score ({}) > non-bonus score ({})",
+            score_with_bonus,
+            score_without_bonus
+        );
     }
 
     #[test]

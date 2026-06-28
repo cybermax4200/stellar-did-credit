@@ -37,14 +37,16 @@ export interface ScoreRecord {
  * Transaction statistics for a subject, as stored by the credit-oracle contract
  * and supplied by a trusted feeder via `update_tx_stats`.
  *
- * Maps to the `TxStats` struct in `contracts/credit-oracle`.
+ * All fields contribute to the scoring formula. See docs/scoring-spec.md for details.
  */
 export interface TxStats {
   /** Total transaction volume over the last 30 days, in stroops. Soroban `i128`. */
   volume30d: bigint;
-  /** Number of transactions in the last 30 days. Soroban `u32`. */
+  /** Number of transactions in the last 30 days. Currently unused. Soroban `u32`. */
   txCount30d: number;
-  /** Average number of distinct counterparties. Soroban `u32`. */
+  /** Average number of distinct counterparties. Awards up to 10 bonus points when >= 10.
+   *  Soroban `u32`.
+   */
   avgCounterparties: number;
 }
 
