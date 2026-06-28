@@ -1,4 +1,9 @@
-import { StellarDIDCreditSDK, ScoreNotComputedError } from "./index";
+import {
+  StellarDIDCreditSDK,
+  ScoreNotComputedError,
+  MIN_SCORE,
+  MAX_SCORE,
+} from "./index";
 import type {
   ScoreRecord,
   ProtocolConfig,
@@ -221,5 +226,53 @@ describe("contract struct type exports", () => {
     expect(typeof score.txVolume30d).toBe("bigint");
     expect(score.score).toBe(612);
     expect(config.networkPassphrase).toContain("Test SDF Network");
+  });
+});
+
+describe("test_all_exports_are_defined", () => {
+  // Verifies that every public name from the SDK entry point has a defined
+  // runtime value. TypeScript interfaces (TxStats, ScoringWeights,
+  // RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig) have no runtime
+  // representation — their presence is guaranteed by the `import type` block
+  // at the top of this file, which causes a compile error if any type is
+  // missing from the barrel.
+  it("exports MIN_SCORE and MAX_SCORE as defined numbers", () => {
+    expect(MIN_SCORE).not.toBeUndefined();
+    expect(MAX_SCORE).not.toBeUndefined();
+    expect(MIN_SCORE).toBe(300);
+    expect(MAX_SCORE).toBe(850);
+  });
+
+  it("exports ScoreNotComputedError as a defined constructor", () => {
+    expect(ScoreNotComputedError).not.toBeUndefined();
+    expect(typeof ScoreNotComputedError).toBe("function");
+    const err = new ScoreNotComputedError("GADDR");
+    expect(err).toBeInstanceOf(Error);
+    expect(err.name).toBe("ScoreNotComputedError");
+  });
+
+  it("exports StellarDIDCreditSDK as a defined constructor", () => {
+    expect(StellarDIDCreditSDK).not.toBeUndefined();
+    expect(typeof StellarDIDCreditSDK).toBe("function");
+  });
+
+  it("struct type imports compile without error (TxStats, ScoringWeights, RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig)", () => {
+    // If any of these types were missing from index.ts, TypeScript would
+    // refuse to compile this file, making the test suite fail at build time.
+    const _txStats: TxStats = { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
+    const _weights: ScoringWeights = { vcWeight: 40, txWeight: 30, repaymentWeight: 30 };
+    const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0 };
+    const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
+    const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n };
+    const _config: ProtocolConfig = {
+      identityOracleId: "", creditOracleId: "", revocationRegistryId: "",
+      networkPassphrase: "", rpcUrl: "", simAccount: "",
+    };
+    expect(_txStats).toBeDefined();
+    expect(_weights).toBeDefined();
+    expect(_repayment).toBeDefined();
+    expect(_vc).toBeDefined();
+    expect(_score).toBeDefined();
+    expect(_config).toBeDefined();
   });
 });
