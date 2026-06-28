@@ -15,12 +15,82 @@ import {
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
 
+/**
+ * Credit score record returned by the credit-oracle `get_score` entrypoint.
+ *
+ * Maps to the `ScoreRecord` struct in `contracts/credit-oracle`.
+ */
 export interface ScoreRecord {
+  /** Credit score value, bounded to {@link MIN_SCORE}–{@link MAX_SCORE}. Soroban `u32`. */
   score: number;
+  /** Ledger timestamp (Unix seconds) of the last score computation. Soroban `u64`. */
   lastUpdated: number;
+  /** Number of verified credentials counted toward the score. Soroban `u32`. */
   vcCount: number;
+  /** Repayment rate in basis points (0–10000). Soroban `u32`. */
   repaymentRate: number;
+  /** 30-day transaction volume in stroops. Soroban `i128`. */
   txVolume30d: bigint;
+}
+
+/**
+ * Transaction statistics for a subject, as stored by the credit-oracle contract
+ * and supplied by a trusted feeder via `update_tx_stats`.
+ *
+ * Maps to the `TxStats` struct in `contracts/credit-oracle`.
+ */
+export interface TxStats {
+  /** Total transaction volume over the last 30 days, in stroops. Soroban `i128`. */
+  volume30d: bigint;
+  /** Number of transactions in the last 30 days. Soroban `u32`. */
+  txCount30d: number;
+  /** Average number of distinct counterparties. Soroban `u32`. */
+  avgCounterparties: number;
+}
+
+/**
+ * Weights used by the credit-oracle when computing a composite credit score.
+ * By contract invariant the three weights always sum to 100.
+ *
+ * Maps to the `ScoringWeights` struct in `contracts/credit-oracle`.
+ */
+export interface ScoringWeights {
+  /** Weight applied to the verified-credentials component (0–100). Soroban `u32`. */
+  vcWeight: number;
+  /** Weight applied to the transaction-history component (0–100). Soroban `u32`. */
+  txWeight: number;
+  /** Weight applied to the repayment-history component (0–100). Soroban `u32`. */
+  repaymentWeight: number;
+}
+
+/**
+ * Repayment counters tracked per subject by the credit-oracle contract and
+ * updated by trusted lenders via `record_repayment`.
+ *
+ * Maps to the `RepaymentRecord` struct in `contracts/credit-oracle`.
+ */
+export interface RepaymentRecord {
+  /** Number of repayments made on time. Soroban `u32`. */
+  onTimeCount: number;
+  /** Total number of recorded repayments. Soroban `u32`. */
+  totalCount: number;
+}
+
+/**
+ * On-chain anchor record for a verifiable credential, as stored by the
+ * identity-oracle contract and created via `anchor_vc`.
+ *
+ * Maps to the `VCRecord` struct in `contracts/identity-oracle`.
+ */
+export interface VCRecord {
+  /** SHA-256 hash of the off-chain verifiable credential JSON. Soroban `BytesN<32>`. */
+  vcHash: Buffer;
+  /** Stellar address (G...) of the issuer that anchored this credential. Soroban `Address`. */
+  issuer: string;
+  /** Ledger timestamp (Unix seconds) when the credential was anchored. Soroban `u64`. */
+  anchoredAt: number;
+  /** Whether the credential has been revoked by its issuer. Soroban `bool`. */
+  revoked: boolean;
 }
 
 export interface ProtocolConfig {
@@ -50,9 +120,9 @@ export class StellarDIDCreditSDK {
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey =
-      subjectKeypair.publicKey instanceof Function
-        ? subjectKeypair.publicKey()
-        : subjectKeypair.publicKey;
+        subjectKeypair.publicKey instanceof Function
+            ? subjectKeypair.publicKey()
+            : subjectKeypair.publicKey;
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -62,15 +132,15 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        contract.call(
-          "anchor_did",
-          new Address(publicKey).toScVal(),
-          nativeToScVal(didDocCid),
-        ),
-      )
-      .setTimeout(30)
-      .build();
+        .addOperation(
+            contract.call(
+                "anchor_did",
+                new Address(publicKey).toScVal(),
+                nativeToScVal(didDocCid),
+            ),
+        )
+        .setTimeout(30)
+        .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
@@ -85,8 +155,8 @@ export class StellarDIDCreditSDK {
 
     // Apply simulation result and prepare the transaction
     const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-      tx,
-      sim,
+        tx,
+        sim,
     ).build();
     preparedTx.sign(subjectKeypair);
 
@@ -112,17 +182,17 @@ export class StellarDIDCreditSDK {
    * @returns Transaction hash on successful submission
    */
   async issueVC(
-    issuerKeypair: any,
-    subjectAddress: string,
-    vcHash: Buffer,
+      issuerKeypair: any,
+      subjectAddress: string,
+      vcHash: Buffer,
   ): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey =
-      issuerKeypair.publicKey instanceof Function
-        ? issuerKeypair.publicKey()
-        : issuerKeypair.publicKey;
+        issuerKeypair.publicKey instanceof Function
+            ? issuerKeypair.publicKey()
+            : issuerKeypair.publicKey;
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -135,16 +205,16 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        contract.call(
-          "anchor_vc",
-          new Address(publicKey).toScVal(),
-          new Address(subjectAddress).toScVal(),
-          hashScVal,
-        ),
-      )
-      .setTimeout(30)
-      .build();
+        .addOperation(
+            contract.call(
+                "anchor_vc",
+                new Address(publicKey).toScVal(),
+                new Address(subjectAddress).toScVal(),
+                hashScVal,
+            ),
+        )
+        .setTimeout(30)
+        .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
@@ -159,8 +229,8 @@ export class StellarDIDCreditSDK {
 
     // Apply simulation result and prepare the transaction
     const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-      tx,
-      sim,
+        tx,
+        sim,
     ).build();
     preparedTx.sign(issuerKeypair);
 
@@ -197,11 +267,11 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        contract.call("get_score", new Address(subjectAddress).toScVal()),
-      )
-      .setTimeout(30)
-      .build();
+        .addOperation(
+            contract.call("get_score", new Address(subjectAddress).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
 
     // 4. Simulate to get the return value without submitting
     const sim = await server.simulateTransaction(tx);
@@ -251,15 +321,15 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        contract.call(
-          "verify_vc",
-          new Address(subjectAddress).toScVal(),
-          hashScVal,
-        ),
-      )
-      .setTimeout(30)
-      .build();
+        .addOperation(
+            contract.call(
+                "verify_vc",
+                new Address(subjectAddress).toScVal(),
+                hashScVal,
+            ),
+        )
+        .setTimeout(30)
+        .build();
 
     const sim = await server.simulateTransaction(tx);
 
@@ -301,11 +371,11 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        contract.call("is_verified", new Address(subjectAddress).toScVal()),
-      )
-      .setTimeout(30)
-      .build();
+        .addOperation(
+            contract.call("is_verified", new Address(subjectAddress).toScVal()),
+        )
+        .setTimeout(30)
+        .build();
 
     const sim = await server.simulateTransaction(tx);
 

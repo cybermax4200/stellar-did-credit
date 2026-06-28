@@ -19,6 +19,7 @@ A decentralized identity and credit scoring protocol built on Stellar. Users own
 - [Project structure](#project-structure)
 - [TypeScript SDK](#typescript-sdk)
 - [Roadmap](#roadmap)
+- [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
 
@@ -356,6 +357,14 @@ DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on cha
 
 **Phase 6 — Mainnet**
 Security audit. Mainnet deployment. Issuer onboarding program.
+
+---
+
+## Security
+
+This is a financial protocol. If you find a vulnerability in the smart contracts, SDK, or any other component, **do not open a public issue**.
+
+Report it privately via [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new). We acknowledge all reports within 72 hours. See [SECURITY.md](SECURITY.md) for the full disclosure policy, scope, and response SLA.
 
 ---
 

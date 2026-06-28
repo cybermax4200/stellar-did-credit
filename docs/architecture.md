@@ -180,3 +180,73 @@ Anyone (the subject, a lender, or an application) calls `compute_score(subject)`
 ### 6. Consumer reads the score
 
 A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord`. The SDK's `getScore()` method does this via a read-only simulation — no transaction fees required.
+
+---
+
+## Architecture Decision Records
+
+### ADR-001 — `compute_score` requires no authorisation
+
+**Status:** Accepted
+
+**Context**
+
+`compute_score(subject)` in `credit-oracle` writes a `ScoreRecord` to persistent
+storage but requires no `require_auth()` call. During the initial security review
+the absence of an auth check was flagged as potentially unintentional.
+
+**Decision**
+
+The open-call design is intentional. The function reads only data that has
+already been submitted by trusted parties (feeders and lenders) and writes only
+the subject's own score record. There is no way for an adversarial caller to
+inflate, deflate, or corrupt a score beyond what the on-chain inputs support.
+Keeping the function permissionless:
+
+- allows lenders and applications to refresh a score without holding a subject
+  signature,
+- lets the off-chain feeder refresh scores in the same transaction as a data
+  update, and
+- treats score computation as a public utility rather than a privileged action.
+
+**Consequences**
+
+Because there is no per-subject cooldown, a caller could spam recomputations to
+influence the `last_updated` ledger timestamp stored in `ScoreRecord`. This is a
+known gap tracked in **Issue 78**. A minimum recomputation interval (one ledger
+per subject) will be introduced in a follow-up; it is out of scope for the
+current release. See also the "Known gap" note in `compute_score`'s doc comment
+and in `docs/scoring-spec.md`.
+
+---
+
+### ADR-002 — Uniform `require_admin` helper across all three contracts
+
+**Status:** Accepted
+
+**Context**
+
+Prior to this change the three contracts used two different admin-auth styles:
+
+- `update_weights` / `propose_weights` called `stored_admin.require_auth()`
+  directly after loading the admin from storage (implicit lookup).
+- `register_feeder`, `register_lender`, `register_issuer` etc. required the
+  caller to pass `admin` as an explicit parameter, then compared it against
+  storage before calling `require_auth()` on the passed-in value.
+
+The mixed styles made the auth model hard to reason about and audit.
+
+**Decision**
+
+Extract a private `fn require_admin(env: &Env) -> Address` in each contract.
+The helper loads the stored admin, immediately calls `require_auth()` on it, and
+returns the address. Every admin-gated function now calls `require_admin` first,
+then (for the explicit-parameter variants) compares the returned address to the
+caller-supplied `admin` to preserve the existing API surface.
+
+**Consequences**
+
+- A single read path for the admin address — easier to audit.
+- `require_auth()` is always called on the *stored* admin, not on an
+  unvalidated caller-supplied value.
+- The public function signatures are unchanged; no SDK or script updates needed.

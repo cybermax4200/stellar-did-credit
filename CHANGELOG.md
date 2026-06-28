@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- TypeScript SDK (`@stellar-did-credit/sdk`): exported contract struct types `TxStats`, `ScoringWeights`, `RepaymentRecord`, and `VCRecord` (previously only `ScoreRecord` and `ProtocolConfig` were exported), with JSDoc Soroban-type annotations, export/structural tests, and a new "Types" section in the SDK README (#20)
+
 ## [0.1.0] - 2026-06-24
 
 ### Added

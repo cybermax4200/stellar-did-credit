@@ -1,6 +1,32 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
 
+// ---------------------------------------------------------------------------
+// Auth helper
+// ---------------------------------------------------------------------------
+
+/// Load the stored admin address and call `require_auth()` on it.
+///
+/// This is the single canonical admin-auth pattern used by every admin-gated
+/// function in this contract:
+///
+/// 1. Read the `Admin` key from instance storage (panics if not yet
+///    initialized, which should never happen in normal operation).
+/// 2. Call `require_auth()` so Soroban validates the invoker's signature.
+/// 3. Return the address so callers can use it for equality checks if needed.
+///
+/// All admin functions call this helper instead of duplicating the two-step
+/// lookup + auth inline.
+fn require_admin(env: &Env) -> Address {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not initialized");
+    admin.require_auth();
+    admin
+}
+
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
@@ -134,49 +160,54 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Register a trusted feeder address
+    /// Register a trusted feeder address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        // Verify that the supplied `admin` matches storage and has signed the tx.
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
 
-    /// Deregister a trusted feeder address
+    /// Deregister a trusted feeder address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().remove(&DataKey::TrustedFeeder(feeder.clone()));
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
 
-    /// Register a trusted lender address
+    /// Register a trusted lender address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
 
-    /// Deregister a trusted lender address
+    /// Deregister a trusted lender address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
@@ -202,9 +233,12 @@ impl CreditOracle {
             .get(&DataKey::RepaymentRecord(subject.clone()))
             .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
         if on_time {
-            record.on_time_count += 1;
+            // saturating_add prevents a wrap-around panic if on_time_count
+            // ever reaches u32::MAX (e.g. during fuzz / adversarial input).
+            record.on_time_count = record.on_time_count.saturating_add(1);
         }
-        record.total_count += 1;
+        // Same reasoning for total_count.
+        record.total_count = record.total_count.saturating_add(1);
         env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
         Ok(())
     }
@@ -219,7 +253,30 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Compute and store credit score for a user
+    /// Compute and store the credit score for `subject`.
+    ///
+    /// # Open-call design (no auth required)
+    ///
+    /// This function intentionally requires **no authorization**. Any address on
+    /// any ledger may call it for any subject. The rationale is:
+    ///
+    /// - **Benefit to subject.** Score computation is a pure read + write of
+    ///   on-chain data that already belongs to the subject. There is no way to
+    ///   harm a subject by computing their score with the data currently in
+    ///   storage.
+    /// - **Lender convenience.** A lender or application can refresh a score
+    ///   immediately before reading it without needing the subject's signature.
+    /// - **Feeder tooling.** The off-chain feeder that keeps `TxStats` and
+    ///   `VcCount` current can also drive score refresh in the same transaction.
+    ///
+    /// # Known gap — recomputation spam (Issue 78)
+    ///
+    /// Because there is no cooldown, a subject (or anyone) could call
+    /// `compute_score` many times in rapid succession to land on a favourable
+    /// `last_updated` ledger timestamp. A minimum recomputation interval (e.g.
+    /// one ledger per subject) would close this gap. Full implementation is
+    /// tracked in Issue 78; it is logged here as a known limitation of the
+    /// current version.
     pub fn compute_score(env: Env, subject: Address) -> u32 {
         let tx_stats: TxStats = env.storage().persistent()
             .get(&DataKey::TxStats(subject.clone()))
@@ -233,26 +290,37 @@ impl CreditOracle {
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
-        let vc_score = (vc_count * 20).min(100);
+        // saturating_mul prevents overflow when vc_count is very large (e.g. u32::MAX).
+        // The subsequent .min(100) clamp preserves the original scoring cap.
+        let vc_score = vc_count.saturating_mul(20).min(100);
         let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
-        let repay_score = (repayment.on_time_count * 10000)
+        // saturating_mul prevents overflow if on_time_count is pathologically large;
+        // checked_div still guards against division by zero (total_count == 0).
+        let repay_score = repayment.on_time_count.saturating_mul(10000)
             .checked_div(repayment.total_count)
             .map(|r| r / 100)
             .unwrap_or(0);
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        let composite = (vc_score * weights.vc_weight
-            + tx_score * weights.tx_weight
-            + repay_score * weights.repayment_weight)
+        // Each component is already clamped to ≤ 100 and weights sum to 100,
+        // so the intermediate sums fit comfortably in u32; saturating_add is
+        // used as a defence-in-depth measure.
+        let composite = vc_score.saturating_mul(weights.vc_weight)
+            .saturating_add(tx_score.saturating_mul(weights.tx_weight))
+            .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
             / 100;
 
-        let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
+        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range;
+        // saturating_mul is used for uniformity and future-proofing.
+        let score = (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE);
 
         env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
             score,
             last_updated: env.ledger().timestamp(),
             vc_count,
-            repayment_rate: (repayment.on_time_count * 10000)
+            // Mirror the saturating_mul used above so the stored rate is
+            // computed consistently with the scoring path.
+            repayment_rate: repayment.on_time_count.saturating_mul(10000)
                                 .checked_div(repayment.total_count)
                                 .unwrap_or(0),
             tx_volume_30d: tx_stats.volume_30d,
@@ -266,14 +334,15 @@ impl CreditOracle {
         env.storage().persistent().get(&DataKey::Score(subject))
     }
 
-    /// Propose new scoring weights with timelock
-    /// Propose new scoring weights with timelock
+    /// Propose new scoring weights with timelock.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        stored_admin.require_auth();
+        // require_admin loads the stored admin and calls require_auth() on it.
+        require_admin(&env);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -358,12 +427,13 @@ impl CreditOracle {
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             panic!("not authorized");
         }
-        admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -651,6 +721,39 @@ mod tests {
         client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    /// Verifies that a u32::MAX vc_count does not panic and that the final
+    /// score stays within the documented [MIN_SCORE, MAX_SCORE] range.
+    #[test]
+    fn test_vc_score_saturating_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Feed an extreme vc_count; saturating_mul must prevent a panic here.
+        client.set_vc_count(&feeder, &subject, &u32::MAX);
+
+        // Should not panic.
+        let score = client.compute_score(&subject);
+
+        // The VC contribution is clamped to 100 before weighting, so the
+        // final score must still fall within the documented bounds.
+        assert!(score >= MIN_SCORE, "score below MIN_SCORE: {score}");
+        assert!(score <= MAX_SCORE, "score above MAX_SCORE: {score}");
+
+        // With only vc_count set (no tx stats, no repayments) and default
+        // weights (vc=40), the VC component contributes:
+        //   vc_score=100, composite = 100*40/100 = 40
+        //   score = 300 + 40*550/100 = 300 + 220 = 520
+        assert_eq!(score, 520, "unexpected score with max vc_count");
     }
 
     #[test]
