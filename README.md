@@ -43,7 +43,7 @@ The protocol has three steps:
 A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a [DID document](docs/did-spec.md#23-complete-example-document) to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity. See [DID Document Schema](docs/did-spec.md#2-did-document-schema) for the required JSON-LD structure.
 
 **2. Collect verifiable credentials (VCs)**
-Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
+Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy. See the [Issuer Integration Guide](docs/issuer-guide.md) for the full VC format, hashing process, and a working Node.js example.
 
 **3. Credit score computed on-chain**
 The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed and upgradeable.
@@ -273,11 +273,14 @@ stellar-did-credit/
 │   └── tests/
 │       └── src/integration_test.rs  # Cross-contract integration tests
 ├── packages/
-│   └── sdk/
-│       └── src/index.ts        # TypeScript SDK
+│   ├── sdk/
+│   │   └── src/index.ts        # TypeScript SDK
+│   └── issuer-example/
+│       └── src/issue.ts        # Minimal issuer script (hash + anchor a VC)
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
+│   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
 │   └── scoring-spec.md         # Scoring formula + worked examples
 ├── scripts/
 │   └── deploy.sh               # Testnet deployment script
@@ -410,6 +413,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Project Architecture](docs/architecture.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [DID Method Specification](docs/did-spec.md)
+- [Issuer Integration Guide](docs/issuer-guide.md)
 
 ---
 
