@@ -9,9 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `SECURITY.md` with vulnerability disclosure policy, response SLA (72 h), in-scope/out-of-scope definitions, and coordinated disclosure timeline
-- `CONTRIBUTING.md`: "Reporting vulnerabilities" section linking to `SECURITY.md`
-- `README.md`: Security section directing reporters to GitHub Security Advisories
+- TypeScript SDK (`@stellar-did-credit/sdk`): exported contract struct types `TxStats`, `ScoringWeights`, `RepaymentRecord`, and `VCRecord` (previously only `ScoreRecord` and `ProtocolConfig` were exported), with JSDoc Soroban-type annotations, export/structural tests, and a new "Types" section in the SDK README (#20)
 
 ## [0.1.0] - 2026-06-24
 

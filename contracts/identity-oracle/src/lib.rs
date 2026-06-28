@@ -1,6 +1,33 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
 
+// ---------------------------------------------------------------------------
+// Auth helper
+// ---------------------------------------------------------------------------
+
+/// Load the stored admin address and call `require_auth()` on it.
+///
+/// This is the single canonical admin-auth pattern used by every admin-gated
+/// function in this contract:
+///
+/// 1. Read the `Admin` key from instance storage (panics if not yet
+///    initialized, which should never happen in normal operation).
+/// 2. Call `require_auth()` so Soroban validates the invoker's signature.
+/// 3. Return the address so callers can compare it against the `admin`
+///    parameter passed in by the caller.
+///
+/// All admin functions call this helper instead of duplicating the two-step
+/// lookup + auth inline.
+fn require_admin(env: &Env) -> Address {
+    let admin: Address = env
+        .storage()
+        .instance()
+        .get(&DataKey::Admin)
+        .expect("not initialized");
+    admin.require_auth();
+    admin
+}
+
 /// Error types for the identity-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -74,12 +101,13 @@ impl IdentityOracle {
     }
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
         env.events()
             .publish((symbol_short!("IssReg"),), issuer);
@@ -89,12 +117,13 @@ impl IdentityOracle {
     /// Deregister a trusted credential issuer, preventing future credential anchoring.
     ///
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        admin.require_auth();
         env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
         env.events()
             .publish((symbol_short!("IssDeReg"),), issuer);
@@ -267,13 +296,14 @@ impl IdentityOracle {
         false
     }
 
-    /// Upgrade the contract WASM in-place, preserving address and all stored state
+    /// Upgrade the contract WASM in-place, preserving address and all stored state.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if admin != stored_admin {
+        let stored = require_admin(&env);
+        if admin != stored {
             panic!("not authorized");
         }
-        admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
