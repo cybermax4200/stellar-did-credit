@@ -9,6 +9,8 @@ import type {
 } from "./index";
 
 const mockSimulateTransaction = jest.fn();
+const mockGetAccount = jest.fn();
+const mockSendTransaction = jest.fn();
 let mockLastContractCall:
   | {
       method: string;
@@ -47,6 +49,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
       simulateTransaction: mockSimulateTransaction,
+      getAccount: mockGetAccount,
+      sendTransaction: mockSendTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
@@ -75,7 +79,72 @@ const subjectAddress =
 describe("StellarDIDCreditSDK", () => {
   beforeEach(() => {
     mockSimulateTransaction.mockReset();
+    mockGetAccount.mockReset();
+    mockSendTransaction.mockReset();
     mockLastContractCall = undefined;
+  });
+
+  describe("anchorDID", () => {
+    const subjectKeypair = {
+      publicKey: () => subjectAddress,
+      sign: jest.fn(),
+    };
+
+    it("anchors a DID and returns the transaction hash", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "abc123hash",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const hash = await sdk.anchorDID(subjectKeypair, "ipfs://QmDidDoc");
+
+      expect(hash).toBe("abc123hash");
+      expect(mockLastContractCall?.method).toBe("anchor_did");
+      expect(mockLastContractCall?.args).toHaveLength(2);
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+    });
+
+    it("rejects an empty didDocCid before contacting the network", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.anchorDID(subjectKeypair, "")).rejects.toThrow(
+        "didDocCid must be a non-empty IPFS URI",
+      );
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a didDocCid without an ipfs:// prefix", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair, "QmDidDoc"),
+      ).rejects.toThrow('didDocCid must be an IPFS URI starting with "ipfs://"');
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws a descriptive error when submission is not PENDING", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+      mockSendTransaction.mockResolvedValue({
+        status: "ERROR",
+        errorResult: "insufficient fee",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair, "ipfs://QmDidDoc"),
+      ).rejects.toThrow("anchor_did transaction submission failed");
+    });
   });
 
   describe("verifyVC", () => {

@@ -112,10 +112,18 @@ export class StellarDIDCreditSDK {
    * keypair to authorize the operation.
    *
    * @param subjectKeypair - Stellar keypair of the subject (private + public key)
-   * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
+   * @param didDocCid - IPFS URI of the DID document (e.g. "ipfs://Qm...")
    * @returns Transaction hash on successful submission
+   * @throws {Error} If `didDocCid` is empty or does not start with "ipfs://"
    */
   async anchorDID(subjectKeypair: any, didDocCid: string): Promise<string> {
+    if (typeof didDocCid !== "string" || didDocCid.trim().length === 0) {
+      throw new Error("didDocCid must be a non-empty IPFS URI");
+    }
+    if (!didDocCid.startsWith("ipfs://")) {
+      throw new Error('didDocCid must be an IPFS URI starting with "ipfs://"');
+    }
+
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
@@ -160,10 +168,20 @@ export class StellarDIDCreditSDK {
     preparedTx.sign(subjectKeypair);
 
     // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
+    let response;
+    try {
+      response = await server.sendTransaction(preparedTx);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(`Failed to submit anchor_did transaction: ${message}`);
+    }
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(
+        `anchor_did transaction submission failed (status ${response.status}): ${String(
+          response.errorResult,
+        )}`,
+      );
     }
 
     return response.hash;
