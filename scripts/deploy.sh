@@ -5,7 +5,7 @@
 # producing a broken deployment.
 set -euo pipefail
 
-NETWORK="testnet"
+NETWORK=${NETWORK:-testnet}
 SOURCE="deployer"
 DEPLOYMENTS_FILE="deployments.testnet.json"
 RESUME=false
@@ -114,7 +114,7 @@ fi
 echo "Saving to $DEPLOYMENTS_FILE..."
 cat > "$DEPLOYMENTS_FILE" <<EOF
 {
-  "network": "testnet",
+  "network": "$NETWORK",
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "contracts": {
     "identity-oracle": "$IDENTITY_ID",
@@ -124,4 +124,5 @@ cat > "$DEPLOYMENTS_FILE" <<EOF
 }
 EOF
 
-echo "Done."
+echo "Done." 
+

@@ -1,0 +1,20 @@
+{
+  "name": "@stellar-did-credit/issuer-example",
+  "version": "0.1.0",
+  "description": "Minimal example showing how to hash and anchor a Verifiable Credential using the stellar-did-credit protocol",
+  "private": true,
+  "scripts": {
+    "issue": "ts-node src/issue.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@stellar-did-credit/sdk": "workspace:*",
+    "@stellar/stellar-sdk": "^12.0.0",
+    "canonicalize": "^2.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}

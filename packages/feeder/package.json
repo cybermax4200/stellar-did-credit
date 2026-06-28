@@ -1,0 +1,19 @@
+{
+  "name": "@stellar-did-credit/feeder",
+  "version": "0.1.0",
+  "description": "Reference feeder implementation for the stellar-did-credit protocol — syncs Horizon tx stats and VC counts into the credit-oracle contract",
+  "private": true,
+  "main": "src/index.ts",
+  "scripts": {
+    "start": "ts-node src/index.ts",
+    "build": "tsc"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^12.0.0"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}

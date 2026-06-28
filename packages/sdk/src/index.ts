@@ -120,9 +120,9 @@ export class StellarDIDCreditSDK {
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey =
-        subjectKeypair.publicKey instanceof Function
-            ? subjectKeypair.publicKey()
-            : subjectKeypair.publicKey;
+      subjectKeypair.publicKey instanceof Function
+        ? subjectKeypair.publicKey()
+        : subjectKeypair.publicKey;
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -132,15 +132,15 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-        .addOperation(
-            contract.call(
-                "anchor_did",
-                new Address(publicKey).toScVal(),
-                nativeToScVal(didDocCid),
-            ),
-        )
-        .setTimeout(30)
-        .build();
+      .addOperation(
+        contract.call(
+          "anchor_did",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(didDocCid),
+        ),
+      )
+      .setTimeout(30)
+      .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
@@ -154,10 +154,9 @@ export class StellarDIDCreditSDK {
     }
 
     // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-        tx,
-        sim,
-    ).build();
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
     preparedTx.sign(subjectKeypair);
 
     // Submit to the network
@@ -182,17 +181,17 @@ export class StellarDIDCreditSDK {
    * @returns Transaction hash on successful submission
    */
   async issueVC(
-      issuerKeypair: any,
-      subjectAddress: string,
-      vcHash: Buffer,
+    issuerKeypair: any,
+    subjectAddress: string,
+    vcHash: Buffer,
   ): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey =
-        issuerKeypair.publicKey instanceof Function
-            ? issuerKeypair.publicKey()
-            : issuerKeypair.publicKey;
+      issuerKeypair.publicKey instanceof Function
+        ? issuerKeypair.publicKey()
+        : issuerKeypair.publicKey;
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -205,16 +204,16 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-        .addOperation(
-            contract.call(
-                "anchor_vc",
-                new Address(publicKey).toScVal(),
-                new Address(subjectAddress).toScVal(),
-                hashScVal,
-            ),
-        )
-        .setTimeout(30)
-        .build();
+      .addOperation(
+        contract.call(
+          "anchor_vc",
+          new Address(publicKey).toScVal(),
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
@@ -228,10 +227,9 @@ export class StellarDIDCreditSDK {
     }
 
     // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-        tx,
-        sim,
-    ).build();
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
     preparedTx.sign(issuerKeypair);
 
     // Submit to the network
@@ -242,6 +240,74 @@ export class StellarDIDCreditSDK {
     }
 
     return response.hash;
+  }
+
+  /**
+   * Compute and persist a subject's credit score, then return the stored ScoreRecord.
+   *
+   * Submits a signed transaction to the credit-oracle contract, waits for ledger
+   * confirmation, then fetches the persisted score via `getScore`.
+   *
+   * @param payerKeypair - Stellar keypair paying the transaction fee
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
+   */
+  async computeScore(
+    payerKeypair: any,
+    subjectAddress: string,
+  ): Promise<ScoreRecord> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.creditOracleId);
+
+    const publicKey =
+      payerKeypair.publicKey instanceof Function
+        ? payerKeypair.publicKey()
+        : payerKeypair.publicKey;
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("compute_score", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
+    preparedTx.sign(payerKeypair);
+
+    const response = await server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+    }
+
+    await waitForTransactionConfirmation(server, response.hash);
+
+    try {
+      return await this.getScore(subjectAddress);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `computeScore transaction succeeded, but fetching the stored score for ${subjectAddress} failed: ${message}`,
+      );
+    }
   }
 
   /**
@@ -267,11 +333,11 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-        .addOperation(
-            contract.call("get_score", new Address(subjectAddress).toScVal()),
-        )
-        .setTimeout(30)
-        .build();
+      .addOperation(
+        contract.call("get_score", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
 
     // 4. Simulate to get the return value without submitting
     const sim = await server.simulateTransaction(tx);
@@ -321,15 +387,15 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-        .addOperation(
-            contract.call(
-                "verify_vc",
-                new Address(subjectAddress).toScVal(),
-                hashScVal,
-            ),
-        )
-        .setTimeout(30)
-        .build();
+      .addOperation(
+        contract.call(
+          "verify_vc",
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
 
     const sim = await server.simulateTransaction(tx);
 
@@ -371,11 +437,11 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-        .addOperation(
-            contract.call("is_verified", new Address(subjectAddress).toScVal()),
-        )
-        .setTimeout(30)
-        .build();
+      .addOperation(
+        contract.call("is_verified", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
 
     const sim = await server.simulateTransaction(tx);
 
@@ -399,7 +465,11 @@ export class StellarDIDCreditSDK {
 /** Thrown when get_score is called for an address that has no computed score yet. */
 export class ScoreNotComputedError extends Error {
   constructor(address?: string) {
-    super(address ? `No score computed for address: ${address}` : "Score has not been computed");
+    super(
+      address
+        ? `No score computed for address: ${address}`
+        : "Score has not been computed",
+    );
     this.name = "ScoreNotComputedError";
   }
 }
@@ -408,7 +478,10 @@ export class ScoreNotComputedError extends Error {
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
  * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
  */
-function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+function parseScoreRecord(
+  scVal: xdr.ScVal,
+  subjectAddress: string,
+): ScoreRecord {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
@@ -422,6 +495,39 @@ function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
   };
+}
+
+async function waitForTransactionConfirmation(
+  server: SorobanRpc.Server,
+  txHash: string,
+  attempts = 20,
+  delayMs = 1000,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const result = await server.getTransaction(txHash);
+
+    switch (result.status) {
+      case SorobanRpc.Api.GetTransactionStatus.SUCCESS:
+        return;
+      case SorobanRpc.Api.GetTransactionStatus.FAILED:
+        throw new Error(`Transaction failed after submission: ${txHash}`);
+      case SorobanRpc.Api.GetTransactionStatus.NOT_FOUND:
+        await sleep(delayMs);
+        break;
+      default:
+        throw new Error(
+          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
+        );
+    }
+  }
+
+  throw new Error(
+    `Timed out waiting for computeScore transaction confirmation: ${txHash}`,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export default StellarDIDCreditSDK;

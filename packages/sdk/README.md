@@ -27,6 +27,15 @@ console.log(score.score); // e.g. 612
 
 ## API
 
+### `computeScore(payerKeypair: any, subjectAddress: string): Promise<ScoreRecord>`
+
+Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the persisted `ScoreRecord` via `getScore`. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
+
+```typescript
+const score = await sdk.computeScore(payerKeypair, "G...");
+console.log(score.score); // e.g. 612
+```
+
 ### `getScore(subjectAddress: string): Promise<ScoreRecord>`
 
 Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required.
@@ -51,14 +60,15 @@ const isValid = await sdk.verifyVC("G...", vcHash);
 
 ## SDK status
 
-| Method                           | Status         |
-| -------------------------------- | -------------- |
-| `getScore(address)`              | ✅ Implemented |
-| `verifyVC(subject, hash)`        | ✅ Implemented |
-| `isVerified(address)`            | 🚧 Open        |
-| `anchorDID(keypair, cid)`        | 🚧 Open        |
-| `issueVC(issuer, subject, hash)` | 🚧 Open        |
-| `revokeVC(issuer, hash)`         | 📋 Planned     |
+| Method                                  | Status         |
+| --------------------------------------- | -------------- |
+| `computeScore(keypair, address)`        | ✅ Implemented |
+| `getScore(address)`                     | ✅ Implemented |
+| `verifyVC(subject, hash)`               | ✅ Implemented |
+| `isVerified(address)`                   | 🚧 Open        |
+| `anchorDID(keypair, cid)`               | 🚧 Open        |
+| `issueVC(issuer, subject, hash)`        | 🚧 Open        |
+| `revokeVC(issuer, hash)`                | 📋 Planned     |
 
 ### Other methods (coming soon)
 

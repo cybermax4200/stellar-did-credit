@@ -18,6 +18,7 @@ A decentralized identity and credit scoring protocol built on Stellar. Users own
 - [Running tests](#running-tests)
 - [Project structure](#project-structure)
 - [TypeScript SDK](#typescript-sdk)
+- [Feeder](#feeder)
 - [Roadmap](#roadmap)
 - [Security](#security)
 - [Contributing](#contributing)
@@ -43,7 +44,7 @@ The protocol has three steps:
 A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a [DID document](docs/did-spec.md#23-complete-example-document) to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity. See [DID Document Schema](docs/did-spec.md#2-did-document-schema) for the required JSON-LD structure.
 
 **2. Collect verifiable credentials (VCs)**
-Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
+Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy. See the [Issuer Integration Guide](docs/issuer-guide.md) for the full VC format, hashing process, and a working Node.js example.
 
 **3. Credit score computed on-chain**
 The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed and upgradeable.
@@ -273,11 +274,16 @@ stellar-did-credit/
 │   └── tests/
 │       └── src/integration_test.rs  # Cross-contract integration tests
 ├── packages/
-│   └── sdk/
-│       └── src/index.ts        # TypeScript SDK
+│   ├── sdk/
+│   │   └── src/index.ts        # TypeScript SDK
+│   ├── issuer-example/
+│   │   └── src/issue.ts        # Minimal issuer script (hash + anchor a VC)
+│   └── feeder/
+│       └── src/index.ts        # Reference feeder (syncs Horizon stats + VC count to credit-oracle)
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
+│   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
 │   └── scoring-spec.md         # Scoring formula + worked examples
 ├── scripts/
 │   └── deploy.sh               # Testnet deployment script
@@ -323,6 +329,76 @@ console.log(score.score); // e.g. 612
 
 ---
 
+## Feeder
+
+The `@stellar-did-credit/feeder` package is a reference implementation of the trusted feeder role required by the credit-oracle contract.
+
+A feeder is a registered off-chain service that periodically calls two credit-oracle entrypoints:
+
+| Call | What it does |
+| ---- | ------------ |
+| `set_vc_count(feeder, subject, count)` | Caches the active VC count from identity-oracle into credit-oracle |
+| `update_tx_stats(feeder, subject, stats)` | Pushes 30-day Horizon payment stats (volume, tx count, counterparties) |
+
+### Prerequisites
+
+1. **Register the feeder on-chain** — the credit-oracle admin must call `register_feeder(admin, FEEDER_PUBLIC_KEY)` once before the feeder can submit data.
+2. **Fund the feeder account** — the feeder keypair must hold enough XLM to pay transaction fees.
+
+### Setup
+
+```bash
+cd packages/feeder
+cp .env.example .env
+# Edit .env: set FEEDER_SECRET, SUBJECTS, CREDIT_ORACLE_ID, IDENTITY_ORACLE_ID
+pnpm install
+```
+
+### Run
+
+```bash
+FEEDER_SECRET=S... \
+SUBJECTS=GSUBJECT1...,GSUBJECT2... \
+CREDIT_ORACLE_ID=C... \
+IDENTITY_ORACLE_ID=C... \
+npm start
+```
+
+The feeder runs one full cycle immediately on startup, then repeats every `POLL_INTERVAL_MS` milliseconds (default: 1 hour). Each cycle logs the fetched values and both transaction hashes.
+
+### Use as a library
+
+```typescript
+import { Feeder, FeederConfig } from "@stellar-did-credit/feeder";
+import { Keypair } from "@stellar/stellar-sdk";
+
+const config: FeederConfig = {
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  horizonUrl: "https://horizon-testnet.stellar.org",
+  networkPassphrase: "Test SDF Network ; September 2015",
+  creditOracleId: "C...",
+  identityOracleId: "C...",
+  simAccount: "G...",
+  subjects: ["GSUBJECT..."],
+  pollIntervalMs: 3_600_000,
+};
+
+const feeder = new Feeder(config, Keypair.fromSecret("S..."));
+const stop = feeder.start(); // begins polling; call stop() to halt
+```
+
+You can also drive individual steps:
+
+```typescript
+// Feed a single subject without the polling loop
+await feeder.feedSubject("GSUBJECT...");
+
+// Or run one cycle across all subjects
+await feeder.runCycle();
+```
+
+---
+
 ## Component status
 
 | Component               | Status         | Notes                                |
@@ -331,6 +407,7 @@ console.log(score.score); // e.g. 612
 | credit-oracle           | ✅ Complete    | Scoring formula live on testnet      |
 | revocation-registry     | ✅ Complete    | Batch revocation supported           |
 | TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
 | CLI tool                | 📋 Planned     |                                      |
 | Cross-contract vc_count | 📋 Planned     |                                      |
 | ZK proof layer          | 📋 Research    |                                      |
@@ -410,6 +487,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Project Architecture](docs/architecture.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [DID Method Specification](docs/did-spec.md)
+- [Issuer Integration Guide](docs/issuer-guide.md)
 
 ---
 

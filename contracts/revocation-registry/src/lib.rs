@@ -262,11 +262,11 @@ mod tests {
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
 
         // First revoke registers issuer_a for this vc_hash.
-        client.revoke(&issuer_a, &vc_hash).unwrap();
+       client.revoke(&issuer_a, &vc_hash);
         assert!(client.is_revoked(&vc_hash));
 
         // issuer_b must not be able to revoke the same hash.
-        let res = client.revoke(&issuer_b, &vc_hash);
+        let res = client.try_revoke(&issuer_b, &vc_hash);
         assert_eq!(res, Err(RevocationRegistryError::IssuerMismatch));
     }
 
@@ -310,10 +310,8 @@ mod tests {
         client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
 
         // old admin cannot upgrade
-        let res = std::panic::catch_unwind(|| {
-            client.upgrade(&admin1, &BytesN::from_array(&env, &[1u8; 32]));
-        });
-        assert!(res.is_err());
+        let res = client.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
     #[test]

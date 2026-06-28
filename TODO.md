@@ -1,8 +1,12 @@
-# TODO - Issue #28 revocation-registry issuer bypass
+# TODO - Credit Oracle property-based testing
 
-- [ ] Update `contracts/revocation-registry/src/lib.rs` to lock revocation authority per `vc_hash` (first issuer registers; later issuer must match)
-- [ ] Add/extend revocation-registry tests (unit tests inside the contract) for “only original/registered issuer can revoke”
-- [ ] Add integration test in `contracts/tests/src/integration_test.rs` covering issuer bypass prevention
-- [ ] Update `docs/architecture.md` to document the authority model
-- [ ] Run workspace tests to ensure snapshots and all tests pass
+- [x] Add `proptest = "1"` to `contracts/credit-oracle/Cargo.toml` dev-dependencies.
+- [x] Implement proptest-based unit tests in `contracts/credit-oracle/src/lib.rs`:
+  - [x] `proptest_score_always_in_range`
+  - [x] `proptest_score_monotone_on_repayment`
+  - [x] `proptest_no_panic_on_any_valid_weights`
+- [ ] Run `cargo test -p credit-oracle` and confirm all tests pass. (blocked locally: Windows linker `link.exe` not found)
+- [ ] Update TODO progress as property tests pass.
+
+
 
