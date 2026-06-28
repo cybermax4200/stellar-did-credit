@@ -227,9 +227,12 @@ impl CreditOracle {
             .get(&DataKey::RepaymentRecord(subject.clone()))
             .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
         if on_time {
-            record.on_time_count += 1;
+            // saturating_add prevents a wrap-around panic if on_time_count
+            // ever reaches u32::MAX (e.g. during fuzz / adversarial input).
+            record.on_time_count = record.on_time_count.saturating_add(1);
         }
-        record.total_count += 1;
+        // Same reasoning for total_count.
+        record.total_count = record.total_count.saturating_add(1);
         env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
         Ok(())
     }
@@ -281,26 +284,37 @@ impl CreditOracle {
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
-        let vc_score = (vc_count * 20).min(100);
+        // saturating_mul prevents overflow when vc_count is very large (e.g. u32::MAX).
+        // The subsequent .min(100) clamp preserves the original scoring cap.
+        let vc_score = vc_count.saturating_mul(20).min(100);
         let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
-        let repay_score = (repayment.on_time_count * 10000)
+        // saturating_mul prevents overflow if on_time_count is pathologically large;
+        // checked_div still guards against division by zero (total_count == 0).
+        let repay_score = repayment.on_time_count.saturating_mul(10000)
             .checked_div(repayment.total_count)
             .map(|r| r / 100)
             .unwrap_or(0);
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        let composite = (vc_score * weights.vc_weight
-            + tx_score * weights.tx_weight
-            + repay_score * weights.repayment_weight)
+        // Each component is already clamped to ≤ 100 and weights sum to 100,
+        // so the intermediate sums fit comfortably in u32; saturating_add is
+        // used as a defence-in-depth measure.
+        let composite = vc_score.saturating_mul(weights.vc_weight)
+            .saturating_add(tx_score.saturating_mul(weights.tx_weight))
+            .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
             / 100;
 
-        let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
+        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range;
+        // saturating_mul is used for uniformity and future-proofing.
+        let score = (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE);
 
         env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
             score,
             last_updated: env.ledger().timestamp(),
             vc_count,
-            repayment_rate: (repayment.on_time_count * 10000)
+            // Mirror the saturating_mul used above so the stored rate is
+            // computed consistently with the scoring path.
+            repayment_rate: repayment.on_time_count.saturating_mul(10000)
                                 .checked_div(repayment.total_count)
                                 .unwrap_or(0),
             tx_volume_30d: tx_stats.volume_30d,
@@ -672,6 +686,39 @@ mod tests {
         client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    /// Verifies that a u32::MAX vc_count does not panic and that the final
+    /// score stays within the documented [MIN_SCORE, MAX_SCORE] range.
+    #[test]
+    fn test_vc_score_saturating_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Feed an extreme vc_count; saturating_mul must prevent a panic here.
+        client.set_vc_count(&feeder, &subject, &u32::MAX);
+
+        // Should not panic.
+        let score = client.compute_score(&subject);
+
+        // The VC contribution is clamped to 100 before weighting, so the
+        // final score must still fall within the documented bounds.
+        assert!(score >= MIN_SCORE, "score below MIN_SCORE: {score}");
+        assert!(score <= MAX_SCORE, "score above MAX_SCORE: {score}");
+
+        // With only vc_count set (no tx stats, no repayments) and default
+        // weights (vc=40), the VC component contributes:
+        //   vc_score=100, composite = 100*40/100 = 40
+        //   score = 300 + 40*550/100 = 300 + 220 = 520
+        assert_eq!(score, 520, "unexpected score with max vc_count");
     }
 
     #[test]
