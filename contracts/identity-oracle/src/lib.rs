@@ -293,6 +293,34 @@ impl IdentityOracle {
         false
     }
 
+    /// Propose a new contract admin (two-step admin transfer).
+    pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), IdentityOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if current_admin != stored_admin {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        current_admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Accept a proposed admin role (two-step admin transfer).
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
+        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
+        match pending {
+            Some(p) => {
+                if p != new_admin {
+                    panic!("not authorized");
+                }
+            }
+            None => return Err(IdentityOracleError::NoPendingAdmin),
+        }
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.

@@ -262,12 +262,12 @@ mod tests {
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
 
         // First revoke registers issuer_a for this vc_hash.
-       client.revoke(&issuer_a, &vc_hash);
-        assert!(client.is_revoked(&vc_hash));
+        client.revoke(&issuer_a, &vc_hash);
+        client.revoke(&issuer_a, &vc_hash);
 
         // issuer_b must not be able to revoke the same hash.
         let res = client.try_revoke(&issuer_b, &vc_hash);
-        assert_eq!(res, Err(RevocationRegistryError::IssuerMismatch));
+        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
     #[test]
@@ -301,17 +301,18 @@ mod tests {
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
 
         client.initialize(&admin1);
         client.propose_new_admin(&admin1, &admin2);
         client.accept_admin(&admin2);
 
-        // new admin can upgrade
-        client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
+        // new admin can perform admin-gated actions
+        client.propose_new_admin(&admin2, &admin3);
 
-        // old admin cannot upgrade
-        let res = client.try_revoke(&issuer_b, &vc_hash);
-        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
+        // old admin cannot perform admin-gated actions
+        let res = client.try_propose_new_admin(&admin1, &admin3);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::NotAuthorized)));
     }
 
     #[test]

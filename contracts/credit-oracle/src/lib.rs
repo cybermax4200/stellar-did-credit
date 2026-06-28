@@ -312,16 +312,23 @@ impl CreditOracle {
             .unwrap_or(0);
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        // Each component is already clamped to ≤ 100 and weights sum to 100,
-        // so the intermediate sums fit comfortably in u32; saturating_add is
-        // used as a defence-in-depth measure.
+        // Mathematical invariant: each sub-score is clamped to [0, 100] and
+        // propose_weights enforces vc_weight + tx_weight + repayment_weight == 100,
+        // therefore:
+        //   composite = (vc_score*vc_w + tx_score*tx_w + repay_score*repay_w) / 100
+        //             ≤ (100*vc_w + 100*tx_w + 100*repay_w) / 100
+        //             = 100 * (vc_w + tx_w + repay_w) / 100
+        //             = 100 * 100 / 100 = 100
+        // Consequently score = MIN_SCORE + composite*550/100 ≤ 300 + 550 = 850 =
+        // MAX_SCORE, so the final clamp(300, 850) is a safety net rather than a
+        // load-bearing constraint for any valid weight combination.
+        // saturating_add/mul are used for defence-in-depth against future edits.
         let composite = vc_score.saturating_mul(weights.vc_weight)
             .saturating_add(tx_score.saturating_mul(weights.tx_weight))
             .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
             / 100;
 
-        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range;
-        // saturating_mul is used for uniformity and future-proofing.
+        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range.
         let score = (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE);
 
         env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
@@ -851,6 +858,10 @@ mod tests {
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
             env.storage().instance().extend_ttl(jump, jump);
+            // Persistent entries (TrustedFeeder, TrustedLender) would be
+            // archived after the ledger jump without this TTL extension.
+            env.storage().persistent().extend_ttl(&DataKey::TrustedFeeder(feeder.clone()), jump, jump);
+            env.storage().persistent().extend_ttl(&DataKey::TrustedLender(lender.clone()), jump, jump);
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
@@ -967,6 +978,52 @@ mod tests {
                 weights,
             );
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
+        }
+    }
+
+    /// Verifies that the score stays in [300, 850] for every weight boundary
+    /// combination listed in the issue, using maximum possible inputs.
+    ///
+    /// Mathematical invariant (see also the comment in `compute_score`):
+    /// Each sub-score is clamped to [0, 100] and valid weights sum to exactly
+    /// 100, so composite ≤ 100 for *any* valid weight triple.  Therefore
+    /// score = 300 + composite*550/100 ≤ 300 + 550 = 850, and the
+    /// clamp(300, 850) is always safe — never triggered for valid inputs.
+    #[test]
+    fn test_score_in_range_for_all_weight_boundaries() {
+        // (vc_weight, tx_weight, repayment_weight) — all must sum to 100.
+        let weight_combos: &[(u32, u32, u32)] = &[
+            (100,  0,   0),
+            (  0, 100,  0),
+            (  0,   0, 100),
+            ( 50,  50,  0),
+            ( 50,   0, 50),
+            (  0,  50, 50),
+            ( 34,  33, 33),
+            ( 40,  30, 30),
+        ];
+
+        // Maximum inputs so each sub-score is driven to its ceiling of 100:
+        //   vc_count=5   → vc_score  = 5*20 = 100 (clamped to 100)
+        //   volume_30d=10_000_000_000 → tx_score = 10_000_000_000/100_000_000 = 100
+        //   100/100 repayments → repay_score = 10000/100 = 100
+        for &(vc_w, tx_w, repay_w) in weight_combos {
+            let weights = ScoringWeights {
+                vc_weight: vc_w,
+                tx_weight: tx_w,
+                repayment_weight: repay_w,
+            };
+            let score = setup_and_compute_score(
+                5,                  // vc_count
+                10_000_000_000i64,  // volume_30d in stroops
+                100,                // on_time_count
+                100,                // total_count
+                weights,
+            );
+            assert!(
+                score >= MIN_SCORE && score <= MAX_SCORE,
+                "score {score} out of [{MIN_SCORE}, {MAX_SCORE}] for weights ({vc_w}, {tx_w}, {repay_w})"
+            );
         }
     }
 }
