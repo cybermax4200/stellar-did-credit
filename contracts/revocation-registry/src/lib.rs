@@ -267,7 +267,7 @@ mod tests {
 
         // issuer_b must not be able to revoke the same hash.
         let res = client.try_revoke(&issuer_b, &vc_hash);
-        assert_eq!(res, Err(RevocationRegistryError::IssuerMismatch));
+        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
     #[test]
@@ -310,8 +310,8 @@ fn test_admin_transfer_two_step() {
     client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
 
         // old admin cannot upgrade
-        let res = client.try_revoke(&issuer_b, &vc_hash);
-        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
+        let res = client.try_upgrade(&admin1, &BytesN::from_array(&env, &[0u8; 32]));
+assert!(res.is_err());
     }
 
     #[test]
