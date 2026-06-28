@@ -52,6 +52,8 @@ pub enum DataKey {
     Admin,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
+    /// Global index of currently registered trusted issuers.
+    IssuersIndex,
     /// Whether the given address is a trusted credential issuer.
     TrustedIssuer(Address),
     /// The DID document hash anchored for the given subject address.
@@ -112,7 +114,19 @@ impl IdentityOracle {
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
+
+        let issuer_key = DataKey::TrustedIssuer(issuer.clone());
+        if !env.storage().persistent().has(&issuer_key) {
+            let mut issuers: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::IssuersIndex)
+                .unwrap_or(Vec::new(&env));
+            issuers.push_back(issuer.clone());
+            env.storage().persistent().set(&DataKey::IssuersIndex, &issuers);
+        }
+
+        env.storage().persistent().set(&issuer_key, &true);
         env.events()
             .publish((symbol_short!("IssReg"),), issuer);
         Ok(())
@@ -128,7 +142,22 @@ impl IdentityOracle {
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
+
         env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
+
+        let issuers: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuersIndex)
+            .unwrap_or(Vec::new(&env));
+        let mut updated = Vec::new(&env);
+        for registered_issuer in issuers.iter() {
+            if registered_issuer != issuer {
+                updated.push_back(registered_issuer);
+            }
+        }
+        env.storage().persistent().set(&DataKey::IssuersIndex, &updated);
+
         env.events()
             .publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
@@ -293,6 +322,14 @@ impl IdentityOracle {
         false
     }
 
+    /// Returns the currently registered trusted issuers.
+    pub fn list_issuers(env: Env) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::IssuersIndex)
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
@@ -385,6 +422,40 @@ mod tests {
         let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
         let result = client.try_anchor_vc(&issuer, &subject, &vc_hash2);
         assert_eq!(result, Err(Ok(IdentityOracleError::IssuerNotRegistered)));
+    }
+
+    #[test]
+    fn test_list_issuers_reflects_register_and_deregister_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer1 = Address::generate(&env);
+        let issuer2 = Address::generate(&env);
+
+        assert_eq!(client.list_issuers(), Vec::new(&env));
+
+        client.register_issuer(&admin, &issuer1);
+        assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer1.clone()]));
+
+        client.register_issuer(&admin, &issuer2);
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
+        );
+
+        client.register_issuer(&admin, &issuer1);
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
+        );
+
+        client.deregister_issuer(&admin, &issuer1);
+        assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer2]));
     }
 
     #[test]
@@ -638,4 +709,3 @@ mod tests {
         let _ = client.accept_admin(&non_admin);
     }
 }
-
