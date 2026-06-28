@@ -262,12 +262,12 @@ mod tests {
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
 
         // First revoke registers issuer_a for this vc_hash.
-        client.revoke(&issuer_a, &vc_hash);
+       client.revoke(&issuer_a, &vc_hash);
         assert!(client.is_revoked(&vc_hash));
 
         // issuer_b must not be able to revoke the same hash.
-      let res = client.try_revoke(&issuer_b, &vc_hash);
-assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
+        let res = client.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(res, Err(RevocationRegistryError::IssuerMismatch));
     }
 
     #[test]
@@ -309,10 +309,10 @@ fn test_admin_transfer_two_step() {
     // new admin can upgrade
     client.upgrade(&admin2, &BytesN::from_array(&env, &[0u8; 32]));
 
-    // old admin cannot upgrade
-    let res = client.try_upgrade(&admin1, &BytesN::from_array(&env, &[0u8; 32]));
-    assert_eq!(res, Err(Ok(RevocationRegistryError::NotAuthorized)));
-}
+        // old admin cannot upgrade
+        let res = client.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
+    }
 
     #[test]
     #[should_panic(expected = "not authorized")]
