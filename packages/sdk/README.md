@@ -27,6 +27,15 @@ console.log(score.score); // e.g. 612
 
 ## API
 
+### `anchorDID(subjectKeypair: any, didDocCid: string): Promise<string>`
+
+Anchors a DID document on-chain by storing its IPFS CID via the identity-oracle `anchor_did` entrypoint. The subject keypair authorizes and signs the transaction. `didDocCid` must be a non-empty IPFS URI starting with `ipfs://`; otherwise the call throws before any network request. Returns the submitted transaction hash.
+
+```typescript
+const txHash = await sdk.anchorDID(subjectKeypair, "ipfs://Qm...");
+console.log(txHash);
+```
+
 ### `computeScore(payerKeypair: any, subjectAddress: string): Promise<ScoreRecord>`
 
 Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the persisted `ScoreRecord` via `getScore`. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
@@ -66,13 +75,12 @@ const isValid = await sdk.verifyVC("G...", vcHash);
 | `getScore(address)`                     | ✅ Implemented |
 | `verifyVC(subject, hash)`               | ✅ Implemented |
 | `isVerified(address)`                   | 🚧 Open        |
-| `anchorDID(keypair, cid)`               | 🚧 Open        |
+| `anchorDID(keypair, cid)`               | ✅ Implemented |
 | `issueVC(issuer, subject, hash)`        | 🚧 Open        |
 | `revokeVC(issuer, hash)`                | 📋 Planned     |
 
 ### Other methods (coming soon)
 
-- `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain
 - `issueVC(issuerKeypair, subjectAddress, vcHash)` — anchor a verifiable credential
 - `isVerified(subjectAddress)` — check if a subject has any active VC
 
