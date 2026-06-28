@@ -117,7 +117,7 @@ export class StellarDIDCreditSDK {
    * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
    * @returns Transaction hash on successful submission
    */
-  async anchorDID(subjectKeypair: any, didDocCid: string): Promise<string> {
+  async anchorDID(subjectKeypair: Keypair, didDocCid: string): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 

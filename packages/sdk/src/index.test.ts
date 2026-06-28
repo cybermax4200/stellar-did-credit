@@ -14,6 +14,10 @@ import type {
 } from "./index";
 
 const mockSimulateTransaction = jest.fn();
+const mockGetAccount = jest.fn();
+const mockSendTransaction = jest.fn();
+const mockSign = jest.fn();
+const mockAssembleBuild = jest.fn();
 let mockLastContractCall:
   | {
       method: string;
@@ -28,10 +32,12 @@ jest.mock("@stellar/stellar-sdk", () => ({
   },
   xdr: {},
   Keypair: {},
-  Account: jest.fn().mockImplementation((accountId: string, sequence: string) => ({
-    accountId,
-    sequence,
-  })),
+  Account: jest
+    .fn()
+    .mockImplementation((accountId: string, sequence: string) => ({
+      accountId,
+      sequence,
+    })),
   Address: jest.fn().mockImplementation((address: string) => ({
     toScVal: () => ({ address }),
   })),
@@ -51,14 +57,16 @@ jest.mock("@stellar/stellar-sdk", () => ({
   scValToNative: (scVal: { value: unknown }) => scVal.value,
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
+      getAccount: mockGetAccount,
+      sendTransaction: mockSendTransaction,
       simulateTransaction: mockSimulateTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
       isSimulationSuccess: (sim: { result?: unknown }) => Boolean(sim.result),
       assembleTransaction: jest.fn().mockReturnValue({
-        build: jest.fn().mockReturnValue({
-          sign: jest.fn(),
+        build: mockAssembleBuild.mockReturnValue({
+          sign: mockSign,
         }),
       }),
     },
@@ -68,7 +76,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
 const mockConfig = {
   identityOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   creditOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-  revocationRegistryId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+  revocationRegistryId:
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   networkPassphrase: "Test SDF Network ; September 2015",
   rpcUrl: "http://localhost:8000",
   simAccount: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
@@ -80,7 +89,65 @@ const subjectAddress =
 describe("StellarDIDCreditSDK", () => {
   beforeEach(() => {
     mockSimulateTransaction.mockReset();
+    mockGetAccount.mockReset();
+    mockSendTransaction.mockReset();
+    mockSign.mockReset();
+    mockAssembleBuild.mockClear();
     mockLastContractCall = undefined;
+    mockGetAccount.mockResolvedValue({ sequence: "123" });
+    mockSendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "mock-tx-hash",
+    });
+  });
+
+  describe("anchorDID", () => {
+    it("builds, simulates, assembles, signs, and submits anchor_did", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: null },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const subjectKeypair = {
+        publicKey: jest.fn().mockReturnValue(subjectAddress),
+      };
+
+      const result = await sdk.anchorDID(
+        subjectKeypair as any,
+        "bafybeigdyrzt5x2n7n4t6v6n2q4w5l7m3e5k4h2q7z2r6v4w1x3y5z7abc",
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(subjectKeypair.publicKey).toHaveBeenCalledTimes(1);
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockLastContractCall?.method).toBe("anchor_did");
+      expect(mockLastContractCall?.args).toHaveLength(2);
+      expect(mockAssembleBuild).toHaveBeenCalledTimes(1);
+      expect(mockSign).toHaveBeenCalledWith(subjectKeypair);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("throws when anchor_did simulation fails", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "HostError: Error(Contract, #1)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const subjectKeypair = {
+        publicKey: jest.fn().mockReturnValue(subjectAddress),
+      };
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as any, "bafy-invalid"),
+      ).rejects.toThrow("Simulation failed: HostError: Error(Contract, #1)");
+
+      expect(mockLastContractCall?.method).toBe("anchor_did");
+      expect(mockAssembleBuild).not.toHaveBeenCalled();
+      expect(mockSign).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
   });
 
   describe("verifyVC", () => {
@@ -116,9 +183,9 @@ describe("StellarDIDCreditSDK", () => {
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.verifyVC(subjectAddress, Buffer.alloc(31))).rejects.toThrow(
-        "vcHash must be exactly 32 bytes",
-      );
+      await expect(
+        sdk.verifyVC(subjectAddress, Buffer.alloc(31)),
+      ).rejects.toThrow("vcHash must be exactly 32 bytes");
       expect(mockSimulateTransaction).not.toHaveBeenCalled();
     });
   });
@@ -176,7 +243,7 @@ describe("contract struct type exports", () => {
     expect(typeof weights.txWeight).toBe("number");
     expect(typeof weights.repaymentWeight).toBe("number");
     expect(weights.vcWeight + weights.txWeight + weights.repaymentWeight).toBe(
-        100,
+      100,
     );
   });
 
@@ -214,10 +281,12 @@ describe("contract struct type exports", () => {
     };
 
     const config: ProtocolConfig = {
-      identityOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
-      creditOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+      identityOracleId:
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+      creditOracleId:
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
       revocationRegistryId:
-          "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
       networkPassphrase: "Test SDF Network ; September 2015",
       rpcUrl: "https://soroban-testnet.stellar.org",
       simAccount: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
@@ -259,14 +328,37 @@ describe("test_all_exports_are_defined", () => {
   it("struct type imports compile without error (TxStats, ScoringWeights, RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig)", () => {
     // If any of these types were missing from index.ts, TypeScript would
     // refuse to compile this file, making the test suite fail at build time.
-    const _txStats: TxStats = { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
-    const _weights: ScoringWeights = { vcWeight: 40, txWeight: 30, repaymentWeight: 30 };
+    const _txStats: TxStats = {
+      volume30d: 0n,
+      txCount30d: 0,
+      avgCounterparties: 0,
+    };
+    const _weights: ScoringWeights = {
+      vcWeight: 40,
+      txWeight: 30,
+      repaymentWeight: 30,
+    };
     const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0 };
-    const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
-    const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n };
+    const _vc: VCRecord = {
+      vcHash: Buffer.alloc(32),
+      issuer: "G",
+      anchoredAt: 0,
+      revoked: false,
+    };
+    const _score: ScoreRecord = {
+      score: 300,
+      lastUpdated: 0,
+      vcCount: 0,
+      repaymentRate: 0,
+      txVolume30d: 0n,
+    };
     const _config: ProtocolConfig = {
-      identityOracleId: "", creditOracleId: "", revocationRegistryId: "",
-      networkPassphrase: "", rpcUrl: "", simAccount: "",
+      identityOracleId: "",
+      creditOracleId: "",
+      revocationRegistryId: "",
+      networkPassphrase: "",
+      rpcUrl: "",
+      simAccount: "",
     };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
