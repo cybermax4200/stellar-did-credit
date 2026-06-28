@@ -561,7 +561,7 @@ async function waitForTransactionConfirmation(
         break;
       default:
         throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
+          `Unexpected transaction status for ${txHash}: ${String((result as unknown as { status: string }).status)}`,
         );
     }
   }
