@@ -432,6 +432,20 @@ impl CreditOracle {
         );
     }
 
+    /// Update weights directly (admin/governance only).
+    pub fn update_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
+        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+            return Err(CreditOracleError::InvalidWeights);
+        }
+        require_admin(&env);
+        env.storage().instance().set(&DataKey::Config, &weights);
+        env.events().publish(
+            (symbol_short!("WtApply"),),
+            (weights.vc_weight, weights.tx_weight, weights.repayment_weight),
+        );
+        Ok(())
+    }
+
     /// Set the identity-oracle contract ID for cross-contract VC count lookup.
     ///
     /// Auth: admin only — verified via `require_admin`.
