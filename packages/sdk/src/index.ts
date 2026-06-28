@@ -460,6 +460,49 @@ export class StellarDIDCreditSDK {
 
     return scValToNative(resultScVal) as boolean;
   }
+
+  /**
+   * Fetch the currently registered trusted issuers from the identity-oracle.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @returns Stellar G... addresses of registered issuers
+   */
+  async getRegisteredIssuers(): Promise<string[]> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("list_issuers"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const issuers = scValToNative(resultScVal);
+    if (!Array.isArray(issuers)) {
+      throw new Error("list_issuers returned a non-array result");
+    }
+
+    return issuers.map((issuer) => String(issuer));
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */

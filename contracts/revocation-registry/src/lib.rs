@@ -292,20 +292,20 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_admin_transfer_two_step() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
-        let client = RevocationRegistryClient::new(&env, &contract_id);
+  #[test]
+fn test_admin_transfer_two_step() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RevocationRegistry);
+    let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
         let admin3 = Address::generate(&env);
 
-        client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
-        client.accept_admin(&admin2);
+    client.initialize(&admin1);
+    client.propose_new_admin(&admin1, &admin2);
+    client.accept_admin(&admin2);
 
         // new admin can perform admin-gated actions
         client.propose_new_admin(&admin2, &admin3);
