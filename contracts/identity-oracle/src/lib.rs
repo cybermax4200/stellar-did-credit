@@ -376,18 +376,28 @@ impl IdentityOracle {
         false
     }
 
-    /// Propose a new contract admin (two-step admin transfer).
+    /// Propose a new contract admin (step 1 of two-step admin transfer).
+    ///
+    /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
+    /// The transfer only completes once `new_admin` calls `accept_admin`.
+    ///
+    /// Auth: current admin only — verified via `require_admin`.
     pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if current_admin != stored_admin {
+        let stored = require_admin(&env);
+        if current_admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        current_admin.require_auth();
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 
-    /// Accept a proposed admin role (two-step admin transfer).
+    /// Accept a pending admin proposal (step 2 of two-step admin transfer).
+    ///
+    /// Reads `DataKey::PendingAdmin` from instance storage and verifies that
+    /// `new_admin` matches, then promotes `new_admin` to `DataKey::Admin` and
+    /// clears the pending entry.
+    ///
+    /// Auth: the proposed `new_admin` address must sign the transaction.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         match pending {
