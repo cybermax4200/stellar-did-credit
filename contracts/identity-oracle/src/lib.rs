@@ -250,13 +250,20 @@ impl IdentityOracle {
             .get(&key)
             .unwrap_or(Vec::new(&env));
 
+        let mut found = false;
         let mut updated = Vec::new(&env);
         for mut record in anchors.iter() {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 record.revoked = true;
+                found = true;
             }
             updated.push_back(record);
         }
+
+        if !found {
+            panic!("vc not found");
+        }
+
         env.storage().persistent().set(&key, &updated);
         Ok(())
     }
@@ -315,6 +322,16 @@ impl IdentityOracle {
     }
 
 
+    /// Verify whether a subject has a matching active verifiable credential anchor.
+    ///
+    /// Parameters:
+    /// - `env`: Soroban contract environment used to read persistent storage.
+    /// - `subject`: Address whose anchored VC records are searched.
+    /// - `vc_hash`: SHA-256 hash of the off-chain VC JSON to verify.
+    ///
+    /// Returns `true` when `subject` has an anchored VC record with `vc_hash`
+    /// that has not been revoked, and `false` when no matching active record
+    /// exists. This function is read-only and does not require authentication.
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -370,7 +387,7 @@ impl IdentityOracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Return the list of all currently registered trusted issuers.
+    /// Return the `IssuersIndex` vector of currently registered trusted issuers.
     pub fn list_issuers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -664,6 +681,28 @@ mod tests {
         }
 
         assert_eq!(client.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "vc not found")]
+    fn test_mark_vc_revoked_panics_for_unknown_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let known_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &known_hash);
+
+        let unknown_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.mark_vc_revoked(&issuer, &subject, &unknown_hash);
     }
 
     #[test]
