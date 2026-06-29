@@ -3,7 +3,10 @@ mod tests {
     use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
-    use soroban_sdk::{testutils::Address as _, BytesN, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        BytesN, Env, String,
+    };
 
     #[test]
     fn test_full_protocol_flow() {
@@ -106,14 +109,23 @@ mod tests {
 
         // Do not set cached VcCount; compute_score should read identity-oracle
         let score_live = credit.compute_score(&subject);
-        assert!(score_live > 300, "expected live score > 300, got {}", score_live);
+        assert!(
+            score_live > 300,
+            "expected live score > 300, got {}",
+            score_live
+        );
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
         let feeder = soroban_sdk::Address::generate(&env);
         credit.register_feeder(&admin, &feeder);
         credit.set_vc_count(&feeder, &subject, &0);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let score_after_cached_zero = credit.compute_score(&subject);
-        assert_eq!(score_live, score_after_cached_zero, "expected compute_score to prefer identity-oracle over cached VcCount");
+        assert_eq!(
+            score_live, score_after_cached_zero,
+            "expected compute_score to prefer identity-oracle over cached VcCount"
+        );
     }
 
     #[test]
@@ -175,6 +187,8 @@ mod tests {
 
         // 4. Update vc_count to 0 and recompute score
         credit.set_vc_count(&feeder, &subject, &0);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let new_score = credit.compute_score(&subject);
 
         // 5. Assert new score < initial score
@@ -216,7 +230,12 @@ mod tests {
 
         // Second revoke by issuer_b must fail.
         let res = revocation.try_revoke(&issuer_b, &vc_hash);
-        assert_eq!(res, Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch)));
+        assert_eq!(
+            res,
+            Err(Ok(
+                revocation_registry::RevocationRegistryError::IssuerMismatch
+            ))
+        );
     }
 
     #[test]
@@ -335,6 +354,8 @@ mod tests {
 
         // 16. Update VC count to 2 (after batch revocation) and recompute score
         credit.set_vc_count(&feeder, &subject, &2);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let score_with_2_vcs = credit.compute_score(&subject);
 
         // 17. Assert score decreased due to fewer active VCs
