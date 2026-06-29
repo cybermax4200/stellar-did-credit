@@ -721,7 +721,8 @@ async function waitForTransactionConfirmation(
   for (let attempt = 0; attempt < attempts; attempt++) {
     const result = await server.getTransaction(txHash);
 
-    switch (result.status) {
+    const status = result.status as string;
+    switch (status) {
       case "SUCCESS":
         return;
       case "FAILED": {
@@ -736,7 +737,7 @@ async function waitForTransactionConfirmation(
         break;
       default:
         throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
+          `Unexpected transaction status for ${txHash}: ${status}`,
         );
     }
   }

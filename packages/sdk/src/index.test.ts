@@ -16,6 +16,7 @@ import type {
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
 const mockSendTransaction = jest.fn();
+const mockGetTransaction = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -66,6 +67,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
       simulateTransaction: mockSimulateTransaction,
       getAccount: mockGetAccount,
       sendTransaction: mockSendTransaction,
+      getTransaction: mockGetTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
@@ -102,6 +104,7 @@ describe("StellarDIDCreditSDK", () => {
     mockSimulateTransaction.mockReset();
     mockGetAccount.mockReset();
     mockSendTransaction.mockReset();
+    mockGetTransaction.mockReset();
     mockContractCalls.length = 0;
     mockLastContractCall = undefined;
     mockGetAccount.mockResolvedValue({ sequence: "1" });
