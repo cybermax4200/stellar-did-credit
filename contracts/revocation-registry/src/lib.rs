@@ -169,7 +169,18 @@ impl RevocationRegistry {
             .unwrap_or(false)
     }
 
+    /// Get the issuer that most recently revoked the given verifiable credential.
+    ///
+    /// Returns `Some(Address)` when the VC hash exists in storage under
+    /// `IssuerOfVC` and `None` when the VC hash has never been revoked.
+    pub fn get_revocation_record(env: Env, vc_hash: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&RevocationKey::IssuerOfVC(vc_hash))
+    }
+
     /// Revoke multiple verifiable credentials in a single batch operation.
+
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
@@ -292,20 +303,38 @@ mod tests {
         }
     }
 
-  #[test]
-fn test_admin_transfer_two_step() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, RevocationRegistry);
-    let client = RevocationRegistryClient::new(&env, &contract_id);
+    #[test]
+    fn test_get_revocation_record() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[9u8; 32]);
+
+        assert_eq!(client.get_revocation_record(&vc_hash), None);
+
+        client.revoke(&issuer, &vc_hash);
+
+        assert_eq!(client.get_revocation_record(&vc_hash), Some(issuer));
+    }
+
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
         let admin3 = Address::generate(&env);
 
-    client.initialize(&admin1);
-    client.propose_new_admin(&admin1, &admin2);
-    client.accept_admin(&admin2);
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin1, &admin2);
+        client.accept_admin(&admin2);
+
 
         // new admin can perform admin-gated actions
         client.propose_new_admin(&admin2, &admin3);
