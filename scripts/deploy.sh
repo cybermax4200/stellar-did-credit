@@ -58,6 +58,16 @@ elif $RESUME; then
 fi
 
 # ---------------------------------------------------------------------------
+# Validate deployer key
+# ---------------------------------------------------------------------------
+DEPLOYER_ADDRESS=$(stellar keys address "$SOURCE" 2>&1) || true
+if [[ ! "$DEPLOYER_ADDRESS" =~ ^G[A-Z2-7]{54}$ ]]; then
+  echo "Error: '$SOURCE' key not found. Run: stellar keys generate --global $SOURCE --network $NETWORK" >&2
+  exit 1
+fi
+echo "Deployer address: $DEPLOYER_ADDRESS"
+
+# ---------------------------------------------------------------------------
 # Build
 # ---------------------------------------------------------------------------
 echo "Building contracts..."
