@@ -16,6 +16,7 @@ import type {
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
 const mockSendTransaction = jest.fn();
+const mockGetTransaction = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -66,6 +67,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
       simulateTransaction: mockSimulateTransaction,
       getAccount: mockGetAccount,
       sendTransaction: mockSendTransaction,
+      getTransaction: mockGetTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
@@ -102,6 +104,7 @@ describe("StellarDIDCreditSDK", () => {
     mockSimulateTransaction.mockReset();
     mockGetAccount.mockReset();
     mockSendTransaction.mockReset();
+    mockGetTransaction.mockReset();
     mockContractCalls.length = 0;
     mockLastContractCall = undefined;
     mockGetAccount.mockResolvedValue({ sequence: "1" });
@@ -222,7 +225,6 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-<<<<<<< Updated upstream
   describe("computeScore", () => {
     it("polls getTransaction until SUCCESS before reading the stored score", async () => {
       jest.useFakeTimers();
@@ -295,7 +297,9 @@ describe("StellarDIDCreditSDK", () => {
         'computeScore transaction failed for tx-hash-2: {"status":"FAILED","errorResult":"tx_bad_auth"}',
       );
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
-=======
+    });
+  });
+
   describe("getVCCount", () => {
     it("test_getVCCount_returns_active_count", async () => {
       mockSimulateTransaction.mockResolvedValue({
@@ -324,7 +328,6 @@ describe("StellarDIDCreditSDK", () => {
 
       expect(result).toBe(0);
       expect(mockLastContractCall?.method).toBe("get_active_vc_count");
->>>>>>> Stashed changes
     });
   });
 
