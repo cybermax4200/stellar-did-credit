@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec, IntoVal};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -60,6 +60,8 @@ pub enum DataKey {
     DIDDocument(Address),
     /// The list of VC anchors associated with the given subject address.
     VCAnchors(Address),
+    /// The ID of the revocation registry contract.
+    RevocationRegistryId,
 }
 
 
@@ -94,6 +96,23 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
 #[contract]
 pub struct IdentityOracle;
 
+fn is_record_revoked(env: &Env, record: &VCRecord) -> bool {
+    if record.revoked {
+        return true;
+    }
+    if let Some(registry_id) = env.storage().instance().get::<_, Address>(&DataKey::RevocationRegistryId) {
+        let is_revoked: bool = env.invoke_contract(
+            &registry_id,
+            &soroban_sdk::Symbol::new(env, "is_revoked"),
+            soroban_sdk::vec![env, record.vc_hash.into_val(env)],
+        );
+        if is_revoked {
+            return true;
+        }
+    }
+    false
+}
+
 #[contractimpl]
 impl IdentityOracle {
     /// Initialize the contract with an administrator address.
@@ -103,6 +122,15 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        Ok(())
+    }
+
+    /// Set the revocation registry ID to allow checking global revocations.
+    pub fn set_revocation_registry(env: Env, admin: Address, registry_id: Address) -> Result<(), IdentityOracleError> {
+        if admin != require_admin(&env) {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        env.storage().instance().set(&DataKey::RevocationRegistryId, &registry_id);
         Ok(())
     }
 
@@ -278,7 +306,7 @@ impl IdentityOracle {
             .unwrap_or(Vec::new(&env));
 
         for record in anchors.iter() {
-            if !record.revoked {
+            if !is_record_revoked(&env, &record) {
                 return true;
             }
         }
@@ -307,7 +335,7 @@ impl IdentityOracle {
 
         let mut count: u32 = 0;
         for record in anchors.iter() {
-            if !record.revoked {
+            if !is_record_revoked(&env, &record) {
                 count += 1;
             }
         }
@@ -341,7 +369,7 @@ impl IdentityOracle {
             .unwrap_or(Vec::new(&env));
 
         for record in anchors.iter() {
-            if record.vc_hash == vc_hash && !record.revoked {
+            if record.vc_hash == vc_hash && !is_record_revoked(&env, &record) {
                 return true;
             }
         }
