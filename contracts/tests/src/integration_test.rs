@@ -201,6 +201,48 @@ mod tests {
     }
 
     #[test]
+    fn test_revocation_registry_identity_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Link identity-oracle to revocation-registry
+        identity.set_revocation_registry(&admin, &revocation_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[123u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Assert verified initially
+        assert!(identity.is_verified(&subject));
+
+        // Revoke via revocation-registry
+        revocation.revoke(&issuer, &vc_hash);
+
+        // Verify that is_revoked returns true on the registry
+        assert!(revocation.is_revoked(&vc_hash));
+
+        // Verify that identity-oracle verify_vc returns false
+        assert!(!identity.verify_vc(&subject, &vc_hash));
+
+        // Also verify that is_verified and get_active_vc_count correctly reflect the revocation
+        assert!(!identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
     fn test_only_registered_issuer_can_revoke_vc_hash_integration() {
         let env = Env::default();
         env.mock_all_auths();
