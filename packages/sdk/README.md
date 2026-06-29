@@ -27,7 +27,7 @@ console.log(score.score); // e.g. 612
 
 ## API
 
-### `computeScore(payerKeypair: any, subjectAddress: string): Promise<ScoreRecord>`
+### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
 
 Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the full persisted `ScoreRecord` via `getScore` so callers do not need an extra fetch. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
 
