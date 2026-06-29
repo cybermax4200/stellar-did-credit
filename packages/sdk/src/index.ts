@@ -9,8 +9,7 @@ import {
   Address,
   xdr,
   Keypair,
-} from "@stellar/stellar-sdk";
-import { assembleTransaction } from "@stellar/stellar-sdk/rpc"; 
+} from "@stellar/stellar-sdk"; 
 
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
@@ -104,13 +103,6 @@ export interface ProtocolConfig {
   simAccount: string;
 }
 
-/** Extract the sequence number string from a Soroban RPC account response. */
-function getSequence(accountData: SorobanRpc.Api.GetAccountResponse): string {
-  // The RPC response object carries `sequence` as a string field at runtime.
-  // We narrow through `unknown` to avoid an unsafe `any` cast.
-  const data = accountData as unknown as { sequence: string };
-  return data.sequence;
-}
 
 export class StellarDIDCreditSDK {
   constructor(private config: ProtocolConfig) {}
@@ -132,7 +124,7 @@ export class StellarDIDCreditSDK {
     const publicKey = subjectKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
 
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -158,7 +150,7 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = assembleTransaction(tx, sim).build();
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(tx, sim).build();
     preparedTx.sign(subjectKeypair);
 
     const response = await server.sendTransaction(preparedTx);
@@ -192,7 +184,7 @@ export class StellarDIDCreditSDK {
     const publicKey = issuerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
 
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
@@ -221,7 +213,7 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = assembleTransaction(tx, sim).build();
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
     const response = await server.sendTransaction(preparedTx);
@@ -261,7 +253,7 @@ export class StellarDIDCreditSDK {
     const publicKey = issuerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
 
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
     const issuerScVal = new Address(publicKey).toScVal();
@@ -294,7 +286,7 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = assembleTransaction(tx, sim).build();
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
     const response = await server.sendTransaction(preparedTx);
@@ -326,7 +318,7 @@ export class StellarDIDCreditSDK {
     const publicKey = payerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
 
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -348,7 +340,7 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = assembleTransaction(tx, sim).build();
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(tx, sim).build();
     preparedTx.sign(payerKeypair);
 
     const response = await server.sendTransaction(preparedTx);
@@ -752,7 +744,8 @@ async function waitForTransactionConfirmation(
   for (let attempt = 0; attempt < attempts; attempt++) {
     const result = await server.getTransaction(txHash);
 
-    switch (result.status) {
+    const status = String(result.status);
+    switch (status) {
       case "SUCCESS":
         return;
       case "FAILED": {
@@ -767,7 +760,7 @@ async function waitForTransactionConfirmation(
         break;
       default:
         throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
+          `Unexpected transaction status for ${txHash}: ${status}`,
         );
     }
   }
