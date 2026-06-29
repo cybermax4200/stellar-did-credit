@@ -186,6 +186,10 @@ export class StellarDIDCreditSDK {
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 

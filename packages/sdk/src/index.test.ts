@@ -158,6 +158,39 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("issueVC", () => {
+    it("test_issueVC_calls_anchor_vc", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 9);
+
+      const result = await sdk.issueVC(
+        issuerKeypair as never,
+        subjectAddress,
+        vcHash,
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls).toHaveLength(1);
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "anchor_vc",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(3);
+    });
+
+    it("rejects non-32-byte credential hashes", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
+      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe("revokeVC", () => {
     it("test_revokeVC_calls_revoke_and_mark_vc_revoked", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
