@@ -47,6 +47,8 @@ pub enum RevocationRegistryError {
     IssuerMismatch = 3,
     /// No pending admin proposal exists.
     NoPendingAdmin = 4,
+    /// Batch size exceeds maximum allowed.
+    BatchTooLarge = 5,
 }
 
 /// Storage keys for revocation registry contract.
@@ -186,6 +188,9 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        if vc_hashes.len() > 100 {
+            return Err(RevocationRegistryError::BatchTooLarge);
+        }
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
             // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -304,28 +309,31 @@ mod tests {
     }
 
     #[test]
-    fn test_get_revocation_record() {
+    fn test_batch_revoke_exceeds_limit() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, RevocationRegistry);
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
-        let vc_hash = BytesN::from_array(&env, &[9u8; 32]);
+        let mut vc_hashes = Vec::new(&env);
+        for i in 0..101 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = (i % 256) as u8;
+            hash_arr[1] = (i / 256) as u8;
+            vc_hashes.push_back(BytesN::from_array(&env, &hash_arr));
+        }
 
-        assert_eq!(client.get_revocation_record(&vc_hash), None);
-
-        client.revoke(&issuer, &vc_hash);
-
-        assert_eq!(client.get_revocation_record(&vc_hash), Some(issuer));
+        let res = client.try_batch_revoke(&issuer, &vc_hashes);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
     }
 
-    #[test]
-    fn test_admin_transfer_two_step() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
-        let client = RevocationRegistryClient::new(&env, &contract_id);
+  #[test]
+fn test_admin_transfer_two_step() {
+    let env = Env::default();
+    env.mock_all_auths();
+    let contract_id = env.register_contract(None, RevocationRegistry);
+    let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);

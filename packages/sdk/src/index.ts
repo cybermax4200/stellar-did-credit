@@ -360,7 +360,11 @@ export class StellarDIDCreditSDK {
     await waitForTransactionConfirmation(server, response.hash);
 
     try {
-      return await this.getScore(subjectAddress);
+      const score = await this.getScore(subjectAddress);
+      if (!score) {
+        throw new Error("Score not computed after compute_score transaction");
+      }
+      return score;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -375,10 +379,9 @@ export class StellarDIDCreditSDK {
    * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
    *
    * @param subjectAddress - Stellar G... address of the subject
-   * @returns Parsed ScoreRecord
-   * @throws {ScoreNotComputedError} If the score has not been computed for this address
+   * @returns Parsed ScoreRecord, or null if not computed
    */
-  async getScore(subjectAddress: string): Promise<ScoreRecord> {
+  async getScore(subjectAddress: string): Promise<ScoreRecord | null> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
@@ -708,10 +711,13 @@ export class ScoreNotComputedError extends Error {
 function parseScoreRecord(
   scVal: xdr.ScVal,
   subjectAddress: string,
-): ScoreRecord {
+): ScoreRecord | null {
+  if (!scVal || (typeof scVal.switch === "function" && scVal.switch() === xdr.ScValType.scvVoid())) {
+    return null;
+  }
   const native = scValToNative(scVal);
   if (native === null || native === undefined) {
-    throw new ScoreNotComputedError(subjectAddress);
+    return null;
   }
   const raw = native as Record<string, unknown>;
   return {

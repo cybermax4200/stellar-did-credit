@@ -12,10 +12,12 @@ import type {
   RepaymentRecord,
   VCRecord,
 } from "./index";
+import { xdr } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
 const mockSendTransaction = jest.fn();
+const mockGetTransaction = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -34,7 +36,14 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Networks: {
     TESTNET: "Test SDF Network ; September 2015",
   },
-  xdr: {},
+  xdr: {
+    ScValType: {
+      scvVoid: () => "scvVoid",
+    },
+    ScVal: {
+      scvVoid: () => ({ switch: () => "scvVoid" }),
+    },
+  },
   Keypair: {},
   Account: jest
     .fn()
@@ -57,7 +66,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
   TransactionBuilder: jest.fn().mockImplementation(() => ({
     addOperation: jest.fn().mockReturnThis(),
     setTimeout: jest.fn().mockReturnThis(),
-    build: jest.fn().mockReturnValue({}),
+    build: jest.fn().mockReturnValue({ operations: [] }),
   })),
   nativeToScVal: (value: unknown) => ({ value }),
   scValToNative: (scVal: { value: unknown }) => scVal.value,
@@ -66,17 +75,21 @@ jest.mock("@stellar/stellar-sdk", () => ({
       simulateTransaction: mockSimulateTransaction,
       getAccount: mockGetAccount,
       sendTransaction: mockSendTransaction,
+      getTransaction: mockGetTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
       isSimulationSuccess: (sim: { result?: unknown }) => Boolean(sim.result),
-      assembleTransaction: jest.fn().mockReturnValue({
-        build: jest.fn().mockReturnValue({
-          sign: jest.fn(),
-        }),
-      }),
     },
   },
+}));
+
+jest.mock("@stellar/stellar-sdk/rpc", () => ({
+  assembleTransaction: jest.fn().mockReturnValue({
+    build: jest.fn().mockReturnValue({
+      sign: jest.fn(),
+    }),
+  }),
 }));
 
 const mockConfig = {
@@ -102,6 +115,7 @@ describe("StellarDIDCreditSDK", () => {
     mockSimulateTransaction.mockReset();
     mockGetAccount.mockReset();
     mockSendTransaction.mockReset();
+    mockGetTransaction.mockReset();
     mockContractCalls.length = 0;
     mockLastContractCall = undefined;
     mockGetAccount.mockResolvedValue({ sequence: "1" });
@@ -222,7 +236,6 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-<<<<<<< Updated upstream
   describe("computeScore", () => {
     it("polls getTransaction until SUCCESS before reading the stored score", async () => {
       jest.useFakeTimers();
@@ -295,7 +308,9 @@ describe("StellarDIDCreditSDK", () => {
         'computeScore transaction failed for tx-hash-2: {"status":"FAILED","errorResult":"tx_bad_auth"}',
       );
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
-=======
+    });
+  });
+
   describe("getVCCount", () => {
     it("test_getVCCount_returns_active_count", async () => {
       mockSimulateTransaction.mockResolvedValue({
@@ -324,7 +339,6 @@ describe("StellarDIDCreditSDK", () => {
 
       expect(result).toBe(0);
       expect(mockLastContractCall?.method).toBe("get_active_vc_count");
->>>>>>> Stashed changes
     });
   });
 
@@ -340,6 +354,19 @@ describe("StellarDIDCreditSDK", () => {
       await expect(sdk.getScore(subjectAddress)).rejects.toBeInstanceOf(
         ScoreNotComputedError,
       );
+    });
+
+    it("returns null when contract returns None (scvVoid)", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: xdr.ScVal.scvVoid(),
+        },
+      });
+
+      const result = await sdk.getScore(subjectAddress);
+      expect(result).toBeNull();
     });
 
     it("exports ScoreNotComputedError class", () => {
