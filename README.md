@@ -55,34 +55,28 @@ The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain trans
 
 ```mermaid
 graph TB
-    subgraph Off-chain
-        USER[User / DID keypair]
-        ISSUER[Credential Issuer]
-        IPFS[(IPFS — DID docs & VCs)]
-    end
+    OFF_USER[User / DID keypair]
+    OFF_ISSUER[Credential Issuer]
+    OFF_IPFS[(IPFS — DID docs & VCs)]
 
-    subgraph Stellar Ledger
-        IO[identity-oracle\nDID anchor · VC hash registry]
-        CO[credit-oracle\nScore computation · Repayment history]
-        RR[revocation-registry\nVC status list]
-    end
+    SC_IO[identity-oracle\nDID anchor · VC hash registry]
+    SC_CO[credit-oracle\nScore computation · Repayment history]
+    SC_RR[revocation-registry\nVC status list]
 
-    subgraph Consumers
-        LENDER[DeFi Lender]
-        ANCHOR[Stellar Anchor]
-        VERIFIER[Third-party Verifier]
-    end
+    CON_LENDER[DeFi Lender]
+    CON_ANCHOR[Stellar Anchor]
+    CON_VERIFIER[Third-party Verifier]
 
-    USER    -->|anchor_did CID| IO
-    ISSUER  -->|anchor_vc hash| IO
-    ISSUER  -->|store full VC| IPFS
-    USER    -->|store DID doc| IPFS
-    IO      -->|is_verified check| CO
-    RR      -->|revocation check| IO
-    ISSUER  -->|revoke| RR
-    CO      -->|get_score| LENDER
-    CO      -->|get_score| ANCHOR
-    IO      -->|verify_vc| VERIFIER
+    OFF_USER    -->|anchor_did CID| SC_IO
+    OFF_ISSUER  -->|anchor_vc hash| SC_IO
+    OFF_ISSUER  -->|store full VC| OFF_IPFS
+    OFF_USER    -->|store DID doc| OFF_IPFS
+    SC_IO       -->|is_verified check| SC_CO
+    SC_RR       -->|revocation check| SC_IO
+    OFF_ISSUER  -->|revoke| SC_RR
+    SC_CO       -->|get_score| CON_LENDER
+    SC_CO       -->|get_score| CON_ANCHOR
+    SC_IO       -->|verify_vc| CON_VERIFIER
 ```
 
 ---
