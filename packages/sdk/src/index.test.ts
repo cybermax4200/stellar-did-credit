@@ -14,8 +14,16 @@ import type {
 } from "./index";
 
 const mockSimulateTransaction = jest.fn();
+const mockGetAccount = jest.fn();
+const mockSendTransaction = jest.fn();
+const mockContractCalls: Array<{
+  contractId: string;
+  method: string;
+  args: unknown[];
+}> = [];
 let mockLastContractCall:
   | {
+      contractId: string;
       method: string;
       args: unknown[];
     }
@@ -38,7 +46,9 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Contract: jest.fn().mockImplementation((contractId: string) => ({
     contractId,
     call: (method: string, ...args: unknown[]) => {
-      mockLastContractCall = { method, args };
+      const call = { contractId, method, args };
+      mockLastContractCall = call;
+      mockContractCalls.push(call);
       return { method, args };
     },
   })),
@@ -52,6 +62,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
       simulateTransaction: mockSimulateTransaction,
+      getAccount: mockGetAccount,
+      sendTransaction: mockSendTransaction,
     })),
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
@@ -77,10 +89,23 @@ const mockConfig = {
 const subjectAddress =
   "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM";
 
+const issuerKeypair = {
+  publicKey: () => "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+};
+
 describe("StellarDIDCreditSDK", () => {
   beforeEach(() => {
     mockSimulateTransaction.mockReset();
+    mockGetAccount.mockReset();
+    mockSendTransaction.mockReset();
+    mockContractCalls.length = 0;
     mockLastContractCall = undefined;
+    mockGetAccount.mockResolvedValue({ sequence: "1" });
+    mockSimulateTransaction.mockResolvedValue({ result: {} });
+    mockSendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "mock-tx-hash",
+    });
   });
 
   describe("getDIDDocument", () => {
@@ -112,6 +137,44 @@ describe("StellarDIDCreditSDK", () => {
 
       expect(result).toBeNull();
       expect(mockLastContractCall?.method).toBe("get_did_document");
+    });
+  });
+
+  describe("revokeVC", () => {
+    it("test_revokeVC_calls_revoke_and_mark_vc_revoked", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 9);
+
+      const result = await sdk.revokeVC(
+        issuerKeypair as never,
+        subjectAddress,
+        vcHash,
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls).toHaveLength(2);
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.revocationRegistryId,
+        method: "revoke",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(2);
+      expect(mockContractCalls[1]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "mark_vc_revoked",
+      });
+      expect(mockContractCalls[1]?.args).toHaveLength(3);
+    });
+
+    it("rejects non-32-byte credential hashes", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
+      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
     });
   });
 
