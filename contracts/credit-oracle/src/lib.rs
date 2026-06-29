@@ -334,7 +334,7 @@ impl CreditOracle {
             .unwrap_or(0);
         // Counterparty diversity bonus: up to 10 points for avg_counterparties >= 10.
         // This rewards users who transact with many distinct counterparties.
-        let counterparty_bonus = if tx_stats.avg_counterparties >= 10 {
+        let counterparty_bonus: u32 = if tx_stats.avg_counterparties >= 10 {
             10
         } else {
             0
@@ -1075,6 +1075,48 @@ mod tests {
     /// 100, so composite ≤ 100 for *any* valid weight triple.  Therefore
     /// score = 300 + composite*550/100 ≤ 300 + 550 = 850, and the
     /// clamp(300, 850) is always safe — never triggered for valid inputs.
+    /// Verifies that the "Exceptional" profile described in the README and
+    /// docs/scoring-spec.md achieves exactly 850 (MAX_SCORE).
+    ///
+    /// Inputs: vc_count=5, volume_30d=10_000_000_000 stroops (100 XLM),
+    ///         on_time=100, total=100, avg_counterparties=0 (no bonus).
+    ///
+    /// Formula (default weights 40/30/30, no counterparty bonus):
+    ///   vc_score    = min(5×20, 100)  = 100
+    ///   tx_score    = min(10_000_000_000÷100_000_000, 100) = 100
+    ///   repay_score = (100×10000÷100)÷100 = 100
+    ///   composite   = (100×40 + 100×30 + 100×30) ÷ 100 = 100
+    ///   score       = clamp(300 + 100×550÷100, 300, 850) = 850
+    #[test]
+    fn test_exceptional_score_equals_850() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        client.set_vc_count(&feeder, &subject, &5);
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 10_000_000_000i128,
+            tx_count_30d: 0,
+            avg_counterparties: 0,
+        });
+        for _ in 0..100 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert_eq!(score, MAX_SCORE, "exceptional profile must score exactly {MAX_SCORE}");
+    }
+
     #[test]
     fn test_score_in_range_for_all_weight_boundaries() {
         // (vc_weight, tx_weight, repayment_weight) — all must sum to 100.
