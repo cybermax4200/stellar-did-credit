@@ -117,14 +117,11 @@ export class StellarDIDCreditSDK {
    * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
    * @returns Transaction hash on successful submission
    */
-  async anchorDID(subjectKeypair: any, didDocCid: string): Promise<string> {
+  async anchorDID(subjectKeypair: Keypair, didDocCid: string): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const publicKey =
-      subjectKeypair.publicKey instanceof Function
-        ? subjectKeypair.publicKey()
-        : subjectKeypair.publicKey;
+    const publicKey = subjectKeypair.publicKey();
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -183,17 +180,14 @@ export class StellarDIDCreditSDK {
    * @returns Transaction hash on successful submission
    */
   async issueVC(
-    issuerKeypair: any,
+    issuerKeypair: Keypair,
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
-    const publicKey =
-      issuerKeypair.publicKey instanceof Function
-        ? issuerKeypair.publicKey()
-        : issuerKeypair.publicKey;
+    const publicKey = issuerKeypair.publicKey();
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
@@ -255,16 +249,13 @@ export class StellarDIDCreditSDK {
    * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
    */
   async computeScore(
-    payerKeypair: any,
+    payerKeypair: Keypair,
     subjectAddress: string,
   ): Promise<ScoreRecord> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
-    const publicKey =
-      payerKeypair.publicKey instanceof Function
-        ? payerKeypair.publicKey()
-        : payerKeypair.publicKey;
+    const publicKey = payerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, (accountData as any).sequence);
@@ -610,9 +601,7 @@ async function waitForTransactionConfirmation(
         await sleep(delayMs);
         break;
       default:
-        throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
-        );
+        throw new Error(`Unexpected transaction status for ${txHash}`);
     }
   }
 
