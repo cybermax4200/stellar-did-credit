@@ -58,6 +58,19 @@ Checks whether a specific 32-byte credential hash is valid for a subject. Uses a
 const isValid = await sdk.verifyVC("G...", vcHash);
 ```
 
+### `getDIDDocument(subjectAddress: string): Promise<string | null>`
+
+Retrieves the anchored DID document CID for a subject. Returns `null` if no DID document has been anchored. Uses a read-only simulation against the identity-oracle contract.
+
+```typescript
+const didCid = await sdk.getDIDDocument("G...");
+if (didCid) {
+  console.log(`DID document CID: ${didCid}`);
+} else {
+  console.log("No DID document anchored");
+}
+```
+
 ## SDK status
 
 | Method                                  | Status         |
@@ -65,6 +78,7 @@ const isValid = await sdk.verifyVC("G...", vcHash);
 | `computeScore(keypair, address)`        | ✅ Implemented |
 | `getScore(address)`                     | ✅ Implemented |
 | `verifyVC(subject, hash)`               | ✅ Implemented |
+| `getDIDDocument(address)`               | ✅ Implemented |
 | `isVerified(address)`                   | 🚧 Open        |
 | `anchorDID(keypair, cid)`               | 🚧 Open        |
 | `issueVC(issuer, subject, hash)`        | 🚧 Open        |

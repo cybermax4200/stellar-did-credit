@@ -83,6 +83,38 @@ describe("StellarDIDCreditSDK", () => {
     mockLastContractCall = undefined;
   });
 
+  describe("getDIDDocument", () => {
+    it("test_getDIDDocument_returns_cid", async () => {
+      const expectedCid = "QmXYZ123abc...";
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: expectedCid },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getDIDDocument(subjectAddress);
+
+      expect(result).toBe(expectedCid);
+      expect(mockLastContractCall?.method).toBe("get_did_document");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_getDIDDocument_returns_null", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: null },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getDIDDocument(subjectAddress);
+
+      expect(result).toBeNull();
+      expect(mockLastContractCall?.method).toBe("get_did_document");
+    });
+  });
+
   describe("verifyVC", () => {
     it("test_verifyVC_true_for_valid_hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
@@ -145,6 +177,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(error.message).toContain(subjectAddress);
     });
   });
+
 });
 
 describe("contract struct type exports", () => {

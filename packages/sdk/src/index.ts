@@ -366,6 +366,55 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Retrieve the anchored DID document CID for a subject.
+   *
+   * Returns the IPFS CID of the subject's anchored DID document, or `null` if
+   * no DID document has been anchored for this subject. Uses a read-only
+   * simulation — no signing or fees required.
+   *
+   * @param subjectAddress - Stellar address (G...) of the DID subject
+   * @returns IPFS CID string (e.g. "Qm...") if anchored, `null` otherwise
+   */
+  async getDIDDocument(subjectAddress: string): Promise<string | null> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_did_document", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    if (!sim.result?.retval) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(sim.result.retval);
+    // Option::None is represented as null/undefined by scValToNative
+    if (native === null || native === undefined) {
+      return null;
+    }
+
+    return native as string;
+  }
+
+  /**
    * Verify that a specific VC hash is valid and not revoked for the given subject.
    *
    * Uses a read-only simulation against the identity-oracle contract.
@@ -505,6 +554,7 @@ export class StellarDIDCreditSDK {
 
     return issuers.map((issuer) => String(issuer));
   }
+
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
