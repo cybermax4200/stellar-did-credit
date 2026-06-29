@@ -239,6 +239,81 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Revoke a verifiable credential on-chain.
+   *
+   * Submits a single signed transaction that calls `revoke` on the revocation-registry
+   * contract and `mark_vc_revoked` on the identity-oracle contract. Requires the issuer
+   * keypair to authorize both operations.
+   *
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param subjectAddress - Stellar G... address of the credential subject
+   * @param vcHash - SHA-256 hash of the verifiable credential to revoke
+   * @returns Transaction hash on successful submission
+   */
+  async revokeVC(
+    issuerKeypair: Keypair,
+    subjectAddress: string,
+    vcHash: Buffer,
+  ): Promise<string> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const revocationContract = new Contract(this.config.revocationRegistryId);
+    const identityContract = new Contract(this.config.identityOracleId);
+
+    const publicKey = issuerKeypair.publicKey();
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+
+    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+    const issuerScVal = new Address(publicKey).toScVal();
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        revocationContract.call("revoke", issuerScVal, hashScVal),
+      )
+      .addOperation(
+        identityContract.call(
+          "mark_vc_revoked",
+          issuerScVal,
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
+    preparedTx.sign(issuerKeypair);
+
+    const response = await server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+    }
+
+    return response.hash;
+  }
+
+  /**
    * Compute and persist a subject's credit score, then return the stored ScoreRecord.
    *
    * Submits a signed transaction to the credit-oracle contract, waits for ledger
