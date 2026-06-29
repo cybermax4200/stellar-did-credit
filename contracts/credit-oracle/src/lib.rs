@@ -334,8 +334,10 @@ impl CreditOracle {
     }
 
     /// Cache VC count for a subject (feeder-only)
+    ///
     /// Deprecated: prefer configuring an `IdentityOracleId` and using the
     /// cross-contract lookup via `set_identity_oracle` + `compute_score`.
+    #[deprecated(note = "Prefer cross-contract lookup via set_identity_oracle + compute_score")]
     pub fn set_vc_count(
         env: Env,
         feeder: Address,
@@ -1432,17 +1434,24 @@ mod tests {
         client.register_lender(&admin, &lender);
 
         client.set_vc_count(&feeder, &subject, &5);
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 10_000_000_000i128,
-            tx_count_30d: 0,
-            avg_counterparties: 0,
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 10_000_000_000i128,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            },
+        );
         for _ in 0..100 {
             client.record_repayment(&lender, &subject, &1000, &true);
         }
 
         let score = client.compute_score(&subject);
-        assert_eq!(score, MAX_SCORE, "exceptional profile must score exactly {MAX_SCORE}");
+        assert_eq!(
+            score, MAX_SCORE,
+            "exceptional profile must score exactly {MAX_SCORE}"
+        );
     }
 
     #[test]
