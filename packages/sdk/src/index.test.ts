@@ -222,6 +222,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+<<<<<<< Updated upstream
   describe("computeScore", () => {
     it("polls getTransaction until SUCCESS before reading the stored score", async () => {
       jest.useFakeTimers();
@@ -294,6 +295,36 @@ describe("StellarDIDCreditSDK", () => {
         'computeScore transaction failed for tx-hash-2: {"status":"FAILED","errorResult":"tx_bad_auth"}',
       );
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+=======
+  describe("getVCCount", () => {
+    it("test_getVCCount_returns_active_count", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 3 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getVCCount(subjectAddress);
+
+      expect(result).toBe(3);
+      expect(mockLastContractCall?.method).toBe("get_active_vc_count");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_getVCCount_returns_zero", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 0 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getVCCount(subjectAddress);
+
+      expect(result).toBe(0);
+      expect(mockLastContractCall?.method).toBe("get_active_vc_count");
+>>>>>>> Stashed changes
     });
   });
 
