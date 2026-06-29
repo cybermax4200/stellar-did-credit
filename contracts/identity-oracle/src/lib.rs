@@ -380,7 +380,7 @@ impl IdentityOracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Return the list of all currently registered trusted issuers.
+    /// Return the `IssuersIndex` vector of currently registered trusted issuers.
     pub fn list_issuers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
