@@ -2,7 +2,6 @@ import {
   Contract,
   SorobanRpc,
   TransactionBuilder,
-  Networks,
   BASE_FEE,
   Account,
   scValToNative,
@@ -11,6 +10,7 @@ import {
   xdr,
   Keypair,
 } from "@stellar/stellar-sdk";
+import { assembleTransaction } from "@stellar/stellar-sdk/rpc"; 
 
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
@@ -104,6 +104,14 @@ export interface ProtocolConfig {
   simAccount: string;
 }
 
+/** Extract the sequence number string from a Soroban RPC account response. */
+function getSequence(accountData: SorobanRpc.Api.GetAccountResponse): string {
+  // The RPC response object carries `sequence` as a string field at runtime.
+  // We narrow through `unknown` to avoid an unsafe `any` cast.
+  const data = accountData as unknown as { sequence: string };
+  return data.sequence;
+}
+
 export class StellarDIDCreditSDK {
   constructor(private config: ProtocolConfig) {}
 
@@ -123,9 +131,8 @@ export class StellarDIDCreditSDK {
 
     const publicKey = subjectKeypair.publicKey();
 
-    // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -141,7 +148,6 @@ export class StellarDIDCreditSDK {
       .setTimeout(30)
       .build();
 
-    // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
@@ -152,17 +158,13 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any)
-      .assembleTransaction(tx, sim)
-      .build();
+    const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(subjectKeypair);
 
-    // Submit to the network
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
     return response.hash;
@@ -189,11 +191,9 @@ export class StellarDIDCreditSDK {
 
     const publicKey = issuerKeypair.publicKey();
 
-    // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
 
-    // Convert vcHash Buffer to ScVal
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -211,7 +211,6 @@ export class StellarDIDCreditSDK {
       .setTimeout(30)
       .build();
 
-    // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
@@ -222,17 +221,13 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any)
-      .assembleTransaction(tx, sim)
-      .build();
+    const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
-    // Submit to the network
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
     return response.hash;
@@ -266,7 +261,7 @@ export class StellarDIDCreditSDK {
     const publicKey = issuerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
     const issuerScVal = new Address(publicKey).toScVal();
@@ -299,15 +294,13 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = (SorobanRpc.Api as any)
-      .assembleTransaction(tx, sim)
-      .build();
+    const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
     return response.hash;
@@ -333,7 +326,7 @@ export class StellarDIDCreditSDK {
     const publicKey = payerKeypair.publicKey();
 
     const accountData = await server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -355,15 +348,13 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = (SorobanRpc.Api as any)
-      .assembleTransaction(tx, sim)
-      .build();
+    const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(payerKeypair);
 
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
     await waitForTransactionConfirmation(server, response.hash);
@@ -388,14 +379,9 @@ export class StellarDIDCreditSDK {
    * @throws {ScoreNotComputedError} If the score has not been computed for this address
    */
   async getScore(subjectAddress: string): Promise<ScoreRecord> {
-    // 1. Create RPC server
     const server = new SorobanRpc.Server(this.config.rpcUrl);
-
-    // 2. Instantiate the credit-oracle contract
     const contract = new Contract(this.config.creditOracleId);
 
-    // 3. Build a read-only transaction — use a well-known funded account as the fee source
-    //    for simulation; no actual submission occurs.
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
       fee: BASE_FEE,
@@ -407,7 +393,6 @@ export class StellarDIDCreditSDK {
       .setTimeout(30)
       .build();
 
-    // 4. Simulate to get the return value without submitting
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
@@ -426,8 +411,6 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    // 5. Parse the ScoreRecord struct.
-    //    Soroban structs are returned as ScMap with symbol keys.
     return parseScoreRecord(resultScVal, subjectAddress);
   }
 
@@ -513,7 +496,6 @@ export class StellarDIDCreditSDK {
     }
 
     const native = scValToNative(sim.result.retval);
-    // Option::None is represented as null/undefined by scValToNative
     if (native === null || native === undefined) {
       return null;
     }
@@ -728,7 +710,6 @@ function parseScoreRecord(
   subjectAddress: string,
 ): ScoreRecord {
   const native = scValToNative(scVal);
-  // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
     throw new ScoreNotComputedError(subjectAddress);
   }
