@@ -8,30 +8,36 @@ stellar-did-credit is a three-contract protocol on Stellar/Soroban that lets any
 
 ```mermaid
 graph TD
-    CON_APP[Application / Lender UI]
-    CON_SDK[TypeScript SDK]
+    subgraph Consumers
+        APP[Application / Lender UI]
+        SDK[TypeScript SDK]
+    end
 
-    SC_ID[identity-oracle\nCATORJPJ...]
-    SC_CR[credit-oracle\nCBMMX6GJ...]
-    SC_RV[revocation-registry\nCDNQLXKK...]
+    subgraph Soroban Contracts
+        ID[identity-oracle\nCATORJPJ...]
+        CR[credit-oracle\nCBMMX6GJ...]
+        RV[revocation-registry\nCDNQLXKK...]
+    end
 
-    OFF_FEEDER[Trusted Feeder\noff-chain indexer]
-    OFF_ISSUER[Credential Issuer]
-    OFF_SUBJECT[Subject / Wallet]
+    subgraph Off-chain
+        FEEDER[Trusted Feeder\noff-chain indexer]
+        ISSUER[Credential Issuer]
+        SUBJECT[Subject / Wallet]
+    end
 
-    OFF_SUBJECT -->|anchor_did| SC_ID
-    OFF_ISSUER  -->|anchor_vc| SC_ID
-    OFF_ISSUER  -->|revoke| SC_RV
-    SC_ID       -.->|mark_vc_revoked| SC_ID
+    SUBJECT -->|anchor_did| ID
+    ISSUER  -->|anchor_vc| ID
+    ISSUER  -->|revoke| RV
+    ID      -.->|mark_vc_revoked| ID
 
-    OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
-    CON_APP     -->|record_repayment| SC_CR
-    CON_APP     -->|compute_score| SC_CR
-    SC_CR       -->|get_active_vc_count| SC_ID
+    FEEDER  -->|set_vc_count\nupdate_tx_stats| CR
+    APP     -->|record_repayment| CR
+    APP     -->|compute_score| CR
+get_active_vc_count| ID
 
-    CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
-    CON_SDK     -->|getScore| SC_CR
-    CON_APP     --> CON_SDK
+    SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| ID
+    SDK     -->|getScore| CR
+    APP     --> SDK
 ```
 
 ---
