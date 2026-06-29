@@ -177,22 +177,11 @@ The contract does not enforce score freshness. `get_score` returns whatever was 
 
 The feeder is responsible for keeping `TxStats` and `VcCount` current. If the feeder stops updating, the score will drift from reality but will not error — it will simply reflect stale inputs.
 
-### Open-call recomputation spam (known gap — Issue 78)
+### Open-call recomputation cooldown
 
-`compute_score` requires no authorisation and has no per-subject cooldown. This
-means any address can call it for any subject at any time, and in theory a
-subject (or a third party acting on their behalf) could spam recomputations to
-land on a favourable `last_updated` ledger timestamp in `ScoreRecord`.
+`compute_score` remains authorization-free, but successful calls are rate-limited per subject by the configured `ComputeCooldownLedgers` value. The default is one ledger, so a subject can be recomputed again on the next ledger but not repeatedly in the same ledger.
 
-**Current mitigations:** none. The timestamp can be manipulated only within the
-bounds of the actual on-chain input data; the *score value itself* cannot be
-inflated. Consumers that rely on `last_updated` for freshness decisions should
-be aware that the timestamp reflects when the score was last *computed*, not
-when the underlying inputs last changed.
-
-**Planned fix (Issue 78):** introduce a minimum recomputation interval (one
-ledger per subject). Until that is shipped, this is a documented known
-limitation.
+The contract stores the last successful computation ledger under `LastComputed(Address)`. Admin/governance can update the interval with `update_compute_cooldown`; setting it to `0` disables the cooldown.
 
 ### All VCs revoked
 

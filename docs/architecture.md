@@ -211,12 +211,11 @@ Keeping the function permissionless:
 
 **Consequences**
 
-Because there is no per-subject cooldown, a caller could spam recomputations to
-influence the `last_updated` ledger timestamp stored in `ScoreRecord`. This is a
-known gap tracked in **Issue 78**. A minimum recomputation interval (one ledger
-per subject) will be introduced in a follow-up; it is out of scope for the
-current release. See also the "Known gap" note in `compute_score`'s doc comment
-and in `docs/scoring-spec.md`.
+Successful recomputations are rate-limited per subject by the configured
+`ComputeCooldownLedgers` value. The default interval is one ledger, which
+prevents same-ledger timestamp grinding while preserving the open-call design.
+The last successful computation ledger is stored as `LastComputed(Address)`, and
+admin/governance can update the interval with `update_compute_cooldown`.
 
 ---
 
