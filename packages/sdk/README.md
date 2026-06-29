@@ -50,6 +50,15 @@ interface ScoreRecord {
 }
 ```
 
+### `getWeights(): Promise<ScoringWeights>`
+
+Fetches the current scoring weights from the credit-oracle using a read-only simulation.
+
+```typescript
+const weights = await sdk.getWeights();
+console.log(weights.vcWeight, weights.txWeight, weights.repaymentWeight);
+```
+
 ### `verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean>`
 
 Checks whether a specific 32-byte credential hash is valid for a subject. Uses a read-only simulation against the identity-oracle contract.
@@ -77,6 +86,7 @@ if (didCid) {
 | --------------------------------------- | -------------- |
 | `computeScore(keypair, address)`        | ✅ Implemented |
 | `getScore(address)`                     | ✅ Implemented |
+| `getWeights()`                          | ✅ Implemented |
 | `verifyVC(subject, hash)`               | ✅ Implemented |
 | `getDIDDocument(address)`               | ✅ Implemented |
 | `isVerified(address)`                   | 🚧 Open        |

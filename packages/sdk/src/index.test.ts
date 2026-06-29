@@ -265,6 +265,33 @@ describe("StellarDIDCreditSDK", () => {
       expect(error.message).toContain(subjectAddress);
     });
   });
+
+  describe("getWeights", () => {
+    it("returns scoring weights from get_scoring_weights", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              vc_weight: 40,
+              tx_weight: 30,
+              repayment_weight: 30,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getWeights();
+
+      expect(result).toEqual({
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      });
+      expect(mockLastContractCall?.method).toBe("get_scoring_weights");
+      expect(mockLastContractCall?.args).toHaveLength(0);
+    });
+  });
 });
 
 describe("contract struct type exports", () => {
