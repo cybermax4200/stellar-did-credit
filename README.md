@@ -18,13 +18,11 @@ A decentralized identity and credit scoring protocol built on Stellar. Users own
 - [Running tests](#running-tests)
 - [Project structure](#project-structure)
 - [TypeScript SDK](#typescript-sdk)
+- [Feeder](#feeder)
 - [Roadmap](#roadmap)
+- [Security](#security)
 - [Contributing](#contributing)
 - [License](#license)
-
-**For deployers:**
-
-- [Mainnet Deployment Guide](docs/mainnet-deployment.md) — Security checklist, admin key ceremony, feeder onboarding, and incident response
 
 ---
 
@@ -46,7 +44,7 @@ The protocol has three steps:
 A user generates a Stellar keypair. Their public key becomes their DID: `did:stellar:testnet:G...`. They publish a [DID document](docs/did-spec.md#23-complete-example-document) to IPFS and anchor its content hash to the Stellar ledger via the identity-oracle contract. No registration required — the keypair is the identity. See [DID Document Schema](docs/did-spec.md#2-did-document-schema) for the required JSON-LD structure.
 
 **2. Collect verifiable credentials (VCs)**
-Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy.
+Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy. See the [Issuer Integration Guide](docs/issuer-guide.md) for the full VC format, hashing process, and a working Node.js example.
 
 **3. Credit score computed on-chain**
 The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed and upgradeable.
@@ -57,34 +55,28 @@ The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain trans
 
 ```mermaid
 graph TB
-    subgraph Off-chain
-        USER[User / DID keypair]
-        ISSUER[Credential Issuer]
-        IPFS[(IPFS — DID docs & VCs)]
-    end
+    OFF_USER[User / DID keypair]
+    OFF_ISSUER[Credential Issuer]
+    OFF_IPFS[(IPFS — DID docs & VCs)]
 
-    subgraph Stellar Ledger
-        IO[identity-oracle\nDID anchor · VC hash registry]
-        CO[credit-oracle\nScore computation · Repayment history]
-        RR[revocation-registry\nVC status list]
-    end
+    SC_IO[identity-oracle\nDID anchor · VC hash registry]
+    SC_CO[credit-oracle\nScore computation · Repayment history]
+    SC_RR[revocation-registry\nVC status list]
 
-    subgraph Consumers
-        LENDER[DeFi Lender]
-        ANCHOR[Stellar Anchor]
-        VERIFIER[Third-party Verifier]
-    end
+    CON_LENDER[DeFi Lender]
+    CON_ANCHOR[Stellar Anchor]
+    CON_VERIFIER[Third-party Verifier]
 
-    USER    -->|anchor_did CID| IO
-    ISSUER  -->|anchor_vc hash| IO
-    ISSUER  -->|store full VC| IPFS
-    USER    -->|store DID doc| IPFS
-    IO      -->|is_verified check| CO
-    RR      -->|revocation check| IO
-    ISSUER  -->|revoke| RR
-    CO      -->|get_score| LENDER
-    CO      -->|get_score| ANCHOR
-    IO      -->|verify_vc| VERIFIER
+    OFF_USER    -->|anchor_did CID| SC_IO
+    OFF_ISSUER  -->|anchor_vc hash| SC_IO
+    OFF_ISSUER  -->|store full VC| OFF_IPFS
+    OFF_USER    -->|store DID doc| OFF_IPFS
+    SC_IO       -->|is_verified check| SC_CO
+    SC_RR       -->|revocation check| SC_IO
+    OFF_ISSUER  -->|revoke| SC_RR
+    SC_CO       -->|get_score| CON_LENDER
+    SC_CO       -->|get_score| CON_ANCHOR
+    SC_IO       -->|verify_vc| CON_VERIFIER
 ```
 
 ---
@@ -97,18 +89,18 @@ The protocol is composed of three Soroban smart contracts deployed on the Stella
 
 Manages decentralized identifiers and verifiable credential anchoring.
 
-| Function                                    | Description                                     |
-| ------------------------------------------- | ----------------------------------------------- |
-| `initialize(admin)`                         | Sets the contract admin                         |
-| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                        |
+| Function                                    | Description                                    |
+| ------------------------------------------- | ---------------------------------------------- |
+| `initialize(admin)`                         | Sets the contract admin                        |
+| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
 | `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
-| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
-| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
-| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
-| `get_vc_count(subject)`                     | Returns the number of anchored VCs              |
-| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
-| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
-| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
+| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
+| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
+| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
+| `get_vc_count(subject)`                     | Returns the number of anchored VCs             |
+| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid          |
+| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                          |
+| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place            |
 
 ### credit-oracle
 
@@ -276,12 +268,18 @@ stellar-did-credit/
 │   └── tests/
 │       └── src/integration_test.rs  # Cross-contract integration tests
 ├── packages/
-│   └── sdk/
-│       └── src/index.ts        # TypeScript SDK
+│   ├── sdk/
+│   │   └── src/index.ts        # TypeScript SDK
+│   ├── issuer-example/
+│   │   └── src/issue.ts        # Minimal issuer script (hash + anchor a VC)
+│   └── feeder/
+│       └── src/index.ts        # Reference feeder (syncs Horizon stats + VC count to credit-oracle)
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
-│   └── scoring-spec.md         # Scoring formula + worked examples
+│   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
+│   ├── scoring-spec.md         # Scoring formula + worked examples
+│   └── zk-proof-design.md      # Phase 4 ZK selective disclosure design
 ├── scripts/
 │   └── deploy.sh               # Testnet deployment script
 ├── Cargo.toml                  # Workspace root
@@ -321,8 +319,78 @@ console.log(score.score); // e.g. 612
 | `isVerified(address)`            | 🚧 Open        |
 | `anchorDID(keypair, cid)`        | 🚧 Open        |
 | `issueVC(issuer, subject, hash)` | 🚧 Open        |
-| `verifyVC(subject, hash)`        | 🚧 Open        |
+| `verifyVC(subject, hash)`        | ✅ Implemented |
 | `revokeVC(issuer, hash)`         | 📋 Planned     |
+
+---
+
+## Feeder
+
+The `@stellar-did-credit/feeder` package is a reference implementation of the trusted feeder role required by the credit-oracle contract.
+
+A feeder is a registered off-chain service that periodically calls two credit-oracle entrypoints:
+
+| Call | What it does |
+| ---- | ------------ |
+| `set_vc_count(feeder, subject, count)` | Caches the active VC count from identity-oracle into credit-oracle |
+| `update_tx_stats(feeder, subject, stats)` | Pushes 30-day Horizon payment stats (volume, tx count, counterparties) |
+
+### Prerequisites
+
+1. **Register the feeder on-chain** — the credit-oracle admin must call `register_feeder(admin, FEEDER_PUBLIC_KEY)` once before the feeder can submit data.
+2. **Fund the feeder account** — the feeder keypair must hold enough XLM to pay transaction fees.
+
+### Setup
+
+```bash
+cd packages/feeder
+cp .env.example .env
+# Edit .env: set FEEDER_SECRET, SUBJECTS, CREDIT_ORACLE_ID, IDENTITY_ORACLE_ID
+pnpm install
+```
+
+### Run
+
+```bash
+FEEDER_SECRET=YOUR_STELLAR_SECRET_KEY \
+SUBJECTS=GSUBJECT1...,GSUBJECT2... \
+CREDIT_ORACLE_ID=C... \
+IDENTITY_ORACLE_ID=C... \
+npm start
+```
+
+The feeder runs one full cycle immediately on startup, then repeats every `POLL_INTERVAL_MS` milliseconds (default: 1 hour). Each cycle logs the fetched values and both transaction hashes.
+
+### Use as a library
+
+```typescript
+import { Feeder, FeederConfig } from "@stellar-did-credit/feeder";
+import { Keypair } from "@stellar/stellar-sdk";
+
+const config: FeederConfig = {
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  horizonUrl: "https://horizon-testnet.stellar.org",
+  networkPassphrase: "Test SDF Network ; September 2015",
+  creditOracleId: "C...",
+  identityOracleId: "C...",
+  simAccount: "G...",
+  subjects: ["GSUBJECT..."],
+  pollIntervalMs: 3_600_000,
+};
+
+const feeder = new Feeder(config, Keypair.fromSecret("YOUR_STELLAR_SECRET_KEY"));
+const stop = feeder.start(); // begins polling; call stop() to halt
+```
+
+You can also drive individual steps:
+
+```typescript
+// Feed a single subject without the polling loop
+await feeder.feedSubject("GSUBJECT...");
+
+// Or run one cycle across all subjects
+await feeder.runCycle();
+```
 
 ---
 
@@ -334,6 +402,7 @@ console.log(score.score); // e.g. 612
 | credit-oracle           | ✅ Complete    | Scoring formula live on testnet      |
 | revocation-registry     | ✅ Complete    | Batch revocation supported           |
 | TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
 | CLI tool                | 📋 Planned     |                                      |
 | Cross-contract vc_count | 📋 Planned     |                                      |
 | ZK proof layer          | 📋 Research    |                                      |
@@ -353,13 +422,21 @@ Full TypeScript SDK with DID creation, VC issuance, and revocation. CLI tool for
 credit-oracle reads `vc_count` directly from identity-oracle via cross-contract call. Score freshness enforcement.
 
 **Phase 4 — Privacy layer**
-ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials.
+ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials. Design document: [docs/zk-proof-design.md](docs/zk-proof-design.md).
 
 **Phase 5 — Governance**
 DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
 
 **Phase 6 — Mainnet**
-Security audit. [Mainnet deployment](docs/mainnet-deployment.md). Issuer onboarding program.
+Security audit. Mainnet deployment. Issuer onboarding program.
+
+---
+
+## Security
+
+This is a financial protocol. If you find a vulnerability in the smart contracts, SDK, or any other component, **do not open a public issue**.
+
+Report it privately via [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new). We acknowledge all reports within 72 hours. See [SECURITY.md](SECURITY.md) for the full disclosure policy, scope, and response SLA.
 
 ---
 
@@ -405,6 +482,8 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Project Architecture](docs/architecture.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [DID Method Specification](docs/did-spec.md)
+- [Issuer Integration Guide](docs/issuer-guide.md)
+- [ZK Proof Layer Design (Phase 4)](docs/zk-proof-design.md)
 
 ---
 

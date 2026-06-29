@@ -1,5 +1,5 @@
 [package]
-name = "credit-oracle"
+name = "governance"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,8 +8,7 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+credit-oracle = { path = "../credit-oracle" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-proptest = "1"
-

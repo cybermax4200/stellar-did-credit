@@ -1,15 +1,12 @@
-# TODO - Active VC count fix
+# TODO - Credit Oracle property-based testing
 
-- [ ] Update `contracts/identity-oracle/src/lib.rs`
-  - [ ] Rename `get_vc_count` to `get_total_vc_count` (and add backward-compatible wrapper if needed)
-  - [ ] Add `get_active_vc_count(env: Env, subject: Address) -> u32`
-  - [ ] Add unit test `test_get_active_vc_count_excludes_revoked`
+- [x] Add `proptest = "1"` to `contracts/credit-oracle/Cargo.toml` dev-dependencies.
+- [x] Implement proptest-based unit tests in `contracts/credit-oracle/src/lib.rs`:
+  - [x] `proptest_score_always_in_range`
+  - [x] `proptest_score_monotone_on_repayment`
+  - [x] `proptest_no_panic_on_any_valid_weights`
+- [ ] Run `cargo test -p credit-oracle` and confirm all tests pass. (blocked locally: Windows linker `link.exe` not found)
+- [ ] Update TODO progress as property tests pass.
 
-- [ ] Update documentation to reference `get_active_vc_count`
-  - [ ] `docs/architecture.md`
-  - [ ] Confirm/adjust `docs/scoring-spec.md` if it mentions vc_count semantics
 
-- [ ] Update any other repo references to `get_vc_count` (if found)
-- [ ] Run test suite
-  - [ ] `cargo test -p identity-oracle`
-  - [ ] `cargo test -p contracts` (or workspace tests)
+

@@ -185,9 +185,16 @@ To resolve a `did:stellar` identifier:
 
 ### 3.3 Update
 
+DID documents in the Stellar DID Credit protocol are **mutable**. Subjects may update their
+DID document at any time by calling `anchor_did` again.
+
 1. The subject generates a new DID Document (e.g., to rotate keys or add service endpoints).
 2. The subject uploads the new document to IPFS.
-3. The subject calls `anchor_did` with the new CID. This overwrites the previous state in the contract.
+3. The subject calls `anchor_did` with the new CID. This **silently overwrites** the
+   previous CID in contract storage.
+4. The `DIDAnch` event is emitted on each call, allowing consumers to track updates
+   via event streams. However, consumers SHOULD read the current CID from storage rather
+   than relying solely on historical events, since multiple updates are possible.
 
 ### 3.4 Deactivate
 
@@ -198,6 +205,11 @@ To resolve a `did:stellar` identifier:
 ### 4.1 Authentication and Authorization
 
 All updates to the DID anchor MUST require a valid signature from the Stellar address associated with the DID. This is enforced by the `identity-oracle` contract using `subject.require_auth()`.
+
+**Overwrite semantics:** The `anchor_did` function allows unconditional overwrites. Any subject
+with signing authority can replace their DID CID at any time without restrictions. There is no
+versioning or history retention in-contract; external systems MUST monitor `DIDAnch` events
+if they need to track document evolution.
 
 ### 4.2 Replay Attacks
 

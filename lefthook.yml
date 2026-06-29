@@ -1,0 +1,12 @@
+pre-commit:
+  commands:
+    scan-secrets:
+      run: |
+        if git diff --cached --name-only | xargs grep -El 'S[A-Z2-7]{55}' 2>/dev/null | grep -v '\.example$'; then
+          echo ""
+          echo "ERROR: Stellar secret key detected in staged files."
+          echo "Remove the key before committing."
+          echo "See CONTRIBUTING.md for guidance."
+          echo ""
+          exit 1
+        fi

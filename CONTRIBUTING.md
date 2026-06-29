@@ -2,6 +2,8 @@
 
 ## ⚠️ Never commit secrets
 
+> A pre-commit hook (via [lefthook](https://github.com/evilmartians/lefthook)) is installed automatically by `pnpm install`. It will block any commit containing a Stellar secret key pattern before it reaches GitHub.
+
 **Stellar secret keys start with `S` and are 56 characters long.** Never commit them.
 
 Common ways contributors accidentally expose secrets:
@@ -12,6 +14,13 @@ Common ways contributors accidentally expose secrets:
 GitHub's secret scanner will detect any committed Stellar secret key, flag your commit, and may restrict your account. The `.gitignore` already excludes `.env` files — do not work around it.
 
 If you need a throwaway key for testing, generate one with `stellar keys generate` and let `stellar-cli` manage it locally. Never paste the secret into any file tracked by git.
+
+---
+
+## Reporting vulnerabilities
+
+**Do not open a public issue for security bugs.**
+Please use [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new) to report vulnerabilities privately. See [SECURITY.md](../SECURITY.md) for scope, response SLA, and disclosure policy.
 
 ---
 

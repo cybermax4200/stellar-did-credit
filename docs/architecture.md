@@ -8,36 +8,30 @@ stellar-did-credit is a three-contract protocol on Stellar/Soroban that lets any
 
 ```mermaid
 graph TD
-    subgraph Consumers
-        APP[Application / Lender UI]
-        SDK[TypeScript SDK]
-    end
+    CON_APP[Application / Lender UI]
+    CON_SDK[TypeScript SDK]
 
-    subgraph Soroban Contracts
-        ID[identity-oracle\nCATORJPJ...]
-        CR[credit-oracle\nCBMMX6GJ...]
-        RV[revocation-registry\nCDNQLXKK...]
-    end
+    SC_ID[identity-oracle\nCATORJPJ...]
+    SC_CR[credit-oracle\nCBMMX6GJ...]
+    SC_RV[revocation-registry\nCDNQLXKK...]
 
-    subgraph Off-chain
-        FEEDER[Trusted Feeder\noff-chain indexer]
-        ISSUER[Credential Issuer]
-        SUBJECT[Subject / Wallet]
-    end
+    OFF_FEEDER[Trusted Feeder\noff-chain indexer]
+    OFF_ISSUER[Credential Issuer]
+    OFF_SUBJECT[Subject / Wallet]
 
-    SUBJECT -->|anchor_did| ID
-    ISSUER  -->|anchor_vc| ID
-    ISSUER  -->|revoke| RV
-    ID      -.->|mark_vc_revoked| ID
+    OFF_SUBJECT -->|anchor_did| SC_ID
+    OFF_ISSUER  -->|anchor_vc| SC_ID
+    OFF_ISSUER  -->|revoke| SC_RV
+    SC_ID       -.->|mark_vc_revoked| SC_ID
 
-    FEEDER  -->|set_vc_count\nupdate_tx_stats| CR
-    APP     -->|record_repayment| CR
-    APP     -->|compute_score| CR
-get_active_vc_count| ID
+    OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
+    CON_APP     -->|record_repayment| SC_CR
+    CON_APP     -->|compute_score| SC_CR
+    SC_CR       -->|get_active_vc_count| SC_ID
 
-    SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| ID
-    SDK     -->|getScore| CR
-    APP     --> SDK
+    CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
+    CON_SDK     -->|getScore| SC_CR
+    CON_APP     --> CON_SDK
 ```
 
 ---
@@ -114,8 +108,9 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | Function                          | Caller   | Description                                   |
 | --------------------------------- | -------- | --------------------------------------------- |
 | `initialize(admin)`               | deployer | Sets the contract administrator               |
-| `revoke(issuer, vc_hash)`         | issuer   | Marks a VC hash as revoked                    |
-| `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction |
+| `revoke(issuer, vc_hash)`         | issuer   | Marks a VC hash as revoked (issuer authority enforced per `vc_hash`) |
+| `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction (issuer authority enforced per `vc_hash`) |
+
 | `is_revoked(vc_hash)`             | anyone   | Returns true if the hash has been revoked     |
 
 **Storage layout**
@@ -124,7 +119,9 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | ------------------------ | --------- | ------------------------------------------- |
 | `Admin`                  | `Address` | Instance storage — contract admin           |
 | `Status(BytesN<32>)`     | `bool`    | Persistent — revocation flag for a VC hash  |
-| `IssuerOfVC(BytesN<32>)` | `Address` | Persistent — which issuer revoked this hash |
+| `RegisteredVCIssuer(BytesN<32>)` | `Address` | Persistent — authority that is allowed to revoke this hash (first issuer wins) |
+| `IssuerOfVC(BytesN<32>)` | `Address` | Persistent — which issuer performed the latest revoke call for this hash |
+
 
 ---
 
@@ -177,3 +174,78 @@ Anyone (the subject, a lender, or an application) calls `compute_score(subject)`
 ### 6. Consumer reads the score
 
 A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord`. The SDK's `getScore()` method does this via a read-only simulation — no transaction fees required.
+
+---
+
+## Architecture Decision Records
+
+### ADR-001 — `compute_score` requires no authorisation
+
+**Status:** Accepted
+
+**Context**
+
+`compute_score(subject)` in `credit-oracle` writes a `ScoreRecord` to persistent
+storage but requires no `require_auth()` call. During the initial security review
+the absence of an auth check was flagged as potentially unintentional.
+
+**Decision**
+
+The open-call design is intentional. The function reads only data that has
+already been submitted by trusted parties (feeders and lenders) and writes only
+the subject's own score record. There is no way for an adversarial caller to
+inflate, deflate, or corrupt a score beyond what the on-chain inputs support.
+Keeping the function permissionless:
+
+- allows lenders and applications to refresh a score without holding a subject
+  signature,
+- lets the off-chain feeder refresh scores in the same transaction as a data
+  update, and
+- treats score computation as a public utility rather than a privileged action.
+
+**Consequences**
+
+Successful recomputations are rate-limited per subject by the configured
+`ComputeCooldownLedgers` value. The default interval is one ledger, which
+prevents same-ledger timestamp grinding while preserving the open-call design.
+The last successful computation ledger is stored as `LastComputed(Address)`, and
+admin/governance can update the interval with `update_compute_cooldown`.
+
+---
+
+### ADR-002 — Uniform `require_admin` helper across all three contracts
+
+**Status:** Accepted
+
+**Context**
+
+Prior to this change the three contracts used two different admin-auth styles:
+
+- `update_weights` / `propose_weights` called `stored_admin.require_auth()`
+  directly after loading the admin from storage (implicit lookup).
+- `register_feeder`, `register_lender`, `register_issuer` etc. required the
+  caller to pass `admin` as an explicit parameter, then compared it against
+  storage before calling `require_auth()` on the passed-in value.
+
+The mixed styles made the auth model hard to reason about and audit.
+
+**Decision**
+
+Extract a private `fn require_admin(env: &Env) -> Address` in each contract.
+The helper loads the stored admin, immediately calls `require_auth()` on it, and
+returns the address. Every admin-gated function now calls `require_admin` first,
+then (for the explicit-parameter variants) compares the returned address to the
+caller-supplied `admin` to preserve the existing API surface.
+
+**Consequences**
+
+- A single read path for the admin address — easier to audit.
+- `require_auth()` is always called on the *stored* admin, not on an
+  unvalidated caller-supplied value.
+- The public function signatures are unchanged; no SDK or script updates needed.
+
+---
+
+## Event Indexing
+
+For a detailed catalog of events emitted by the smart contracts and instructions on subscribing to them for off-chain sync, see the [Event Indexing Guide](event-indexing.md).

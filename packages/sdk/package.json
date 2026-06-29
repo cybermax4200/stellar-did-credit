@@ -4,12 +4,19 @@
   "description": "TypeScript SDK for the Stellar DID Credit Protocol",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc"
+    "build": "tsc",
+    "lint": "tsc --noEmit && eslint src"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0"
   },
   "devDependencies": {
+    "@types/jest": "^29.0.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^7.0.0",
+    "@typescript-eslint/parser": "^7.0.0",
+    "eslint": "^8.0.0",
     "typescript": "^5.0.0"
-  }
+  },
+  "types": "dist/index.d.ts"
 }
