@@ -377,7 +377,10 @@ export class StellarDIDCreditSDK {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        contract.call("get_did_document", new Address(subjectAddress).toScVal()),
+        contract.call(
+          "get_did_document",
+          new Address(subjectAddress).toScVal(),
+        ),
       )
       .setTimeout(30)
       .build();
@@ -545,7 +548,6 @@ export class StellarDIDCreditSDK {
 
     return issuers.map((issuer) => String(issuer));
   }
-
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
@@ -593,15 +595,22 @@ async function waitForTransactionConfirmation(
     const result = await server.getTransaction(txHash);
 
     switch (result.status) {
-      case SorobanRpc.Api.GetTransactionStatus.SUCCESS:
+      case "SUCCESS":
         return;
-      case SorobanRpc.Api.GetTransactionStatus.FAILED:
-        throw new Error(`Transaction failed after submission: ${txHash}`);
-      case SorobanRpc.Api.GetTransactionStatus.NOT_FOUND:
+      case "FAILED": {
+        const errorDetails = JSON.stringify(result);
+        throw new Error(
+          `computeScore transaction failed for ${txHash}: ${errorDetails}`,
+        );
+      }
+      case "NOT_FOUND":
+      case "PENDING":
         await sleep(delayMs);
         break;
       default:
-        throw new Error(`Unexpected transaction status for ${txHash}`);
+        throw new Error(
+          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
+        );
     }
   }
 
