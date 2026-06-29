@@ -171,7 +171,18 @@ impl RevocationRegistry {
             .unwrap_or(false)
     }
 
+    /// Get the issuer that most recently revoked the given verifiable credential.
+    ///
+    /// Returns `Some(Address)` when the VC hash exists in storage under
+    /// `IssuerOfVC` and `None` when the VC hash has never been revoked.
+    pub fn get_revocation_record(env: Env, vc_hash: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&RevocationKey::IssuerOfVC(vc_hash))
+    }
+
     /// Revoke multiple verifiable credentials in a single batch operation.
+
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
@@ -328,9 +339,10 @@ fn test_admin_transfer_two_step() {
         let admin2 = Address::generate(&env);
         let admin3 = Address::generate(&env);
 
-    client.initialize(&admin1);
-    client.propose_new_admin(&admin1, &admin2);
-    client.accept_admin(&admin2);
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin1, &admin2);
+        client.accept_admin(&admin2);
+
 
         // new admin can perform admin-gated actions
         client.propose_new_admin(&admin2, &admin3);
