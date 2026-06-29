@@ -167,6 +167,37 @@ score = clamp(300 + 97×550÷100, 300, 850)
 
 ---
 
+### Example 4: 5 VCs, 100 XLM volume, 100% repayment, no counterparty bonus → score 850 (MAX_SCORE)
+
+| Input              | Value                              |
+| ------------------ | ---------------------------------- |
+| vc_count           | 5                                  |
+| volume_30d         | 10,000,000,000 stroops (100 XLM)   |
+| avg_counterparties | 0 (no bonus)                       |
+| on_time / total    | 100 / 100                          |
+
+**Calculation:**
+
+```
+vc_score    = min(5 × 20, 100) = min(100, 100) = 100
+tx_score    = min(10_000_000_000 ÷ 100_000_000, 100) = min(100, 100) = 100
+repay_score = (100 × 10000 ÷ 100) ÷ 100 = 10000 ÷ 100 = 100
+counterparty_bonus = 0   (avg_counterparties < 10)
+
+composite = (100×40 + (100+0)×30 + 100×30) ÷ 100
+          = (4000 + 3000 + 3000) ÷ 100
+          = 10000 ÷ 100
+          = 100
+
+score = clamp(300 + 100×550÷100, 300, 850)
+      = clamp(300 + 550, 300, 850)
+      = 850
+```
+
+**Result: `MAX_SCORE` (850)** — the ceiling. Each sub-score is at its maximum (100), producing a composite of exactly 100 and the highest achievable score. Verified by `test_exceptional_score_equals_850` in the credit-oracle test suite.
+
+---
+
 ## Edge cases
 
 ### Stale score (`last_updated` more than 30 days ago)
@@ -177,22 +208,11 @@ The contract does not enforce score freshness. `get_score` returns whatever was 
 
 The feeder is responsible for keeping `TxStats` and `VcCount` current. If the feeder stops updating, the score will drift from reality but will not error — it will simply reflect stale inputs.
 
-### Open-call recomputation spam (known gap — Issue 78)
+### Open-call recomputation cooldown
 
-`compute_score` requires no authorisation and has no per-subject cooldown. This
-means any address can call it for any subject at any time, and in theory a
-subject (or a third party acting on their behalf) could spam recomputations to
-land on a favourable `last_updated` ledger timestamp in `ScoreRecord`.
+`compute_score` remains authorization-free, but successful calls are rate-limited per subject by the configured `ComputeCooldownLedgers` value. The default is one ledger, so a subject can be recomputed again on the next ledger but not repeatedly in the same ledger.
 
-**Current mitigations:** none. The timestamp can be manipulated only within the
-bounds of the actual on-chain input data; the *score value itself* cannot be
-inflated. Consumers that rely on `last_updated` for freshness decisions should
-be aware that the timestamp reflects when the score was last *computed*, not
-when the underlying inputs last changed.
-
-**Planned fix (Issue 78):** introduce a minimum recomputation interval (one
-ledger per subject). Until that is shipped, this is a documented known
-limitation.
+The contract stores the last successful computation ledger under `LastComputed(Address)`. Admin/governance can update the interval with `update_compute_cooldown`; setting it to `0` disables the cooldown.
 
 ### All VCs revoked
 

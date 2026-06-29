@@ -315,6 +315,16 @@ impl IdentityOracle {
     }
 
 
+    /// Verify whether a subject has a matching active verifiable credential anchor.
+    ///
+    /// Parameters:
+    /// - `env`: Soroban contract environment used to read persistent storage.
+    /// - `subject`: Address whose anchored VC records are searched.
+    /// - `vc_hash`: SHA-256 hash of the off-chain VC JSON to verify.
+    ///
+    /// Returns `true` when `subject` has an anchored VC record with `vc_hash`
+    /// that has not been revoked, and `false` when no matching active record
+    /// exists. This function is read-only and does not require authentication.
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -370,7 +380,7 @@ impl IdentityOracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Return the list of all currently registered trusted issuers.
+    /// Return the `IssuersIndex` vector of currently registered trusted issuers.
     pub fn list_issuers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()

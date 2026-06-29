@@ -284,7 +284,8 @@ stellar-did-credit/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
 │   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
-│   └── scoring-spec.md         # Scoring formula + worked examples
+│   ├── scoring-spec.md         # Scoring formula + worked examples
+│   └── zk-proof-design.md      # Phase 4 ZK selective disclosure design
 ├── scripts/
 │   └── deploy.sh               # Testnet deployment script
 ├── Cargo.toml                  # Workspace root
@@ -427,7 +428,7 @@ Full TypeScript SDK with DID creation, VC issuance, and revocation. CLI tool for
 credit-oracle reads `vc_count` directly from identity-oracle via cross-contract call. Score freshness enforcement.
 
 **Phase 4 — Privacy layer**
-ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials.
+ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials. Design document: [docs/zk-proof-design.md](docs/zk-proof-design.md).
 
 **Phase 5 — Governance**
 DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
@@ -488,6 +489,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [DID Method Specification](docs/did-spec.md)
 - [Issuer Integration Guide](docs/issuer-guide.md)
+- [ZK Proof Layer Design (Phase 4)](docs/zk-proof-design.md)
 
 ---
 
