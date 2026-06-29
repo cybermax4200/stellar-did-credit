@@ -332,7 +332,7 @@ A feeder is a registered off-chain service that periodically calls two credit-or
 
 | Call | What it does |
 | ---- | ------------ |
-| `set_vc_count(feeder, subject, count)` | **Deprecated**: previously cached active VC count; prefer cross-contract lookup via `set_identity_oracle` + `compute_score` |
+| `set_vc_count(feeder, subject, count)` | **Deprecated**: Caches the active VC count. Use cross-contract lookup via `set_identity_oracle` instead. |
 | `update_tx_stats(feeder, subject, stats)` | Pushes 30-day Horizon payment stats (volume, tx count, counterparties) |
 
 ### Prerequisites

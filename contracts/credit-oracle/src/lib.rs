@@ -335,9 +335,9 @@ impl CreditOracle {
 
     /// Cache VC count for a subject (feeder-only)
     ///
-    /// Deprecated: prefer configuring an `IdentityOracleId` and using the
+    /// **Deprecated:** Prefer configuring an `IdentityOracleId` and using the
     /// cross-contract lookup via `set_identity_oracle` + `compute_score`.
-    #[deprecated(note = "Prefer cross-contract lookup via set_identity_oracle + compute_score")]
+    #[deprecated(note = "use cross-contract lookup via set_identity_oracle instead")]
     pub fn set_vc_count(
         env: Env,
         feeder: Address,
