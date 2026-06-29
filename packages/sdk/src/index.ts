@@ -432,6 +432,44 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Fetch the current scoring weights from the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
+   *
+   * @returns Parsed ScoringWeights
+   */
+  async getWeights(): Promise<ScoringWeights> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.creditOracleId);
+
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_scoring_weights"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseScoringWeights(resultScVal);
+  }
+
+  /**
    * Retrieve the anchored DID document CID for a subject.
    *
    * Returns the IPFS CID of the subject's anchored DID document, or `null` if
@@ -657,6 +695,20 @@ function parseScoreRecord(
     vcCount: Number(raw["vc_count"]),
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
+  };
+}
+
+function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_scoring_weights returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    vcWeight: Number(raw["vc_weight"]),
+    txWeight: Number(raw["tx_weight"]),
+    repaymentWeight: Number(raw["repayment_weight"]),
   };
 }
 
