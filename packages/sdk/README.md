@@ -25,11 +25,39 @@ const score = await sdk.getScore("G...");
 console.log(score.score); // e.g. 612
 ```
 
+### Configuration options
+
+All fields except the five required IDs/URLs are optional.
+
+| Option            | Type     | Default          | Description                                              |
+| ----------------- | -------- | ---------------- | -------------------------------------------------------- |
+| `timeoutSeconds`  | `number` | `30`             | Transaction builder timeout (seconds)                    |
+| `maxRetries`      | `number` | `3`              | Max simulation retry attempts with exponential backoff   |
+| `baseFee`         | `string` | `BASE_FEE` (`"100"`) | Transaction base fee in stroops                     |
+
+```typescript
+const sdk = new StellarDIDCreditSDK({
+    identityOracleId: "C...",
+    creditOracleId: "C...",
+    revocationRegistryId: "C...",
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    // Optional tuning for unstable network environments:
+    timeoutSeconds: 60,
+    maxRetries: 5,
+    baseFee: "1000",
+});
+```
+
 ## API
 
 ### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
 
 Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the full persisted `ScoreRecord` via `getScore` so callers do not need an extra fetch. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
+
+> **Fee note:** `computeScore` submits a signed transaction and therefore costs a
+> transaction fee (deducted from `payerKeypair`). In contrast, `getScore` uses a
+> read-only simulation and is always free.
 
 ```typescript
 const score = await sdk.computeScore(payerKeypair, "G...");

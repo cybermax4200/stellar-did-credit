@@ -102,6 +102,22 @@ export interface ProtocolConfig {
   networkPassphrase: string;
   rpcUrl: string;
   simAccount: string;
+  /**
+   * Request timeout in seconds applied to all transaction builders via `setTimeout`.
+   * Defaults to `30`.
+   */
+  timeoutSeconds?: number;
+  /**
+   * Maximum number of simulation retry attempts on transient RPC failures before
+   * the call is rejected. Uses exponential backoff between attempts.
+   * Defaults to `3`.
+   */
+  maxRetries?: number;
+  /**
+   * Base fee in stroops applied to all transaction builders.
+   * Defaults to the Stellar SDK `BASE_FEE` constant (`"100"`).
+   */
+  baseFee?: string;
 }
 
 /** Extract the sequence number string from a Soroban RPC account response. */
@@ -110,6 +126,44 @@ function getSequence(accountData: SorobanRpc.Api.GetAccountResponse): string {
   // We narrow through `unknown` to avoid an unsafe `any` cast.
   const data = accountData as unknown as { sequence: string };
   return data.sequence;
+}
+
+/**
+ * Simulate a transaction against the RPC, retrying up to `maxRetries` times
+ * with exponential backoff (base 500 ms) on transient failures.
+ *
+ * A "transient failure" is any non-success simulation result that does NOT
+ * contain an explicit contract error string.  Contract-level errors (e.g.
+ * "score not computed") are surfaced immediately without retrying.
+ *
+ * @param server      - Soroban RPC server instance
+ * @param tx          - Transaction to simulate
+ * @param maxRetries  - Maximum retry attempts (default 3)
+ * @returns The first successful simulation response
+ * @throws The last simulation response / error after all retries are exhausted
+ */
+async function simulateWithRetry(
+  server: SorobanRpc.Server,
+  tx: Parameters<typeof server.simulateTransaction>[0],
+  maxRetries = 3,
+): Promise<SorobanRpc.Api.SimulateTransactionResponse> {
+  let lastResult: SorobanRpc.Api.SimulateTransactionResponse | undefined;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    const result = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationSuccess(result)) {
+      return result;
+    }
+    // Surface explicit contract errors immediately — no point retrying.
+    if (SorobanRpc.Api.isSimulationError(result)) {
+      return result;
+    }
+    lastResult = result;
+    if (attempt < maxRetries) {
+      await sleep(500 * Math.pow(2, attempt)); // 500 ms, 1 s, 2 s …
+    }
+  }
+  // All retries exhausted — return the last result so callers can inspect it.
+  return lastResult as SorobanRpc.Api.SimulateTransactionResponse;
 }
 
 export class StellarDIDCreditSDK {
@@ -135,9 +189,9 @@ export class StellarDIDCreditSDK {
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call(
           "anchor_did",
@@ -145,10 +199,10 @@ export class StellarDIDCreditSDK {
           nativeToScVal(didDocCid),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -197,9 +251,9 @@ export class StellarDIDCreditSDK {
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call(
           "anchor_vc",
@@ -208,10 +262,10 @@ export class StellarDIDCreditSDK {
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -267,9 +321,9 @@ export class StellarDIDCreditSDK {
     const issuerScVal = new Address(publicKey).toScVal();
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         revocationContract.call("revoke", issuerScVal, hashScVal),
       )
@@ -281,10 +335,10 @@ export class StellarDIDCreditSDK {
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -329,16 +383,16 @@ export class StellarDIDCreditSDK {
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call("compute_score", new Address(subjectAddress).toScVal()),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -360,7 +414,11 @@ export class StellarDIDCreditSDK {
     await waitForTransactionConfirmation(server, response.hash);
 
     try {
-      return await this.getScore(subjectAddress);
+      const score = await this.getScore(subjectAddress);
+      if (!score) {
+        throw new Error("Score not computed after compute_score transaction");
+      }
+      return score;
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(
@@ -375,25 +433,24 @@ export class StellarDIDCreditSDK {
    * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
    *
    * @param subjectAddress - Stellar G... address of the subject
-   * @returns Parsed ScoreRecord
-   * @throws {ScoreNotComputedError} If the score has not been computed for this address
+   * @returns Parsed ScoreRecord, or null if not computed
    */
-  async getScore(subjectAddress: string): Promise<ScoreRecord> {
+  async getScore(subjectAddress: string): Promise<ScoreRecord | null> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call("get_score", new Address(subjectAddress).toScVal()),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
@@ -427,14 +484,14 @@ export class StellarDIDCreditSDK {
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(contract.call("get_scoring_weights"))
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -469,19 +526,19 @@ export class StellarDIDCreditSDK {
     const sourceAccount = new Account(this.config.simAccount, "0");
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call(
           "get_did_document",
           new Address(subjectAddress).toScVal(),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -524,9 +581,9 @@ export class StellarDIDCreditSDK {
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call(
           "verify_vc",
@@ -534,10 +591,10 @@ export class StellarDIDCreditSDK {
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -574,16 +631,16 @@ export class StellarDIDCreditSDK {
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call("is_verified", new Address(subjectAddress).toScVal()),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -615,19 +672,19 @@ export class StellarDIDCreditSDK {
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(
         contract.call(
           "get_active_vc_count",
           new Address(subjectAddress).toScVal(),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -658,14 +715,14 @@ export class StellarDIDCreditSDK {
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
       .addOperation(contract.call("list_issuers"))
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await server.simulateTransaction(tx);
+    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -708,10 +765,13 @@ export class ScoreNotComputedError extends Error {
 function parseScoreRecord(
   scVal: xdr.ScVal,
   subjectAddress: string,
-): ScoreRecord {
+): ScoreRecord | null {
+  if (!scVal || (typeof scVal.switch === "function" && scVal.switch() === xdr.ScValType.scvVoid())) {
+    return null;
+  }
   const native = scValToNative(scVal);
   if (native === null || native === undefined) {
-    throw new ScoreNotComputedError(subjectAddress);
+    return null;
   }
   const raw = native as Record<string, unknown>;
   return {

@@ -3,8 +3,7 @@
 //!
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,6 +46,8 @@ pub enum RevocationRegistryError {
     IssuerMismatch = 3,
     /// No pending admin proposal exists.
     NoPendingAdmin = 4,
+    /// Batch size exceeds maximum allowed.
+    BatchTooLarge = 5,
 }
 
 /// Storage keys for revocation registry contract.
@@ -123,12 +124,18 @@ impl RevocationRegistry {
         env.storage()
             .instance()
             .set(&RevocationKey::Admin, &new_admin);
-        env.storage().instance().remove(&RevocationKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&RevocationKey::PendingAdmin);
         Ok(())
     }
 
     /// Revoke a single verifiable credential by its hash.
-    pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
+    pub fn revoke(
+        env: Env,
+        issuer: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
 
         // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -169,12 +176,26 @@ impl RevocationRegistry {
             .unwrap_or(false)
     }
 
+    /// Get the issuer that most recently revoked the given verifiable credential.
+    ///
+    /// Returns `Some(Address)` when the VC hash exists in storage under
+    /// `IssuerOfVC` and `None` when the VC hash has never been revoked.
+    pub fn get_revocation_record(env: Env, vc_hash: BytesN<32>) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&RevocationKey::IssuerOfVC(vc_hash))
+    }
+
     /// Revoke multiple verifiable credentials in a single batch operation.
+
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        if vc_hashes.len() > 100 {
+            return Err(RevocationRegistryError::BatchTooLarge);
+        }
         issuer.require_auth();
         for vc_hash in vc_hashes.iter() {
             // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -292,20 +313,40 @@ mod tests {
         }
     }
 
-  #[test]
-fn test_admin_transfer_two_step() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, RevocationRegistry);
-    let client = RevocationRegistryClient::new(&env, &contract_id);
+    #[test]
+    fn test_batch_revoke_exceeds_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let mut vc_hashes = Vec::new(&env);
+        for i in 0..101 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = (i % 256) as u8;
+            hash_arr[1] = (i / 256) as u8;
+            vc_hashes.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+
+        let res = client.try_batch_revoke(&issuer, &vc_hashes);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
         let admin3 = Address::generate(&env);
 
-    client.initialize(&admin1);
-    client.propose_new_admin(&admin1, &admin2);
-    client.accept_admin(&admin2);
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin1, &admin2);
+        client.accept_admin(&admin2);
 
         // new admin can perform admin-gated actions
         client.propose_new_admin(&admin2, &admin3);
@@ -347,4 +388,3 @@ fn test_admin_transfer_two_step() {
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
     }
 }
-
