@@ -1,8 +1,8 @@
 #![no_std]
+use credit_oracle::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, Env
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
-use credit_oracle::{ScoringWeights, CreditOracleClient};
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -42,14 +42,22 @@ pub struct Governance;
 
 #[contractimpl]
 impl Governance {
-    pub fn initialize(env: Env, admin: Address, credit_oracle: Address) -> Result<(), GovernanceError> {
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        credit_oracle: Address,
+    ) -> Result<(), GovernanceError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(GovernanceError::AlreadyInitialized);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::CreditOracle, &credit_oracle);
-        env.storage().instance().set(&DataKey::NextProposalId, &1u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::CreditOracle, &credit_oracle);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &1u64);
         Ok(())
     }
 
@@ -64,7 +72,11 @@ impl Governance {
             return Err(GovernanceError::InvalidWeights);
         }
 
-        let id: u64 = env.storage().instance().get(&DataKey::NextProposalId).unwrap_or(1);
+        let id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
         let expiry_ledger = env.ledger().sequence() + voting_period_ledgers;
 
         let proposal = GovernanceProposal {
@@ -76,13 +88,15 @@ impl Governance {
             executed: false,
         };
 
-        env.storage().persistent().set(&DataKey::Proposal(id), &proposal);
-        env.storage().instance().set(&DataKey::NextProposalId, &(id + 1));
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposal(id), &proposal);
+        env.storage()
+            .instance()
+            .set(&DataKey::NextProposalId, &(id + 1));
 
-        env.events().publish(
-            (symbol_short!("PropCreat"), id),
-            (proposer, expiry_ledger),
-        );
+        env.events()
+            .publish((symbol_short!("PropCreat"), id), (proposer, expiry_ledger));
 
         Ok(id)
     }
@@ -191,15 +205,20 @@ impl Governance {
     }
 
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<GovernanceProposal> {
-        env.storage().persistent().get(&DataKey::Proposal(proposal_id))
+        env.storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Ledger}, Env};
     use credit_oracle::{CreditOracle, CreditOracleClient};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger},
+        Env,
+    };
 
     #[test]
     fn test_governance_proposal_creation_voting_and_execution() {
