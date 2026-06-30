@@ -1,2 +1,4 @@
 packages:
+  # Covers packages/sdk, packages/feeder, and packages/issuer-example.
+  # All three packages are resolved when running `pnpm install` from the repo root.
   - 'packages/*'

@@ -80,15 +80,19 @@ For more details, see the [Soroban testutils snapshot documentation](https://doc
 Root-level commands for testing, linting, and building all Rust and TypeScript packages:
 
 ```bash
-pnpm test    # Run Rust and TypeScript tests
-pnpm lint    # Run Clippy and linters
-pnpm build   # Build Rust and TypeScript packages
+pnpm test       # Run Rust and TypeScript tests
+pnpm lint       # Run Clippy and ESLint (check only, no writes)
+pnpm lint:fix   # Auto-fix ESLint and Clippy warnings where possible
+pnpm build      # Build Rust and TypeScript packages
 ```
 
 Each command:
 - Exits with non-zero status if any sub-command fails
 - Runs Rust tests first, then TypeScript tests
 - Is the recommended way to validate before opening a PR
+
+`pnpm lint:fix` is safe to run on a dirty working tree — it uses `--allow-dirty` for
+Clippy and writes ESLint fixes in-place. Review the diff before committing.
 
 ## Opening a pull request
 
