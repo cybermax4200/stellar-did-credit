@@ -3,8 +3,7 @@
 //!
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
-    contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -125,12 +124,18 @@ impl RevocationRegistry {
         env.storage()
             .instance()
             .set(&RevocationKey::Admin, &new_admin);
-        env.storage().instance().remove(&RevocationKey::PendingAdmin);
+        env.storage()
+            .instance()
+            .remove(&RevocationKey::PendingAdmin);
         Ok(())
     }
 
     /// Revoke a single verifiable credential by its hash.
-    pub fn revoke(env: Env, issuer: Address, vc_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
+    pub fn revoke(
+        env: Env,
+        issuer: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
 
         // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -328,12 +333,12 @@ mod tests {
         assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
     }
 
-  #[test]
-fn test_admin_transfer_two_step() {
-    let env = Env::default();
-    env.mock_all_auths();
-    let contract_id = env.register_contract(None, RevocationRegistry);
-    let client = RevocationRegistryClient::new(&env, &contract_id);
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
         let admin2 = Address::generate(&env);
@@ -342,7 +347,6 @@ fn test_admin_transfer_two_step() {
         client.initialize(&admin1);
         client.propose_new_admin(&admin1, &admin2);
         client.accept_admin(&admin2);
-
 
         // new admin can perform admin-gated actions
         client.propose_new_admin(&admin2, &admin3);
@@ -384,4 +388,3 @@ fn test_admin_transfer_two_step() {
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
     }
 }
-
