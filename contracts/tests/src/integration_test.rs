@@ -408,4 +408,69 @@ mod tests {
             score_with_5_vcs
         );
     }
+
+    #[test]
+    fn test_cross_contract_score_not_inflated_after_revocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+
+        // Anchor 3 VCs for the subject
+        let vc_hashes: [BytesN<32>; 3] = [
+            BytesN::from_array(&env, &[1u8; 32]),
+            BytesN::from_array(&env, &[2u8; 32]),
+            BytesN::from_array(&env, &[3u8; 32]),
+        ];
+        for vc_hash in vc_hashes {
+            identity.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        // Configure credit-oracle to use cross-contract VC count lookup
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Compute initial score (3 active VCs)
+        let initial_score = credit.compute_score(&subject);
+        assert!(
+            initial_score > 300,
+            "expected initial score > 300, got {}",
+            initial_score
+        );
+
+        // Revoke 2 of the 3 VCs
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[0]);
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[1]);
+
+        // Advance ledger to allow recomputation
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // Compute new score (1 active VC)
+        let score_after_revocation = credit.compute_score(&subject);
+
+        // Verify score is lower after revocation (cross-contract path uses get_active_vc_count)
+        assert!(
+            score_after_revocation < initial_score,
+            "expected score after revocation ({}) < initial score ({}) when using cross-contract lookup",
+            score_after_revocation,
+            initial_score
+        );
+
+        // Also verify get_active_vc_count returns correct count
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+        assert_eq!(identity.get_total_vc_count(&subject), 3);
+    }
 }

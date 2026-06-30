@@ -424,7 +424,11 @@ impl CreditOracle {
             if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
                 let args: SorobanVec<Val> =
                     SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
-                env.invoke_contract(&identity_id, &Symbol::new(&env, "get_vc_count"), args)
+                env.invoke_contract(
+                    &identity_id,
+                    &Symbol::new(&env, "get_active_vc_count"),
+                    args,
+                )
             } else {
                 env.storage()
                     .persistent()
