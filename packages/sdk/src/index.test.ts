@@ -12,6 +12,7 @@ import type {
   RepaymentRecord,
   VCRecord,
 } from "./index";
+import { xdr } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
@@ -35,7 +36,14 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Networks: {
     TESTNET: "Test SDF Network ; September 2015",
   },
-  xdr: {},
+  xdr: {
+    ScValType: {
+      scvVoid: () => "scvVoid",
+    },
+    ScVal: {
+      scvVoid: () => ({ switch: () => "scvVoid" }),
+    },
+  },
   Keypair: {},
   Account: jest
     .fn()
@@ -58,7 +66,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
   TransactionBuilder: jest.fn().mockImplementation(() => ({
     addOperation: jest.fn().mockReturnThis(),
     setTimeout: jest.fn().mockReturnThis(),
-    build: jest.fn().mockReturnValue({}),
+    build: jest.fn().mockReturnValue({ operations: [] }),
   })),
   nativeToScVal: (value: unknown) => ({ value }),
   scValToNative: (scVal: { value: unknown }) => scVal.value,
@@ -72,13 +80,16 @@ jest.mock("@stellar/stellar-sdk", () => ({
     Api: {
       isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
       isSimulationSuccess: (sim: { result?: unknown }) => Boolean(sim.result),
-      assembleTransaction: jest.fn().mockReturnValue({
-        build: jest.fn().mockReturnValue({
-          sign: jest.fn(),
-        }),
-      }),
     },
   },
+}));
+
+jest.mock("@stellar/stellar-sdk/rpc", () => ({
+  assembleTransaction: jest.fn().mockReturnValue({
+    build: jest.fn().mockReturnValue({
+      sign: jest.fn(),
+    }),
+  }),
 }));
 
 const mockConfig = {
@@ -226,6 +237,49 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("computeScore", () => {
+    it("test_computeScore_returns_updated_record", async () => {
+      // Verify that computeScore submits compute_score, waits for confirmation,
+      // then returns the updated ScoreRecord from getScore.
+      mockGetAccount.mockResolvedValue({ sequence: "10" });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "tx-compute-hash",
+      });
+      mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: { retval: { value: null } } }) // compute_score sim
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                score: 558,
+                last_updated: 1_710_000_000,
+                vc_count: 2,
+                repayment_rate: 8500,
+                tx_volume_30d: 2_000_000n,
+              },
+            },
+          },
+        }); // getScore sim
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.computeScore(
+        { publicKey: () => subjectAddress } as any,
+        subjectAddress,
+      );
+
+      expect(result).toEqual({
+        score: 558,
+        lastUpdated: 1_710_000_000,
+        vcCount: 2,
+        repaymentRate: 8500,
+        txVolume30d: 2_000_000n,
+      });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+      expect(mockGetTransaction).toHaveBeenCalledWith("tx-compute-hash");
+      expect(mockLastContractCall?.method).toBe("get_score");
+    });
+
     it("polls getTransaction until SUCCESS before reading the stored score", async () => {
       jest.useFakeTimers();
       mockGetAccount.mockResolvedValue({ sequence: "123" });
@@ -324,6 +378,37 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("getVCCount", () => {
+    it("test_getVCCount_returns_active_count", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 3 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getVCCount(subjectAddress);
+
+      expect(result).toBe(3);
+      expect(mockLastContractCall?.method).toBe("get_active_vc_count");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_getVCCount_returns_zero", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 0 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getVCCount(subjectAddress);
+
+      expect(result).toBe(0);
+      expect(mockLastContractCall?.method).toBe("get_active_vc_count");
+    });
+  });
+
   describe("getScore", () => {
     it("throws ScoreNotComputedError when score has not been computed", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
@@ -338,12 +423,140 @@ describe("StellarDIDCreditSDK", () => {
       );
     });
 
+    it("returns null when contract returns None (scvVoid)", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: xdr.ScVal.scvVoid(),
+        },
+      });
+
+      const result = await sdk.getScore(subjectAddress);
+      expect(result).toBeNull();
+    });
+
     it("exports ScoreNotComputedError class", () => {
       expect(ScoreNotComputedError).toBeDefined();
       const error = new ScoreNotComputedError(subjectAddress);
       expect(error).toBeInstanceOf(Error);
       expect(error.name).toBe("ScoreNotComputedError");
       expect(error.message).toContain(subjectAddress);
+    });
+  });
+
+  describe("ProtocolConfig — timeoutSeconds, maxRetries, baseFee", () => {
+    it("test_timeout_applied_to_transaction_builder", async () => {
+      // Arrange: custom timeoutSeconds; provide a valid sim response so getScore completes.
+      const scoreRetval = {
+        value: {
+          score: 300,
+          last_updated: 0,
+          vc_count: 0,
+          repayment_rate: 0,
+          tx_volume_30d: 0n,
+        },
+      };
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: scoreRetval },
+      });
+
+      const { TransactionBuilder } = jest.requireMock("@stellar/stellar-sdk");
+      const setTimeoutSpy = jest.fn().mockReturnThis();
+      TransactionBuilder.mockImplementationOnce(() => ({
+        addOperation: jest.fn().mockReturnThis(),
+        setTimeout: setTimeoutSpy,
+        build: jest.fn().mockReturnValue({ operations: [] }),
+      }));
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, timeoutSeconds: 60 });
+      await sdk.getScore(subjectAddress);
+
+      expect(setTimeoutSpy).toHaveBeenCalledWith(60);
+    });
+
+    it("test_retry_succeeds_after_n_failures", async () => {
+      jest.useFakeTimers();
+      // Arrange: first 2 calls return a non-success/non-error response
+      // (simulates a transient RPC glitch), 3rd call succeeds.
+      const TRANSIENT = {}; // neither error nor success
+      const SUCCESS = {
+        result: {
+          retval: {
+            value: {
+              score: 500,
+              last_updated: 1_700_000_000,
+              vc_count: 1,
+              repayment_rate: 7000,
+              tx_volume_30d: 500_000n,
+            },
+          },
+        },
+      };
+      mockSimulateTransaction
+        .mockResolvedValueOnce(TRANSIENT)
+        .mockResolvedValueOnce(TRANSIENT)
+        .mockResolvedValueOnce(SUCCESS);
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 3 });
+      const promise = sdk.getScore(subjectAddress);
+
+      // Advance timers past the two backoff sleeps (500ms + 1000ms)
+      await jest.advanceTimersByTimeAsync(2000);
+
+      const result = await promise;
+      expect(result?.score).toBe(500);
+      // simulateTransaction must have been called 3 times (2 transient + 1 success)
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(3);
+    });
+
+    it("test_retry_exhausted_throws_after_maxRetries", async () => {
+      // Use real timers but set maxRetries=0 so there are no sleeps at all —
+      // the loop runs exactly once (attempt 0), fails, and throws immediately.
+      const TRANSIENT = {};
+      mockSimulateTransaction.mockResolvedValue(TRANSIENT);
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 0 });
+      await expect(sdk.getScore(subjectAddress)).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+      // maxRetries=0 → 1 total attempt (just attempt 0)
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("test_custom_baseFee_forwarded_to_transaction_builder", async () => {
+      // Provide a valid sim response so getScore completes without error.
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              score: 300,
+              last_updated: 0,
+              vc_count: 0,
+              repayment_rate: 0,
+              tx_volume_30d: 0n,
+            },
+          },
+        },
+      });
+
+      const { TransactionBuilder } = jest.requireMock("@stellar/stellar-sdk");
+      let capturedFee: string | undefined;
+      TransactionBuilder.mockImplementationOnce(
+        (_account: unknown, opts: { fee: string }) => {
+          capturedFee = opts.fee;
+          return {
+            addOperation: jest.fn().mockReturnThis(),
+            setTimeout: jest.fn().mockReturnThis(),
+            build: jest.fn().mockReturnValue({ operations: [] }),
+          };
+        },
+      );
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, baseFee: "500" });
+      await sdk.getScore(subjectAddress);
+
+      expect(capturedFee).toBe("500");
     });
   });
 });

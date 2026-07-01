@@ -24,6 +24,8 @@
  *   HORIZON_URL          — Defaults to the public Horizon testnet
  *   SIM_ACCOUNT          — Any funded account used as fee source for read-only sims
  *   POLL_INTERVAL_MS     — Feed cycle interval in ms (default: 3 600 000 = 1 hour)
+ *   MAX_RETRIES          — Max retry attempts for transient RPC/Horizon failures (default: 3)
+ *   RETRY_BASE_DELAY_MS  — Base backoff delay in ms (default: 1 000)
  */
 
 import {
@@ -61,6 +63,10 @@ export interface FeederConfig {
   subjects: string[];
   /** How often to run a full feed cycle, in milliseconds */
   pollIntervalMs: number;
+  /** Max retry attempts for transient RPC/Horizon failures */
+  maxRetries?: number;
+  /** Base delay for exponential backoff, in milliseconds */
+  retryBaseDelayMs?: number;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -87,7 +93,7 @@ export interface TxStats {
  */
 export async function fetchHorizonStats(
   horizonUrl: string,
-  address: string
+  address: string,
 ): Promise<TxStats> {
   const horizon = new Horizon.Server(horizonUrl);
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
@@ -171,7 +177,7 @@ export async function getActiveVcCount(
     FeederConfig,
     "identityOracleId" | "networkPassphrase" | "simAccount"
   >,
-  subjectAddress: string
+  subjectAddress: string,
 ): Promise<number> {
   const contract = new Contract(config.identityOracleId);
   const sourceAccount = new Account(config.simAccount, "0");
@@ -183,8 +189,8 @@ export async function getActiveVcCount(
     .addOperation(
       contract.call(
         "get_active_vc_count",
-        new Address(subjectAddress).toScVal()
-      )
+        new Address(subjectAddress).toScVal(),
+      ),
     )
     .setTimeout(30)
     .build();
@@ -230,12 +236,12 @@ async function submitOperation(
   server: SorobanRpc.Server,
   networkPassphrase: string,
   feederKeypair: Keypair,
-  operation: xdr.Operation
+  operation: xdr.Operation,
 ): Promise<string> {
   const accountData = await server.getAccount(feederKeypair.publicKey());
   const sourceAccount = new Account(
     feederKeypair.publicKey(),
-    (accountData as any).sequence
+    (accountData as any).sequence,
   );
 
   const tx = new TransactionBuilder(sourceAccount, {
@@ -263,7 +269,7 @@ async function submitOperation(
   const response = await server.sendTransaction(preparedTx);
   if (response.status !== "PENDING") {
     throw new Error(
-      `Transaction rejected: ${JSON.stringify(response.errorResult)}`
+      `Transaction rejected: ${JSON.stringify(response.errorResult)}`,
     );
   }
 
@@ -277,7 +283,7 @@ async function submitOperation(
 export async function waitForConfirmation(
   server: SorobanRpc.Server,
   txHash: string,
-  timeoutMs = 60_000
+  timeoutMs = 60_000,
 ): Promise<void> {
   const deadline = Date.now() + timeoutMs;
 
@@ -332,7 +338,7 @@ export class Feeder {
 
   constructor(
     private config: FeederConfig,
-    private feederKeypair: Keypair
+    private feederKeypair: Keypair,
   ) {
     this.server = new SorobanRpc.Server(config.rpcUrl);
   }
@@ -344,22 +350,28 @@ export class Feeder {
   async feedSubject(subjectAddress: string): Promise<void> {
     console.log(`[feeder] syncing ${subjectAddress}`);
 
+    const maxRetries = this.config.maxRetries ?? 3;
+    const retryBaseDelayMs = this.config.retryBaseDelayMs ?? 1_000;
+
     // Step 1: read active VC count from identity-oracle
-    const vcCount = await getActiveVcCount(
-      this.server,
-      this.config,
-      subjectAddress
+    const vcCount = await withExponentialBackoff(
+      `get_active_vc_count(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () => getActiveVcCount(this.server, this.config, subjectAddress),
     );
     console.log(`  vc_count          = ${vcCount}`);
 
     // Step 2: fetch 30-day payment stats from Horizon
-    const stats = await fetchHorizonStats(
-      this.config.horizonUrl,
-      subjectAddress
+    const stats = await withExponentialBackoff(
+      `fetch_horizon_stats(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () => fetchHorizonStats(this.config.horizonUrl, subjectAddress),
     );
     console.log(
       `  volume_30d        = ${stats.volume30d} stroops` +
-        ` (${Number(stats.volume30d) / 10_000_000} XLM)`
+        ` (${Number(stats.volume30d) / 10_000_000} XLM)`,
     );
     console.log(`  tx_count_30d      = ${stats.txCount30d}`);
     console.log(`  avg_counterparties = ${stats.avgCounterparties}`);
@@ -368,34 +380,58 @@ export class Feeder {
     const feederAddress = this.feederKeypair.publicKey();
 
     // Step 3: submit set_vc_count
-    const vcCountTxHash = await submitOperation(
-      this.server,
-      this.config.networkPassphrase,
-      this.feederKeypair,
-      creditContract.call(
-        "set_vc_count",
-        new Address(feederAddress).toScVal(),
-        new Address(subjectAddress).toScVal(),
-        nativeToScVal(vcCount, { type: "u32" })
-      )
+    const vcCountTxHash = await withExponentialBackoff(
+      `set_vc_count(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () =>
+        submitOperation(
+          this.server,
+          this.config.networkPassphrase,
+          this.feederKeypair,
+          creditContract.call(
+            "set_vc_count",
+            new Address(feederAddress).toScVal(),
+            new Address(subjectAddress).toScVal(),
+            nativeToScVal(vcCount, { type: "u32" }),
+          ),
+        ),
     );
     console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
-    await waitForConfirmation(this.server, vcCountTxHash);
+
+    await withExponentialBackoff(
+      `wait_set_vc_count_confirmation(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () => waitForConfirmation(this.server, vcCountTxHash),
+    );
 
     // Step 4: submit update_tx_stats
-    const statsTxHash = await submitOperation(
-      this.server,
-      this.config.networkPassphrase,
-      this.feederKeypair,
-      creditContract.call(
-        "update_tx_stats",
-        new Address(feederAddress).toScVal(),
-        new Address(subjectAddress).toScVal(),
-        txStatsToScVal(stats)
-      )
+    const statsTxHash = await withExponentialBackoff(
+      `update_tx_stats(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () =>
+        submitOperation(
+          this.server,
+          this.config.networkPassphrase,
+          this.feederKeypair,
+          creditContract.call(
+            "update_tx_stats",
+            new Address(feederAddress).toScVal(),
+            new Address(subjectAddress).toScVal(),
+            txStatsToScVal(stats),
+          ),
+        ),
     );
     console.log(`  update_tx_stats tx = ${statsTxHash}`);
-    await waitForConfirmation(this.server, statsTxHash);
+
+    await withExponentialBackoff(
+      `wait_update_tx_stats_confirmation(${subjectAddress})`,
+      maxRetries,
+      retryBaseDelayMs,
+      () => waitForConfirmation(this.server, statsTxHash),
+    );
 
     console.log(`  done`);
   }
@@ -408,7 +444,7 @@ export class Feeder {
       } catch (err) {
         console.error(
           `[feeder] error syncing ${subject}:`,
-          err instanceof Error ? err.message : err
+          err instanceof Error ? err.message : err,
         );
       }
     }
@@ -444,6 +480,36 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function withExponentialBackoff<T>(
+  operationName: string,
+  maxRetries: number,
+  baseDelayMs: number,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const retries = Number.isFinite(maxRetries) ? Math.max(0, maxRetries) : 3;
+  const delayBase = Number.isFinite(baseDelayMs)
+    ? Math.max(1, baseDelayMs)
+    : 1_000;
+
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const isLastAttempt = attempt >= retries;
+      if (isLastAttempt) {
+        throw err;
+      }
+
+      const delayMs = delayBase * 2 ** attempt;
+      console.warn(
+        `[feeder] retry ${attempt + 1}/${retries} for ${operationName} in ${delayMs}ms:`,
+        err instanceof Error ? err.message : err,
+      );
+      await sleep(delayMs);
+    }
+  }
+}
+
 // ---------------------------------------------------------------------------
 // CLI entry point
 // ---------------------------------------------------------------------------
@@ -474,7 +540,12 @@ if (require.main === module) {
     "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
   const pollIntervalMs = parseInt(
     process.env["POLL_INTERVAL_MS"] ?? "3600000",
-    10
+    10,
+  );
+  const maxRetries = parseInt(process.env["MAX_RETRIES"] ?? "3", 10);
+  const retryBaseDelayMs = parseInt(
+    process.env["RETRY_BASE_DELAY_MS"] ?? "1000",
+    10,
   );
 
   const subjects = subjectsRaw
@@ -484,7 +555,7 @@ if (require.main === module) {
 
   if (subjects.length === 0) {
     console.error(
-      "Error: SUBJECTS must be a non-empty comma-separated list of G... addresses"
+      "Error: SUBJECTS must be a non-empty comma-separated list of G... addresses",
     );
     process.exit(1);
   }
@@ -503,6 +574,8 @@ if (require.main === module) {
   console.log(`  interval   : ${pollIntervalMs}ms`);
   console.log(`  rpc        : ${rpcUrl}`);
   console.log(`  horizon    : ${horizonUrl}`);
+  console.log(`  maxRetries : ${maxRetries}`);
+  console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
 
   const config: FeederConfig = {
     rpcUrl,
@@ -513,6 +586,8 @@ if (require.main === module) {
     simAccount,
     subjects,
     pollIntervalMs,
+    maxRetries,
+    retryBaseDelayMs,
   };
 
   const feeder = new Feeder(config, feederKeypair);
