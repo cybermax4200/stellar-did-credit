@@ -275,9 +275,7 @@ export class StellarDIDCreditSDK {
       fee: BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
-      .addOperation(
-        revocationContract.call("revoke", issuerScVal, hashScVal),
-      )
+      .addOperation(revocationContract.call("revoke", issuerScVal, hashScVal))
       .addOperation(
         identityContract.call(
           "mark_vc_revoked",
@@ -373,7 +371,7 @@ export class StellarDIDCreditSDK {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       throw new Error(
-        `computeScore transaction succeeded, but fetching the stored score for ${subjectAddress} failed: ${message}`,
+        `computeScore transaction succeeded and was confirmed, but fetching the stored score for ${subjectAddress} failed: ${message}`,
       );
     }
   }
