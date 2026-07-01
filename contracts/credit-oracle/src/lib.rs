@@ -357,7 +357,41 @@ impl CreditOracle {
             .set(&DataKey::VcCount(subject), &count);
         Ok(())
     }
+}
 
+/// Pure scoring arithmetic, extracted for unit and property-based testing
+/// without requiring a Soroban `Env`.
+///
+/// All inputs mirror the fields read from storage in `compute_score`.
+pub fn compute_score_pure(
+    vc_count: u32,
+    volume_30d: i128,
+    avg_counterparties: u32,
+    on_time_count: u32,
+    total_count: u32,
+    weights: &ScoringWeights,
+) -> u32 {
+    let vc_score = vc_count.saturating_mul(20).min(100);
+    let tx_score = ((volume_30d / 100_000_000i128) as u32).min(100);
+    let repay_score = on_time_count
+        .saturating_mul(10000)
+        .checked_div(total_count)
+        .map(|r| r / 100)
+        .unwrap_or(0);
+    let counterparty_bonus: u32 = if avg_counterparties >= 10 { 10 } else { 0 };
+
+    let composite = vc_score
+        .saturating_mul(weights.vc_weight)
+        .saturating_add(tx_score.saturating_mul(weights.tx_weight))
+        .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
+        .saturating_add(counterparty_bonus.saturating_mul(weights.tx_weight))
+        / 100;
+
+    (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE)
+}
+
+#[contractimpl]
+impl CreditOracle {
     /// Compute and store the credit score for `subject`.
     ///
     /// # Open-call design (no auth required)
@@ -436,47 +470,15 @@ impl CreditOracle {
                     .unwrap_or(0u32)
             };
 
-        // saturating_mul prevents overflow when vc_count is very large (e.g. u32::MAX).
-        // The subsequent .min(100) clamp preserves the original scoring cap.
-        let vc_score = vc_count.saturating_mul(20).min(100);
-        let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
-        // saturating_mul prevents overflow if on_time_count is pathologically large;
-        // checked_div still guards against division by zero (total_count == 0).
-        let repay_score = repayment
-            .on_time_count
-            .saturating_mul(10000)
-            .checked_div(repayment.total_count)
-            .map(|r| r / 100)
-            .unwrap_or(0);
-        // Counterparty diversity bonus: up to 10 points for avg_counterparties >= 10.
-        // This rewards users who transact with many distinct counterparties.
-        let counterparty_bonus: u32 = if tx_stats.avg_counterparties >= 10 {
-            10
-        } else {
-            0
-        };
-
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        // Mathematical invariant: each sub-score is clamped to [0, 100] and
-        // propose_weights enforces vc_weight + tx_weight + repayment_weight == 100,
-        // therefore:
-        //   composite = (vc_score*vc_w + tx_score*tx_w + repay_score*repay_w) / 100
-        //             ≤ (100*vc_w + 100*tx_w + 100*repay_w) / 100
-        //             = 100 * (vc_w + tx_w + repay_w) / 100
-        //             = 100 * 100 / 100 = 100
-        // Consequently score = MIN_SCORE + composite*550/100 ≤ 300 + 550 = 850 =
-        // MAX_SCORE, so the final clamp(300, 850) is a safety net rather than a
-        // load-bearing constraint for any valid weight combination.
-        // saturating_add/mul are used for defence-in-depth against future edits.
-        let composite = vc_score
-            .saturating_mul(weights.vc_weight)
-            .saturating_add(tx_score.saturating_mul(weights.tx_weight))
-            .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
-            .saturating_add(counterparty_bonus.saturating_mul(weights.tx_weight))
-            / 100;
-
-        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range.
-        let score = (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE);
+        let score = compute_score_pure(
+            vc_count,
+            tx_stats.volume_30d,
+            tx_stats.avg_counterparties,
+            repayment.on_time_count,
+            repayment.total_count,
+            &weights,
+        );
 
         env.storage().persistent().set(
             &DataKey::Score(subject.clone()),
@@ -484,8 +486,6 @@ impl CreditOracle {
                 score,
                 last_updated: env.ledger().timestamp(),
                 vc_count,
-                // Mirror the saturating_mul used above so the stored rate is
-                // computed consistently with the scoring path.
                 repayment_rate: repayment
                     .on_time_count
                     .saturating_mul(10000)
@@ -1311,7 +1311,7 @@ mod tests {
     }
 
     proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_score_always_in_range(
             vc_count in any::<u32>(),
@@ -1319,24 +1319,22 @@ mod tests {
             on_time in any::<u32>(),
             total in any::<u32>(),
         ) {
-            // Ensure a valid repayment state: on_time <= total.
-            let total_count = total;
-            let on_time_count = on_time.min(total_count);
-
+            let on_time_count = on_time.min(total);
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
-            let score = setup_and_compute_score(
+            let score = compute_score_pure(
                 vc_count,
-                volume_30d,
+                volume_30d as i128,
+                0,
                 on_time_count,
-                total_count,
-                weights,
+                total,
+                &weights,
             );
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
     }
 
     proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_score_monotone_on_repayment(
             vc_count in 0u32..100u32,
@@ -1345,37 +1343,22 @@ mod tests {
             on_time1 in 0u32..500u32,
         ) {
             let on_time1 = on_time1.min(total1);
-            let total2 = total1 + 1; // keep close to maximize boundary coverage
+            let total2 = total1 + 1;
 
-            // Construct on-time ratio that is >= ratio1 after truncation effects.
-            // We do it via counts: target ratio2 uses on_time2 = on_time1*(total2)/total1 rounded up.
             let on_time2 = ((on_time1 as u128) * (total2 as u128) + (total1 as u128) - 1) / (total1 as u128);
             let on_time2 = on_time2.min(total2 as u128) as u32;
 
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
 
-            let score1 = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time1,
-                total1,
-                weights.clone(),
-            );
-
-            let score2 = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time2,
-                total2,
-                weights,
-            );
+            let score1 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time1, total1, &weights);
+            let score2 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time2, total2, &weights);
 
             prop_assert!(score2 >= score1);
         }
     }
 
     proptest! {
-        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_no_panic_on_any_valid_weights(
             a in 0u32..=100u32,
@@ -1390,15 +1373,7 @@ mod tests {
 
             let on_time_count = on_time.min(total);
             let weights = ScoringWeights { vc_weight: a, tx_weight: b, repayment_weight: c };
-
-            // Should never panic for valid weights; also should always be bounded.
-            let score = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time_count,
-                total,
-                weights,
-            );
+            let score = compute_score_pure(vc_count, volume_30d as i128, 0, on_time_count, total, &weights);
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
     }
