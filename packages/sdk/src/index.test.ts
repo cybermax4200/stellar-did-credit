@@ -73,6 +73,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
   scValToNative: (scVal: { value: unknown }) => scVal.value,
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
+      getAccount: mockGetAccount,
+      sendTransaction: mockSendTransaction,
       simulateTransaction: mockSimulateTransaction,
       getAccount: mockGetAccount,
       sendTransaction: mockSendTransaction,
