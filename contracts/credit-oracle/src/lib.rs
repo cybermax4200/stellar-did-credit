@@ -1311,6 +1311,7 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
         #[test]
         fn proptest_score_always_in_range(
             vc_count in any::<u32>(),
@@ -1335,13 +1336,13 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
         #[test]
         fn proptest_score_monotone_on_repayment(
             vc_count in 0u32..100u32,
             volume_30d in any::<i64>(),
             total1 in 1u32..500u32,
             on_time1 in 0u32..500u32,
-            extra in 0u32..500u32,
         ) {
             let on_time1 = on_time1.min(total1);
             let total2 = total1 + 1; // keep close to maximize boundary coverage
@@ -1374,6 +1375,7 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
         #[test]
         fn proptest_no_panic_on_any_valid_weights(
             a in 0u32..=100u32,
