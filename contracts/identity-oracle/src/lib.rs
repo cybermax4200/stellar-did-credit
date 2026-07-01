@@ -411,24 +411,6 @@ impl IdentityOracle {
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(
-        env: Env,
-        current_admin: Address,
-        new_admin: Address,
-    ) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        if current_admin != stored_admin {
-            return Err(IdentityOracleError::NotAuthorized);
-        }
-        current_admin.require_auth();
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingAdmin, &new_admin);
-    }
     /// Propose a new contract admin (step 1 of two-step admin transfer).
     ///
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
