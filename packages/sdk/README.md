@@ -25,11 +25,39 @@ const score = await sdk.getScore("G...");
 console.log(score.score); // e.g. 612
 ```
 
+### Configuration options
+
+All fields except the five required IDs/URLs are optional.
+
+| Option            | Type     | Default          | Description                                              |
+| ----------------- | -------- | ---------------- | -------------------------------------------------------- |
+| `timeoutSeconds`  | `number` | `30`             | Transaction builder timeout (seconds)                    |
+| `maxRetries`      | `number` | `3`              | Max simulation retry attempts with exponential backoff   |
+| `baseFee`         | `string` | `BASE_FEE` (`"100"`) | Transaction base fee in stroops                     |
+
+```typescript
+const sdk = new StellarDIDCreditSDK({
+    identityOracleId: "C...",
+    creditOracleId: "C...",
+    revocationRegistryId: "C...",
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    // Optional tuning for unstable network environments:
+    timeoutSeconds: 60,
+    maxRetries: 5,
+    baseFee: "1000",
+});
+```
+
 ## API
 
-### `computeScore(payerKeypair: any, subjectAddress: string): Promise<ScoreRecord>`
+### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
 
-Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the persisted `ScoreRecord` via `getScore`. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
+Submits `compute_score`, waits until the transaction is confirmed on-chain, then returns the full persisted `ScoreRecord` via `getScore` so callers do not need an extra fetch. If the transaction succeeds but the follow-up fetch unexpectedly fails, the SDK throws a descriptive error.
+
+> **Fee note:** `computeScore` submits a signed transaction and therefore costs a
+> transaction fee (deducted from `payerKeypair`). In contrast, `getScore` uses a
+> read-only simulation and is always free.
 
 ```typescript
 const score = await sdk.computeScore(payerKeypair, "G...");
@@ -50,6 +78,15 @@ interface ScoreRecord {
 }
 ```
 
+### `getWeights(): Promise<ScoringWeights>`
+
+Fetches the current scoring weights from the credit-oracle using a read-only simulation.
+
+```typescript
+const weights = await sdk.getWeights();
+console.log(weights.vcWeight, weights.txWeight, weights.repaymentWeight);
+```
+
 ### `verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean>`
 
 Checks whether a specific 32-byte credential hash is valid for a subject. Uses a read-only simulation against the identity-oracle contract.
@@ -58,13 +95,28 @@ Checks whether a specific 32-byte credential hash is valid for a subject. Uses a
 const isValid = await sdk.verifyVC("G...", vcHash);
 ```
 
+### `getDIDDocument(subjectAddress: string): Promise<string | null>`
+
+Retrieves the anchored DID document CID for a subject. Returns `null` if no DID document has been anchored. Uses a read-only simulation against the identity-oracle contract.
+
+```typescript
+const didCid = await sdk.getDIDDocument("G...");
+if (didCid) {
+  console.log(`DID document CID: ${didCid}`);
+} else {
+  console.log("No DID document anchored");
+}
+```
+
 ## SDK status
 
 | Method                                  | Status         |
 | --------------------------------------- | -------------- |
 | `computeScore(keypair, address)`        | ✅ Implemented |
 | `getScore(address)`                     | ✅ Implemented |
+| `getWeights()`                          | ✅ Implemented |
 | `verifyVC(subject, hash)`               | ✅ Implemented |
+| `getDIDDocument(address)`               | ✅ Implemented |
 | `isVerified(address)`                   | 🚧 Open        |
 | `anchorDID(keypair, cid)`               | ✅ Implemented |
 | `issueVC(issuer, subject, hash)`        | 🚧 Open        |

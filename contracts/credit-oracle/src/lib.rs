@@ -1,5 +1,8 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal, Symbol, Val, Vec as SorobanVec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    IntoVal, Symbol, Val, Vec as SorobanVec,
+};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -46,8 +49,9 @@ pub enum CreditOracleError {
     InvalidWeights = 5,
     /// No pending admin proposal exists.
     NoPendingAdmin = 6,
+    /// Score was computed too recently for this subject.
+    ComputeCooldownActive = 7,
 }
-
 
 /// Storage keys for the credit oracle contract
 #[contracttype]
@@ -77,6 +81,10 @@ pub enum DataKey {
     PendingWeights,
     /// Ledger number when pending weights become effective
     PendingWeightsEffectiveLedger,
+    /// Minimum ledgers required between score computations for one subject
+    ComputeCooldownLedgers,
+    /// Last ledger sequence when a subject's score was computed
+    LastComputed(Address),
 }
 
 /// Credit score record with metadata, returned by `get_score`.
@@ -159,6 +167,7 @@ pub struct RepaymentRecord {
 }
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
+const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
 
 #[contract]
 pub struct CreditOracle;
@@ -179,20 +188,32 @@ impl CreditOracle {
             tx_weight: 30,
             repayment_weight: 30,
         };
-        env.storage().instance().set(&DataKey::Config, &default_weights);
+        env.storage()
+            .instance()
+            .set(&DataKey::Config, &default_weights);
+        env.storage().instance().set(
+            &DataKey::ComputeCooldownLedgers,
+            &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
+        );
         Ok(())
     }
 
     /// Register a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
+    pub fn register_feeder(
+        env: Env,
+        admin: Address,
+        feeder: Address,
+    ) -> Result<(), CreditOracleError> {
         // Verify that the supplied `admin` matches storage and has signed the tx.
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -200,12 +221,18 @@ impl CreditOracle {
     /// Deregister a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
+    pub fn deregister_feeder(
+        env: Env,
+        admin: Address,
+        feeder: Address,
+    ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage().persistent().remove(&DataKey::TrustedFeeder(feeder.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedFeeder(feeder.clone()));
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
@@ -213,12 +240,18 @@ impl CreditOracle {
     /// Register a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
+    pub fn register_lender(
+        env: Env,
+        admin: Address,
+        lender: Address,
+    ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TrustedLender(lender.clone()), &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -226,35 +259,67 @@ impl CreditOracle {
     /// Deregister a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
+    pub fn deregister_lender(
+        env: Env,
+        admin: Address,
+        lender: Address,
+    ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedLender(lender.clone()));
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
     }
 
     /// Update transaction statistics for a user
-    pub fn update_tx_stats(env: Env, feeder: Address, subject: Address, stats: TxStats) -> Result<(), CreditOracleError> {
+    pub fn update_tx_stats(
+        env: Env,
+        feeder: Address,
+        subject: Address,
+        stats: TxStats,
+    ) -> Result<(), CreditOracleError> {
         feeder.require_auth();
-        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TrustedFeeder(feeder.clone()))
+        {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::TxStats(subject), &stats);
+        env.storage()
+            .persistent()
+            .set(&DataKey::TxStats(subject), &stats);
         Ok(())
     }
 
     /// Record a repayment event for a user
-    pub fn record_repayment(env: Env, lender: Address, subject: Address, _amount: i128, on_time: bool) -> Result<(), CreditOracleError> {
+    pub fn record_repayment(
+        env: Env,
+        lender: Address,
+        subject: Address,
+        _amount: i128,
+        on_time: bool,
+    ) -> Result<(), CreditOracleError> {
         lender.require_auth();
-        if !env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TrustedLender(lender.clone()))
+        {
             return Err(CreditOracleError::LenderNotRegistered);
         }
-        let mut record: RepaymentRecord = env.storage().persistent()
+        let mut record: RepaymentRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+            .unwrap_or(RepaymentRecord {
+                on_time_count: 0,
+                total_count: 0,
+            });
         if on_time {
             // saturating_add prevents a wrap-around panic if on_time_count
             // ever reaches u32::MAX (e.g. during fuzz / adversarial input).
@@ -262,22 +327,71 @@ impl CreditOracle {
         }
         // Same reasoning for total_count.
         record.total_count = record.total_count.saturating_add(1);
-        env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
+        env.storage()
+            .persistent()
+            .set(&DataKey::RepaymentRecord(subject), &record);
         Ok(())
     }
 
     /// Cache VC count for a subject (feeder-only)
-    /// Deprecated: prefer configuring an `IdentityOracleId` and using the
+    ///
+    /// **Deprecated:** Prefer configuring an `IdentityOracleId` and using the
     /// cross-contract lookup via `set_identity_oracle` + `compute_score`.
-    pub fn set_vc_count(env: Env, feeder: Address, subject: Address, count: u32) -> Result<(), CreditOracleError> {
+    #[deprecated(note = "use cross-contract lookup via set_identity_oracle instead")]
+    pub fn set_vc_count(
+        env: Env,
+        feeder: Address,
+        subject: Address,
+        count: u32,
+    ) -> Result<(), CreditOracleError> {
         feeder.require_auth();
-        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TrustedFeeder(feeder.clone()))
+        {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::VcCount(subject), &count);
+        env.storage()
+            .persistent()
+            .set(&DataKey::VcCount(subject), &count);
         Ok(())
     }
+}
 
+/// Pure scoring arithmetic, extracted for unit and property-based testing
+/// without requiring a Soroban `Env`.
+///
+/// All inputs mirror the fields read from storage in `compute_score`.
+pub fn compute_score_pure(
+    vc_count: u32,
+    volume_30d: i128,
+    avg_counterparties: u32,
+    on_time_count: u32,
+    total_count: u32,
+    weights: &ScoringWeights,
+) -> u32 {
+    let vc_score = vc_count.saturating_mul(20).min(100);
+    let tx_score = ((volume_30d / 100_000_000i128) as u32).min(100);
+    let repay_score = on_time_count
+        .saturating_mul(10000)
+        .checked_div(total_count)
+        .map(|r| r / 100)
+        .unwrap_or(0);
+    let counterparty_bonus: u32 = if avg_counterparties >= 10 { 10 } else { 0 };
+
+    let composite = vc_score
+        .saturating_mul(weights.vc_weight)
+        .saturating_add(tx_score.saturating_mul(weights.tx_weight))
+        .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
+        .saturating_add(counterparty_bonus.saturating_mul(weights.tx_weight))
+        / 100;
+
+    (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE)
+}
+
+#[contractimpl]
+impl CreditOracle {
     /// Compute and store the credit score for `subject`.
     ///
     /// # Open-call design (no auth required)
@@ -294,86 +408,98 @@ impl CreditOracle {
     /// - **Feeder tooling.** The off-chain feeder that keeps `TxStats` and
     ///   `VcCount` current can also drive score refresh in the same transaction.
     ///
-    /// # Known gap — recomputation spam (Issue 78)
+    /// # Recompute cooldown
     ///
-    /// Because there is no cooldown, a subject (or anyone) could call
-    /// `compute_score` many times in rapid succession to land on a favourable
-    /// `last_updated` ledger timestamp. A minimum recomputation interval (e.g.
-    /// one ledger per subject) would close this gap. Full implementation is
-    /// tracked in Issue 78; it is logged here as a known limitation of the
-    /// current version.
-    pub fn compute_score(env: Env, subject: Address) -> u32 {
-        let tx_stats: TxStats = env.storage().persistent()
-            .get(&DataKey::TxStats(subject.clone()))
-            .unwrap_or(TxStats { volume_30d: 0, tx_count_30d: 0, avg_counterparties: 0 });
+    /// Calls are rate-limited per subject by `ComputeCooldownLedgers`. The
+    /// default is one ledger, preventing repeated same-ledger refreshes from
+    /// gaming the persisted `last_updated` timestamp.
+    pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        let current_ledger = env.ledger().sequence();
+        let cooldown: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(DEFAULT_COMPUTE_COOLDOWN_LEDGERS);
 
-        let repayment: RepaymentRecord = env.storage().persistent()
+        if cooldown > 0 {
+            let last_computed: Option<u32> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LastComputed(subject.clone()));
+            if let Some(last_ledger) = last_computed {
+                if current_ledger < last_ledger.saturating_add(cooldown) {
+                    return Err(CreditOracleError::ComputeCooldownActive);
+                }
+            }
+        }
+
+        let tx_stats: TxStats = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TxStats(subject.clone()))
+            .unwrap_or(TxStats {
+                volume_30d: 0,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            });
+
+        let repayment: RepaymentRecord = env
+            .storage()
+            .persistent()
             .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
+            .unwrap_or(RepaymentRecord {
+                on_time_count: 0,
+                total_count: 0,
+            });
 
         // Prefer live lookup from identity-oracle when configured; fall back
         // to the cached `VcCount` for backward compatibility.
-        let vc_count: u32 = if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
-            let args: SorobanVec<Val> = SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
-            env.invoke_contract(&identity_id, &Symbol::new(&env, "get_vc_count"), args)
-        } else {
-            env.storage().persistent()
-                .get(&DataKey::VcCount(subject.clone()))
-                .unwrap_or(0u32)
-        };
-
-        // saturating_mul prevents overflow when vc_count is very large (e.g. u32::MAX).
-        // The subsequent .min(100) clamp preserves the original scoring cap.
-        let vc_score = vc_count.saturating_mul(20).min(100);
-        let tx_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(100);
-        // saturating_mul prevents overflow if on_time_count is pathologically large;
-        // checked_div still guards against division by zero (total_count == 0).
-        let repay_score = repayment.on_time_count.saturating_mul(10000)
-            .checked_div(repayment.total_count)
-            .map(|r| r / 100)
-            .unwrap_or(0);
-        // Counterparty diversity bonus: up to 10 points for avg_counterparties >= 10.
-        // This rewards users who transact with many distinct counterparties.
-        let counterparty_bonus = if tx_stats.avg_counterparties >= 10 {
-            10
-        } else {
-            0
-        };
+        let vc_count: u32 =
+            if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
+                let args: SorobanVec<Val> =
+                    SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
+                env.invoke_contract(
+                    &identity_id,
+                    &Symbol::new(&env, "get_active_vc_count"),
+                    args,
+                )
+            } else {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::VcCount(subject.clone()))
+                    .unwrap_or(0u32)
+            };
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        // Mathematical invariant: each sub-score is clamped to [0, 100] and
-        // propose_weights enforces vc_weight + tx_weight + repayment_weight == 100,
-        // therefore:
-        //   composite = (vc_score*vc_w + tx_score*tx_w + repay_score*repay_w) / 100
-        //             ≤ (100*vc_w + 100*tx_w + 100*repay_w) / 100
-        //             = 100 * (vc_w + tx_w + repay_w) / 100
-        //             = 100 * 100 / 100 = 100
-        // Consequently score = MIN_SCORE + composite*550/100 ≤ 300 + 550 = 850 =
-        // MAX_SCORE, so the final clamp(300, 850) is a safety net rather than a
-        // load-bearing constraint for any valid weight combination.
-        // saturating_add/mul are used for defence-in-depth against future edits.
-        let composite = vc_score.saturating_mul(weights.vc_weight)
-            .saturating_add(tx_score.saturating_mul(weights.tx_weight))
-            .saturating_add(repay_score.saturating_mul(weights.repayment_weight))
-            .saturating_add(counterparty_bonus.saturating_mul(weights.tx_weight))
-            / 100;
-
-        // composite ≤ 100, so composite * 550 ≤ 55_000 – well within u32 range.
-        let score = (MIN_SCORE + composite.saturating_mul(550) / 100).clamp(MIN_SCORE, MAX_SCORE);
-
-        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
-            score,
-            last_updated: env.ledger().timestamp(),
+        let score = compute_score_pure(
             vc_count,
-            // Mirror the saturating_mul used above so the stored rate is
-            // computed consistently with the scoring path.
-            repayment_rate: repayment.on_time_count.saturating_mul(10000)
-                                .checked_div(repayment.total_count)
-                                .unwrap_or(0),
-            tx_volume_30d: tx_stats.volume_30d,
-        });
+            tx_stats.volume_30d,
+            tx_stats.avg_counterparties,
+            repayment.on_time_count,
+            repayment.total_count,
+            &weights,
+        );
 
-        score
+        env.storage().persistent().set(
+            &DataKey::Score(subject.clone()),
+            &ScoreRecord {
+                score,
+                last_updated: env.ledger().timestamp(),
+                vc_count,
+                repayment_rate: repayment
+                    .on_time_count
+                    .saturating_mul(10000)
+                    .checked_div(repayment.total_count)
+                    .unwrap_or(0),
+                tx_volume_30d: tx_stats.volume_30d,
+            },
+        );
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::LastComputed(subject), &current_ledger);
+
+        Ok(score)
     }
 
     /// Get credit score for a user; returns None if score has not been computed yet
@@ -393,21 +519,29 @@ impl CreditOracle {
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
-        env.storage().instance().set(&DataKey::PendingWeights, &weights);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingWeights, &weights);
         env.storage()
             .instance()
             .set(&DataKey::PendingWeightsEffectiveLedger, &effective_ledger);
 
         env.events().publish(
             (symbol_short!("WtProp"),),
-            (weights.vc_weight, weights.tx_weight, weights.repayment_weight, effective_ledger),
+            (
+                weights.vc_weight,
+                weights.tx_weight,
+                weights.repayment_weight,
+                effective_ledger,
+            ),
         );
         Ok(())
     }
 
     /// Apply pending weights after timelock expires
     pub fn apply_weights(env: Env) {
-        let effective_ledger: u32 = env.storage()
+        let effective_ledger: u32 = env
+            .storage()
             .instance()
             .get(&DataKey::PendingWeightsEffectiveLedger)
             .expect("no pending weights");
@@ -416,7 +550,8 @@ impl CreditOracle {
             panic!("timelock not expired");
         }
 
-        let weights: ScoringWeights = env.storage()
+        let weights: ScoringWeights = env
+            .storage()
             .instance()
             .get(&DataKey::PendingWeights)
             .expect("no pending weights");
@@ -424,11 +559,17 @@ impl CreditOracle {
         env.storage().instance().set(&DataKey::Config, &weights);
 
         env.storage().instance().remove(&DataKey::PendingWeights);
-        env.storage().instance().remove(&DataKey::PendingWeightsEffectiveLedger);
+        env.storage()
+            .instance()
+            .remove(&DataKey::PendingWeightsEffectiveLedger);
 
         env.events().publish(
             (symbol_short!("WtApply"),),
-            (weights.vc_weight, weights.tx_weight, weights.repayment_weight),
+            (
+                weights.vc_weight,
+                weights.tx_weight,
+                weights.repayment_weight,
+            ),
         );
     }
 
@@ -441,29 +582,60 @@ impl CreditOracle {
         env.storage().instance().set(&DataKey::Config, &weights);
         env.events().publish(
             (symbol_short!("WtApply"),),
-            (weights.vc_weight, weights.tx_weight, weights.repayment_weight),
+            (
+                weights.vc_weight,
+                weights.tx_weight,
+                weights.repayment_weight,
+            ),
         );
         Ok(())
+    }
+
+    /// Update the per-subject score recomputation cooldown.
+    ///
+    /// Auth: admin/governance only. A value of 0 disables cooldown enforcement.
+    pub fn update_compute_cooldown(
+        env: Env,
+        cooldown_ledgers: u32,
+    ) -> Result<(), CreditOracleError> {
+        require_admin(&env);
+        env.storage()
+            .instance()
+            .set(&DataKey::ComputeCooldownLedgers, &cooldown_ledgers);
+        env.events()
+            .publish((symbol_short!("CdSet"),), cooldown_ledgers);
+        Ok(())
+    }
+
+    /// Get the configured per-subject score recomputation cooldown.
+    pub fn get_compute_cooldown(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(DEFAULT_COMPUTE_COOLDOWN_LEDGERS)
     }
 
     /// Set the identity-oracle contract ID for cross-contract VC count lookup.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn set_identity_oracle(env: Env, admin: Address, identity_oracle: Address) -> Result<(), CreditOracleError> {
+    pub fn set_identity_oracle(
+        env: Env,
+        admin: Address,
+        identity_oracle: Address,
+    ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle);
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityOracleId, &identity_oracle);
         Ok(())
     }
 
     /// Get current scoring weights
     pub fn get_scoring_weights(env: Env) -> ScoringWeights {
-        env.storage()
-            .instance()
-            .get(&DataKey::Config)
-            .unwrap()
+        env.storage().instance().get(&DataKey::Config).unwrap()
     }
 
     /// Get pending weights (if any)
@@ -472,13 +644,23 @@ impl CreditOracle {
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+    pub fn propose_new_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
         if current_admin != stored_admin {
             return Err(CreditOracleError::NotAuthorized);
         }
         current_admin.require_auth();
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 
@@ -511,13 +693,11 @@ impl CreditOracle {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use soroban_sdk::testutils::{Address as _, Ledger as _};
-
 
     #[test]
     fn test_default_weights_sum_to_100() {
@@ -563,7 +743,10 @@ mod tests {
         client.register_lender(&admin, &lender);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::TrustedLender(lender.clone())).unwrap_or(false)
+            env.storage()
+                .persistent()
+                .get(&DataKey::TrustedLender(lender.clone()))
+                .unwrap_or(false)
         });
         assert!(is_trusted);
     }
@@ -581,14 +764,21 @@ mod tests {
 
         client.initialize(&admin);
         client.register_feeder(&admin, &feeder);
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 5000,
-            tx_count_30d: 10,
-            avg_counterparties: 3,
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 5000,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
 
         let stored: TxStats = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::TxStats(subject.clone())).unwrap()
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject.clone()))
+                .unwrap()
         });
         assert_eq!(stored.volume_30d, 5000);
         assert_eq!(stored.tx_count_30d, 10);
@@ -616,7 +806,10 @@ mod tests {
         }
 
         let record: RepaymentRecord = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::RepaymentRecord(subject.clone())).unwrap()
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap()
         });
         let rate = record.on_time_count * 10000 / record.total_count;
         assert_eq!(rate, 8000);
@@ -654,22 +847,32 @@ mod tests {
 
         // Set up identical scores except for counterparty diversity
         client.set_vc_count(&feeder, &subject, &3);
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 3_000_000_000i128,
-            tx_count_30d: 100,
-            avg_counterparties: 5, // below threshold - no bonus
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 3_000_000_000i128,
+                tx_count_30d: 100,
+                avg_counterparties: 5, // below threshold - no bonus
+            },
+        );
         for _ in 0..8 {
             client.record_repayment(&lender, &subject, &1000, &true);
         }
         let score_without_bonus = client.compute_score(&subject);
 
         // Same config but with diverse counterparties
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 3_000_000_000i128,
-            tx_count_30d: 100,
-            avg_counterparties: 12, // at or above threshold - bonus applies
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 3_000_000_000i128,
+                tx_count_30d: 100,
+                avg_counterparties: 12, // at or above threshold - bonus applies
+            },
+        );
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let score_with_bonus = client.compute_score(&subject);
 
         // Score with bonus should be higher (by ~30 points with default tx_weight=30)
@@ -718,11 +921,15 @@ mod tests {
         client.register_lender(&admin, &lender);
 
         client.set_vc_count(&feeder, &subject, &5);
-        client.update_tx_stats(&feeder, &subject, &TxStats {
-            volume_30d: 100_000_000_000i128,
-            tx_count_30d: 1000,
-            avg_counterparties: 100,
-        });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 100_000_000_000i128,
+                tx_count_30d: 1000,
+                avg_counterparties: 100,
+            },
+        );
         for _ in 0..100 {
             client.record_repayment(&lender, &subject, &1000, &true);
         }
@@ -742,7 +949,11 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         // Invalid weights — should return error via try_
-        let result = client.try_propose_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
+        let result = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 40,
+            repayment_weight: 40,
+        });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
     }
 
@@ -759,7 +970,11 @@ mod tests {
         let original_weights = client.get_scoring_weights();
         assert_eq!(original_weights.vc_weight, 40);
 
-        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 });
+        client.propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        });
 
         let current_weights = client.get_scoring_weights();
         assert_eq!(current_weights.vc_weight, 40);
@@ -775,7 +990,11 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 });
+        client.propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        });
         client.apply_weights();
     }
 
@@ -788,14 +1007,19 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 25, repayment_weight: 25 });
+        client.propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 25,
+            repayment_weight: 25,
+        });
 
         // Extend instance TTL before jumping the ledger so it isn't archived.
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
             env.storage().instance().extend_ttl(jump, jump);
         });
-        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
 
         let w = client.get_scoring_weights();
@@ -817,9 +1041,25 @@ mod tests {
 
         client.initialize(&admin);
         client.register_feeder(&admin, &feeder);
-        client.update_tx_stats(&feeder, &subject, &TxStats { volume_30d: 5000, tx_count_30d: 10, avg_counterparties: 3 });
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 5000,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
         client.deregister_feeder(&admin, &feeder);
-        let result = client.try_update_tx_stats(&feeder, &subject, &TxStats { volume_30d: 6000, tx_count_30d: 11, avg_counterparties: 4 });
+        let result = client.try_update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 6000,
+                tx_count_30d: 11,
+                avg_counterparties: 4,
+            },
+        );
         assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
     }
 
@@ -873,6 +1113,77 @@ mod tests {
         //   vc_score=100, composite = 100*40/100 = 40
         //   score = 300 + 40*550/100 = 300 + 220 = 520
         assert_eq!(score, 520, "unexpected score with max vc_count");
+    }
+
+    #[test]
+    fn test_compute_score_rejects_within_cooldown() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client.get_compute_cooldown(),
+            DEFAULT_COMPUTE_COOLDOWN_LEDGERS
+        );
+        assert_eq!(client.compute_score(&subject), MIN_SCORE);
+
+        let result = client.try_compute_score(&subject);
+        assert_eq!(result, Err(Ok(CreditOracleError::ComputeCooldownActive)));
+
+        let last_computed: u32 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::LastComputed(subject.clone()))
+                .unwrap()
+        });
+        assert_eq!(last_computed, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_compute_score_allows_after_cooldown_expires() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.update_compute_cooldown(&2);
+
+        assert_eq!(client.compute_score(&subject), MIN_SCORE);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        assert_eq!(
+            client.try_compute_score(&subject),
+            Err(Ok(CreditOracleError::ComputeCooldownActive))
+        );
+
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        assert_eq!(client.compute_score(&subject), MIN_SCORE);
+    }
+
+    #[test]
+    fn test_compute_cooldown_can_be_disabled_by_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.update_compute_cooldown(&0);
+
+        assert_eq!(client.get_compute_cooldown(), 0);
+        assert_eq!(client.compute_score(&subject), MIN_SCORE);
+        assert_eq!(client.compute_score(&subject), MIN_SCORE);
     }
 
     #[test]
@@ -960,10 +1271,19 @@ mod tests {
             env.storage().instance().extend_ttl(jump, jump);
             // Persistent entries (TrustedFeeder, TrustedLender) would be
             // archived after the ledger jump without this TTL extension.
-            env.storage().persistent().extend_ttl(&DataKey::TrustedFeeder(feeder.clone()), jump, jump);
-            env.storage().persistent().extend_ttl(&DataKey::TrustedLender(lender.clone()), jump, jump);
+            env.storage().persistent().extend_ttl(
+                &DataKey::TrustedFeeder(feeder.clone()),
+                jump,
+                jump,
+            );
+            env.storage().persistent().extend_ttl(
+                &DataKey::TrustedLender(lender.clone()),
+                jump,
+                jump,
+            );
         });
-        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
 
         client.set_vc_count(&feeder, &subject, &vc_count);
@@ -991,6 +1311,7 @@ mod tests {
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_score_always_in_range(
             vc_count in any::<u32>(),
@@ -998,85 +1319,63 @@ mod tests {
             on_time in any::<u32>(),
             total in any::<u32>(),
         ) {
-            // Ensure a valid repayment state: on_time <= total.
-            let total_count = total;
-            let on_time_count = on_time.min(total_count);
-
+            let on_time_count = on_time.min(total);
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
-            let score = setup_and_compute_score(
+            let score = compute_score_pure(
                 vc_count,
-                volume_30d,
+                volume_30d as i128,
+                0,
                 on_time_count,
-                total_count,
-                weights,
+                total,
+                &weights,
             );
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_score_monotone_on_repayment(
             vc_count in 0u32..100u32,
             volume_30d in any::<i64>(),
             total1 in 1u32..500u32,
             on_time1 in 0u32..500u32,
-            extra in 0u32..500u32,
         ) {
             let on_time1 = on_time1.min(total1);
-            let total2 = total1 + 1; // keep close to maximize boundary coverage
+            let total2 = total1 + 1;
 
-            // Construct on-time ratio that is >= ratio1 after truncation effects.
-            // We do it via counts: target ratio2 uses on_time2 = on_time1*(total2)/total1 rounded up.
             let on_time2 = ((on_time1 as u128) * (total2 as u128) + (total1 as u128) - 1) / (total1 as u128);
             let on_time2 = on_time2.min(total2 as u128) as u32;
 
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
 
-            let score1 = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time1,
-                total1,
-                weights.clone(),
-            );
-
-            let score2 = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time2,
-                total2,
-                weights,
-            );
+            let score1 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time1, total1, &weights);
+            let score2 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time2, total2, &weights);
 
             prop_assert!(score2 >= score1);
         }
     }
 
     proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_no_panic_on_any_valid_weights(
             a in 0u32..=100u32,
             b in 0u32..=100u32,
-            c in 0u32..=100u32,
             vc_count in any::<u32>(),
             volume_30d in any::<i64>(),
             on_time in any::<u32>(),
             total in any::<u32>(),
         ) {
-            prop_assume!(a + b + c == 100);
+            // Derive c so that a + b + c == 100 without rejection sampling.
+            // If a + b > 100, clamp b so the triple is always valid.
+            let b = b.min(100 - a.min(100));
+            let c = 100 - a.min(100) - b;
 
             let on_time_count = on_time.min(total);
-            let weights = ScoringWeights { vc_weight: a, tx_weight: b, repayment_weight: c };
-
-            // Should never panic for valid weights; also should always be bounded.
-            let score = setup_and_compute_score(
-                vc_count,
-                volume_30d,
-                on_time_count,
-                total,
-                weights,
-            );
+            let weights = ScoringWeights { vc_weight: a.min(100), tx_weight: b, repayment_weight: c };
+            let score = compute_score_pure(vc_count, volume_30d as i128, 0, on_time_count, total, &weights);
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
     }
@@ -1089,18 +1388,67 @@ mod tests {
     /// 100, so composite ≤ 100 for *any* valid weight triple.  Therefore
     /// score = 300 + composite*550/100 ≤ 300 + 550 = 850, and the
     /// clamp(300, 850) is always safe — never triggered for valid inputs.
+    /// Verifies that the "Exceptional" profile described in the README and
+    /// docs/scoring-spec.md achieves exactly 850 (MAX_SCORE).
+    ///
+    /// Inputs: vc_count=5, volume_30d=10_000_000_000 stroops (100 XLM),
+    ///         on_time=100, total=100, avg_counterparties=0 (no bonus).
+    ///
+    /// Formula (default weights 40/30/30, no counterparty bonus):
+    ///   vc_score    = min(5×20, 100)  = 100
+    ///   tx_score    = min(10_000_000_000÷100_000_000, 100) = 100
+    ///   repay_score = (100×10000÷100)÷100 = 100
+    ///   composite   = (100×40 + 100×30 + 100×30) ÷ 100 = 100
+    ///   score       = clamp(300 + 100×550÷100, 300, 850) = 850
+    #[test]
+    fn test_exceptional_score_equals_850() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        client.set_vc_count(&feeder, &subject, &5);
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 10_000_000_000i128,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            },
+        );
+        for _ in 0..100 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+
+        let score = client.compute_score(&subject);
+        assert_eq!(
+            score, MAX_SCORE,
+            "exceptional profile must score exactly {MAX_SCORE}"
+        );
+    }
+
     #[test]
     fn test_score_in_range_for_all_weight_boundaries() {
         // (vc_weight, tx_weight, repayment_weight) — all must sum to 100.
         let weight_combos: &[(u32, u32, u32)] = &[
-            (100,  0,   0),
-            (  0, 100,  0),
-            (  0,   0, 100),
-            ( 50,  50,  0),
-            ( 50,   0, 50),
-            (  0,  50, 50),
-            ( 34,  33, 33),
-            ( 40,  30, 30),
+            (100, 0, 0),
+            (0, 100, 0),
+            (0, 0, 100),
+            (50, 50, 0),
+            (50, 0, 50),
+            (0, 50, 50),
+            (34, 33, 33),
+            (40, 30, 30),
         ];
 
         // Maximum inputs so each sub-score is driven to its ceiling of 100:
@@ -1114,10 +1462,10 @@ mod tests {
                 repayment_weight: repay_w,
             };
             let score = setup_and_compute_score(
-                5,                  // vc_count
-                10_000_000_000i64,  // volume_30d in stroops
-                100,                // on_time_count
-                100,                // total_count
+                5,                 // vc_count
+                10_000_000_000i64, // volume_30d in stroops
+                100,               // on_time_count
+                100,               // total_count
                 weights,
             );
             assert!(
@@ -1127,6 +1475,3 @@ mod tests {
         }
     }
 }
-
-
-
