@@ -428,6 +428,7 @@ impl IdentityOracle {
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
+    }
     /// Propose a new contract admin (step 1 of two-step admin transfer).
     ///
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
