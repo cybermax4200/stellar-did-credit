@@ -435,7 +435,7 @@ mod tests {
             BytesN::from_array(&env, &[2u8; 32]),
             BytesN::from_array(&env, &[3u8; 32]),
         ];
-        for vc_hash in vc_hashes {
+        for vc_hash in &vc_hashes {
             identity.anchor_vc(&issuer, &subject, &vc_hash);
         }
 
