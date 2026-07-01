@@ -41,6 +41,7 @@ import {
   Keypair,
   Horizon,
 } from "@stellar/stellar-sdk";
+import { assembleTransaction } from "@stellar/stellar-sdk/rpc";
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -163,9 +164,11 @@ export async function fetchHorizonStats(
   return { volume30d: volumeStroops, txCount30d, avgCounterparties };
 }
 
-// ---------------------------------------------------------------------------
-// Contract helpers
-// ---------------------------------------------------------------------------
+/** Extract the sequence number string from a Soroban RPC account response. */
+function getSequence(accountData: SorobanRpc.Api.GetAccountResponse): string {
+  const data = accountData as unknown as { sequence: string };
+  return data.sequence;
+}
 
 /**
  * Reads the active (non-revoked) VC count from the identity-oracle.
@@ -241,7 +244,7 @@ async function submitOperation(
   const accountData = await server.getAccount(feederKeypair.publicKey());
   const sourceAccount = new Account(
     feederKeypair.publicKey(),
-    (accountData as any).sequence,
+    getSequence(accountData),
   );
 
   const tx = new TransactionBuilder(sourceAccount, {
@@ -261,9 +264,7 @@ async function submitOperation(
     throw new Error("Unexpected simulation response");
   }
 
-  const preparedTx = (SorobanRpc.Api as any)
-    .assembleTransaction(tx, sim)
-    .build();
+  const preparedTx = assembleTransaction(tx, sim).build();
   preparedTx.sign(feederKeypair);
 
   const response = await server.sendTransaction(preparedTx);

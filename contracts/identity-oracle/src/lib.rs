@@ -410,7 +410,6 @@ impl IdentityOracle {
         false
     }
 
-    /// Propose a new contract admin (two-step admin transfer).
     /// Propose a new contract admin (step 1 of two-step admin transfer).
     ///
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.

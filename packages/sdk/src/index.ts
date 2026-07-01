@@ -10,7 +10,7 @@ import {
   xdr,
   Keypair,
 } from "@stellar/stellar-sdk";
-import { assembleTransaction } from "@stellar/stellar-sdk/rpc"; 
+import { assembleTransaction } from "@stellar/stellar-sdk/rpc";
 
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
@@ -468,7 +468,7 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    return parseScoreRecord(resultScVal, subjectAddress);
+    return parseScoreRecord(resultScVal);
   }
 
   /**
@@ -764,7 +764,6 @@ export class ScoreNotComputedError extends Error {
  */
 function parseScoreRecord(
   scVal: xdr.ScVal,
-  subjectAddress: string,
 ): ScoreRecord | null {
   if (!scVal || (typeof scVal.switch === "function" && scVal.switch() === xdr.ScValType.scvVoid())) {
     return null;

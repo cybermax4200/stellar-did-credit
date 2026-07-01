@@ -13,6 +13,7 @@ import type {
   VCRecord,
 } from "./index";
 import { xdr } from "@stellar/stellar-sdk";
+import type { Keypair } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
@@ -264,7 +265,7 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const result = await sdk.computeScore(
-        { publicKey: () => subjectAddress } as any,
+        { publicKey: () => subjectAddress } as unknown as Keypair,
         subjectAddress,
       );
 
@@ -308,7 +309,7 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const computePromise = sdk.computeScore(
-        { publicKey: () => subjectAddress } as any,
+        { publicKey: () => subjectAddress } as unknown as Keypair,
         subjectAddress,
       );
 
@@ -341,7 +342,7 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.computeScore(
-          { publicKey: () => subjectAddress } as any,
+          { publicKey: () => subjectAddress } as unknown as Keypair,
           subjectAddress,
         ),
       ).rejects.toThrow(
@@ -368,7 +369,7 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.computeScore(
-          { publicKey: () => subjectAddress } as any,
+          { publicKey: () => subjectAddress } as unknown as Keypair,
           subjectAddress,
         ),
       ).rejects.toThrow(

@@ -187,7 +187,6 @@ impl RevocationRegistry {
     }
 
     /// Revoke multiple verifiable credentials in a single batch operation.
-
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
