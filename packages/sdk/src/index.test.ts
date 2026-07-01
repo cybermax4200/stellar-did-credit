@@ -326,11 +326,35 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("get_score");
     });
 
-    it("throws a descriptive error when the submitted transaction FAILS", async () => {
+    it("throws a descriptive error when fetching the stored score fails after confirmation", async () => {
       mockGetAccount.mockResolvedValue({ sequence: "123" });
       mockSendTransaction.mockResolvedValue({
         status: "PENDING",
         hash: "tx-hash-2",
+      });
+      mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: {} })
+        .mockResolvedValueOnce({ error: "score not computed" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.computeScore(
+          { publicKey: () => subjectAddress } as any,
+          subjectAddress,
+        ),
+      ).rejects.toThrow(
+        `computeScore transaction succeeded and was confirmed, but fetching the stored score for ${subjectAddress} failed: No score computed for address: ${subjectAddress}`,
+      );
+      expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("throws a descriptive error when the submitted transaction FAILS", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "123" });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "tx-hash-3",
       });
       mockGetTransaction.mockResolvedValue({
         status: "FAILED",
@@ -348,7 +372,7 @@ describe("StellarDIDCreditSDK", () => {
           subjectAddress,
         ),
       ).rejects.toThrow(
-        'computeScore transaction failed for tx-hash-2: {"status":"FAILED","errorResult":"tx_bad_auth"}',
+        'computeScore transaction failed for tx-hash-3: {"status":"FAILED","errorResult":"tx_bad_auth"}',
       );
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
     });
