@@ -1363,16 +1363,18 @@ mod tests {
         fn proptest_no_panic_on_any_valid_weights(
             a in 0u32..=100u32,
             b in 0u32..=100u32,
-            c in 0u32..=100u32,
             vc_count in any::<u32>(),
             volume_30d in any::<i64>(),
             on_time in any::<u32>(),
             total in any::<u32>(),
         ) {
-            prop_assume!(a + b + c == 100);
+            // Derive c so that a + b + c == 100 without rejection sampling.
+            // If a + b > 100, clamp b so the triple is always valid.
+            let b = b.min(100 - a.min(100));
+            let c = 100 - a.min(100) - b;
 
             let on_time_count = on_time.min(total);
-            let weights = ScoringWeights { vc_weight: a, tx_weight: b, repayment_weight: c };
+            let weights = ScoringWeights { vc_weight: a.min(100), tx_weight: b, repayment_weight: c };
             let score = compute_score_pure(vc_count, volume_30d as i128, 0, on_time_count, total, &weights);
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
