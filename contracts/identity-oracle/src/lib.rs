@@ -1,5 +1,8 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    IntoVal, String, Vec,
+};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -44,8 +47,7 @@ pub enum IdentityOracleError {
     NoPendingAdmin = 5,
 }
 
-
-    /// Storage key variants for the identity-oracle contract.
+/// Storage key variants for the identity-oracle contract.
 #[contracttype]
 pub enum DataKey {
     /// The contract administrator address.
@@ -60,8 +62,9 @@ pub enum DataKey {
     DIDDocument(Address),
     /// The list of VC anchors associated with the given subject address.
     VCAnchors(Address),
+    /// The ID of the revocation registry contract.
+    RevocationRegistryId,
 }
-
 
 /// An on-chain anchor record for a verifiable credential.
 #[contracttype]
@@ -94,6 +97,27 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
 #[contract]
 pub struct IdentityOracle;
 
+fn is_record_revoked(env: &Env, record: &VCRecord) -> bool {
+    if record.revoked {
+        return true;
+    }
+    if let Some(registry_id) = env
+        .storage()
+        .instance()
+        .get::<_, Address>(&DataKey::RevocationRegistryId)
+    {
+        let is_revoked: bool = env.invoke_contract(
+            &registry_id,
+            &soroban_sdk::Symbol::new(env, "is_revoked"),
+            soroban_sdk::vec![env, record.vc_hash.into_val(env)],
+        );
+        if is_revoked {
+            return true;
+        }
+    }
+    false
+}
+
 #[contractimpl]
 impl IdentityOracle {
     /// Initialize the contract with an administrator address.
@@ -106,10 +130,29 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Set the revocation registry ID to allow checking global revocations.
+    pub fn set_revocation_registry(
+        env: Env,
+        admin: Address,
+        registry_id: Address,
+    ) -> Result<(), IdentityOracleError> {
+        if admin != require_admin(&env) {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        env.storage()
+            .instance()
+            .set(&DataKey::RevocationRegistryId, &registry_id);
+        Ok(())
+    }
+
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
+    pub fn register_issuer(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+    ) -> Result<(), IdentityOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
@@ -123,12 +166,13 @@ impl IdentityOracle {
                 .get(&DataKey::IssuersIndex)
                 .unwrap_or(Vec::new(&env));
             issuers.push_back(issuer.clone());
-            env.storage().persistent().set(&DataKey::IssuersIndex, &issuers);
+            env.storage()
+                .persistent()
+                .set(&DataKey::IssuersIndex, &issuers);
         }
 
         env.storage().persistent().set(&issuer_key, &true);
-        env.events()
-            .publish((symbol_short!("IssReg"),), issuer);
+        env.events().publish((symbol_short!("IssReg"),), issuer);
         Ok(())
     }
 
@@ -137,13 +181,19 @@ impl IdentityOracle {
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_issuer(env: Env, admin: Address, issuer: Address) -> Result<(), IdentityOracleError> {
+    pub fn deregister_issuer(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+    ) -> Result<(), IdentityOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
 
-        env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedIssuer(issuer.clone()));
 
         let issuers: Vec<Address> = env
             .storage()
@@ -156,10 +206,11 @@ impl IdentityOracle {
                 updated.push_back(registered_issuer);
             }
         }
-        env.storage().persistent().set(&DataKey::IssuersIndex, &updated);
+        env.storage()
+            .persistent()
+            .set(&DataKey::IssuersIndex, &updated);
 
-        env.events()
-            .publish((symbol_short!("IssDeReg"),), issuer);
+        env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
     }
 
@@ -173,7 +224,11 @@ impl IdentityOracle {
     /// subjects may update their DID document (e.g., to rotate keys or add service
     /// endpoints) by calling this function again. Consumers should always resolve the
     /// current CID from storage rather than relying on historical events.
-    pub fn anchor_did(env: Env, subject: Address, did_doc_cid: String) -> Result<(), IdentityOracleError> {
+    pub fn anchor_did(
+        env: Env,
+        subject: Address,
+        did_doc_cid: String,
+    ) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
         let len = did_doc_cid.len();
@@ -184,7 +239,7 @@ impl IdentityOracle {
         // Accept "ipfs://", "bafy", or "Qm" prefixes
         let ipfs_prefix = String::from_str(&env, "ipfs://");
         let bafy_prefix = String::from_str(&env, "bafy");
-        let qm_prefix   = String::from_str(&env, "Qm");
+        let qm_prefix = String::from_str(&env, "Qm");
 
         let valid = cid_starts_with(&env, &did_doc_cid, &ipfs_prefix)
             || cid_starts_with(&env, &did_doc_cid, &bafy_prefix)
@@ -241,7 +296,12 @@ impl IdentityOracle {
     }
 
     /// Mark a previously anchored VC as revoked by its issuer.
-    pub fn mark_vc_revoked(env: Env, issuer: Address, subject: Address, vc_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
+    pub fn mark_vc_revoked(
+        env: Env,
+        issuer: Address,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), IdentityOracleError> {
         issuer.require_auth();
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -250,13 +310,20 @@ impl IdentityOracle {
             .get(&key)
             .unwrap_or(Vec::new(&env));
 
+        let mut found = false;
         let mut updated = Vec::new(&env);
         for mut record in anchors.iter() {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 record.revoked = true;
+                found = true;
             }
             updated.push_back(record);
         }
+
+        if !found {
+            panic!("vc not found");
+        }
+
         env.storage().persistent().set(&key, &updated);
         Ok(())
     }
@@ -271,7 +338,7 @@ impl IdentityOracle {
             .unwrap_or(Vec::new(&env));
 
         for record in anchors.iter() {
-            if !record.revoked {
+            if !is_record_revoked(&env, &record) {
                 return true;
             }
         }
@@ -300,7 +367,7 @@ impl IdentityOracle {
 
         let mut count: u32 = 0;
         for record in anchors.iter() {
-            if !record.revoked {
+            if !is_record_revoked(&env, &record) {
                 count += 1;
             }
         }
@@ -309,12 +376,24 @@ impl IdentityOracle {
 
     /// Backwards-compatible wrapper.
     ///
-    /// NOTE: This includes revoked entries. Prefer `get_active_vc_count` for scoring/verification.
+    /// **Deprecated:** This function includes revoked entries in its count.
+    /// For credit scoring and verification, use `get_active_vc_count` instead,
+    /// which excludes revoked credentials and provides accurate scores.
+    #[deprecated(note = "use get_active_vc_count for accurate non-revoked VC counts")]
     pub fn get_vc_count(env: Env, subject: Address) -> u32 {
         Self::get_total_vc_count(env, subject)
     }
 
-
+    /// Verify whether a subject has a matching active verifiable credential anchor.
+    ///
+    /// Parameters:
+    /// - `env`: Soroban contract environment used to read persistent storage.
+    /// - `subject`: Address whose anchored VC records are searched.
+    /// - `vc_hash`: SHA-256 hash of the off-chain VC JSON to verify.
+    ///
+    /// Returns `true` when `subject` has an anchored VC record with `vc_hash`
+    /// that has not been revoked, and `false` when no matching active record
+    /// exists. This function is read-only and does not require authentication.
     pub fn verify_vc(env: Env, subject: Address, vc_hash: BytesN<32>) -> bool {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -324,25 +403,35 @@ impl IdentityOracle {
             .unwrap_or(Vec::new(&env));
 
         for record in anchors.iter() {
-            if record.vc_hash == vc_hash && !record.revoked {
+            if record.vc_hash == vc_hash && !is_record_revoked(&env, &record) {
                 return true;
             }
         }
         false
     }
 
-    /// Propose a new contract admin (two-step admin transfer).
+    /// Propose a new contract admin (step 1 of two-step admin transfer).
+    ///
+    /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
+    /// The transfer only completes once `new_admin` calls `accept_admin`.
+    ///
+    /// Auth: current admin only — verified via `require_admin`.
     pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), IdentityOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
-        if current_admin != stored_admin {
+        let stored = require_admin(&env);
+        if current_admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        current_admin.require_auth();
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 
-    /// Accept a proposed admin role (two-step admin transfer).
+    /// Accept a pending admin proposal (step 2 of two-step admin transfer).
+    ///
+    /// Reads `DataKey::PendingAdmin` from instance storage and verifies that
+    /// `new_admin` matches, then promotes `new_admin` to `DataKey::Admin` and
+    /// clears the pending entry.
+    ///
+    /// Auth: the proposed `new_admin` address must sign the transaction.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         match pending {
@@ -370,7 +459,7 @@ impl IdentityOracle {
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
-    /// Return the list of all currently registered trusted issuers.
+    /// Return the `IssuersIndex` vector of currently registered trusted issuers.
     pub fn list_issuers(env: Env) -> Vec<Address> {
         env.storage()
             .persistent()
@@ -378,7 +467,6 @@ impl IdentityOracle {
             .unwrap_or(Vec::new(&env))
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -432,7 +520,9 @@ mod tests {
         client.deregister_issuer(&admin, &issuer);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage().persistent().has(&DataKey::TrustedIssuer(issuer.clone()))
+            env.storage()
+                .persistent()
+                .has(&DataKey::TrustedIssuer(issuer.clone()))
         });
         assert!(!is_trusted);
     }
@@ -477,7 +567,10 @@ mod tests {
         assert_eq!(client.list_issuers(), Vec::new(&env));
 
         client.register_issuer(&admin, &issuer1);
-        assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer1.clone()]));
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer1.clone()])
+        );
 
         client.register_issuer(&admin, &issuer2);
         assert_eq!(
@@ -576,11 +669,17 @@ mod tests {
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
-        let cid = String::from_str(&env, "ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym");
+        let cid = String::from_str(
+            &env,
+            "ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym",
+        );
         client.anchor_did(&subject, &cid);
 
         let subject2 = Address::generate(&env);
-        let cid2 = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        let cid2 = String::from_str(
+            &env,
+            "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4",
+        );
         client.anchor_did(&subject2, &cid2);
 
         let subject3 = Address::generate(&env);
@@ -605,7 +704,10 @@ mod tests {
 
         // Verify storage contains the second CID
         let stored: String = env.as_contract(&contract_id, || {
-            env.storage().persistent().get(&DataKey::DIDDocument(subject.clone())).unwrap()
+            env.storage()
+                .persistent()
+                .get(&DataKey::DIDDocument(subject.clone()))
+                .unwrap()
         });
         assert_eq!(stored, cid_second);
     }
@@ -664,6 +766,28 @@ mod tests {
         }
 
         assert_eq!(client.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
+    #[should_panic(expected = "vc not found")]
+    fn test_mark_vc_revoked_panics_for_unknown_hash() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&admin, &issuer);
+
+        let subject = Address::generate(&env);
+        let known_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &known_hash);
+
+        let unknown_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.mark_vc_revoked(&issuer, &subject, &unknown_hash);
     }
 
     #[test]

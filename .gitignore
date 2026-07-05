@@ -2,6 +2,9 @@
 target/
 **/*.rs.bk
 
+# Soroban proptest snapshots (generated, not source)
+contracts/**/test_snapshots/tests/proptest_*.json
+
 # Node
 node_modules/
 dist/
