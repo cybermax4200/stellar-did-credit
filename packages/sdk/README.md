@@ -118,13 +118,13 @@ if (didCid) {
 | `verifyVC(subject, hash)`               | ✅ Implemented |
 | `getDIDDocument(address)`               | ✅ Implemented |
 | `isVerified(address)`                   | 🚧 Open        |
-| `anchorDID(keypair, cid)`               | 🚧 Open        |
+| `anchorDID(keypair, cid)`               | ✅ Implemented |
 | `issueVC(issuer, subject, hash)`        | 🚧 Open        |
 | `revokeVC(issuer, hash)`                | 📋 Planned     |
 
 ### Other methods (coming soon)
 
-- `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain
+
 - `issueVC(issuerKeypair, subjectAddress, vcHash)` — anchor a verifiable credential
 - `isVerified(subjectAddress)` — check if a subject has any active VC
 
