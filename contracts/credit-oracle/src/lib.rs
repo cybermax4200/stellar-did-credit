@@ -538,8 +538,12 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Apply pending weights after timelock expires
-    pub fn apply_weights(env: Env) {
+        /// Apply pending weights after timelock expires.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn apply_weights(env: Env) -> Result<(), CreditOracleError> {
+        require_admin(&env);
+
         let effective_ledger: u32 = env
             .storage()
             .instance()
@@ -571,6 +575,8 @@ impl CreditOracle {
                 weights.repayment_weight,
             ),
         );
+
+        Ok(())
     }
 
     /// Update weights directly (admin/governance only).
