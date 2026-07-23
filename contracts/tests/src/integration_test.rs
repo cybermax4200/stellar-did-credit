@@ -3,7 +3,10 @@ mod tests {
     use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
-    use soroban_sdk::{testutils::Address as _, BytesN, Env, String};
+    use soroban_sdk::{
+        testutils::{Address as _, Ledger as _},
+        BytesN, Env, String,
+    };
 
     #[test]
     fn test_full_protocol_flow() {
@@ -77,6 +80,55 @@ mod tests {
     }
 
     #[test]
+    fn test_cross_contract_vc_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Configure credit-oracle to call identity-oracle directly
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Do not set cached VcCount; compute_score should read identity-oracle
+        let score_live = credit.compute_score(&subject);
+        assert!(
+            score_live > 300,
+            "expected live score > 300, got {}",
+            score_live
+        );
+
+        // Now set the cached value to 0 to ensure the cross-contract path is used
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&admin, &feeder);
+        credit.set_vc_count(&feeder, &subject, &0);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_after_cached_zero = credit.compute_score(&subject);
+        assert_eq!(
+            score_live, score_after_cached_zero,
+            "expected compute_score to prefer identity-oracle over cached VcCount"
+        );
+    }
+
+    #[test]
     fn test_revoked_vc_lowers_score() {
         let env = Env::default();
         env.mock_all_auths();
@@ -135,6 +187,8 @@ mod tests {
 
         // 4. Update vc_count to 0 and recompute score
         credit.set_vc_count(&feeder, &subject, &0);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let new_score = credit.compute_score(&subject);
 
         // 5. Assert new score < initial score
@@ -143,6 +197,86 @@ mod tests {
             "expected new_score ({}) < initial_score ({})",
             new_score,
             initial_score
+        );
+    }
+
+    #[test]
+    fn test_revocation_registry_identity_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Link identity-oracle to revocation-registry
+        identity.set_revocation_registry(&admin, &revocation_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[123u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Assert verified initially
+        assert!(identity.is_verified(&subject));
+
+        // Revoke via revocation-registry
+        revocation.revoke(&issuer, &vc_hash);
+
+        // Verify that is_revoked returns true on the registry
+        assert!(revocation.is_revoked(&vc_hash));
+
+        // Verify that identity-oracle verify_vc returns false
+        assert!(!identity.verify_vc(&subject, &vc_hash));
+
+        // Also verify that is_verified and get_active_vc_count correctly reflect the revocation
+        assert!(!identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_only_registered_issuer_can_revoke_vc_hash_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Setup: register and initialize all 3 contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let _identity = IdentityOracleClient::new(&env, &identity_id);
+        let _credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        // Two different issuers
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+
+        // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+
+        // First revoke by issuer_a registers the authority.
+        revocation.revoke(&issuer_a, &vc_hash);
+        assert!(revocation.is_revoked(&vc_hash));
+
+        // Second revoke by issuer_b must fail.
+        let res = revocation.try_revoke(&issuer_b, &vc_hash);
+        assert_eq!(
+            res,
+            Err(Ok(
+                revocation_registry::RevocationRegistryError::IssuerMismatch
+            ))
         );
     }
 
@@ -262,6 +396,8 @@ mod tests {
 
         // 16. Update VC count to 2 (after batch revocation) and recompute score
         credit.set_vc_count(&feeder, &subject, &2);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let score_with_2_vcs = credit.compute_score(&subject);
 
         // 17. Assert score decreased due to fewer active VCs
@@ -271,5 +407,70 @@ mod tests {
             score_with_2_vcs,
             score_with_5_vcs
         );
+    }
+
+    #[test]
+    fn test_cross_contract_score_not_inflated_after_revocation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+
+        // Anchor 3 VCs for the subject
+        let vc_hashes: [BytesN<32>; 3] = [
+            BytesN::from_array(&env, &[1u8; 32]),
+            BytesN::from_array(&env, &[2u8; 32]),
+            BytesN::from_array(&env, &[3u8; 32]),
+        ];
+        for vc_hash in &vc_hashes {
+            identity.anchor_vc(&issuer, &subject, vc_hash);
+        }
+
+        // Configure credit-oracle to use cross-contract VC count lookup
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Compute initial score (3 active VCs)
+        let initial_score = credit.compute_score(&subject);
+        assert!(
+            initial_score > 300,
+            "expected initial score > 300, got {}",
+            initial_score
+        );
+
+        // Revoke 2 of the 3 VCs
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[0]);
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[1]);
+
+        // Advance ledger to allow recomputation
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // Compute new score (1 active VC)
+        let score_after_revocation = credit.compute_score(&subject);
+
+        // Verify score is lower after revocation (cross-contract path uses get_active_vc_count)
+        assert!(
+            score_after_revocation < initial_score,
+            "expected score after revocation ({}) < initial score ({}) when using cross-contract lookup",
+            score_after_revocation,
+            initial_score
+        );
+
+        // Also verify get_active_vc_count returns correct count
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+        assert_eq!(identity.get_total_vc_count(&subject), 3);
     }
 }
