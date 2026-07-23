@@ -215,6 +215,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
@@ -234,6 +235,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
@@ -253,6 +255,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedLender(lender.clone()), &true);
@@ -272,6 +275,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
@@ -520,6 +524,7 @@ impl CreditOracle {
         }
         // require_admin loads the stored admin and calls require_auth() on it.
         require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -662,6 +667,7 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         current_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -680,6 +686,7 @@ impl CreditOracle {
             None => return Err(CreditOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -693,6 +700,7 @@ impl CreditOracle {
         if admin != stored {
             panic!("not authorized");
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }

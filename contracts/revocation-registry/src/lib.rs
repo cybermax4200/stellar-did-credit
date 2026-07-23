@@ -104,6 +104,7 @@ impl RevocationRegistry {
             return Err(RevocationRegistryError::NotAuthorized);
         }
         current_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::PendingAdmin, &new_admin);
@@ -125,6 +126,7 @@ impl RevocationRegistry {
         }
 
         new_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::Admin, &new_admin);
@@ -240,6 +242,7 @@ impl RevocationRegistry {
         if admin != stored {
             panic!("not authorized");
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
