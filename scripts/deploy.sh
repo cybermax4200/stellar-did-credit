@@ -5,7 +5,7 @@
 # producing a broken deployment.
 set -euo pipefail
 
-NETWORK="testnet"
+NETWORK=${NETWORK:-testnet}
 SOURCE="deployer"
 DEPLOYMENTS_FILE="deployments.testnet.json"
 RESUME=false
@@ -56,6 +56,16 @@ if $RESUME && [ -f "$DEPLOYMENTS_FILE" ]; then
 elif $RESUME; then
   echo "Resume mode: no existing $DEPLOYMENTS_FILE found – proceeding with full deployment."
 fi
+
+# ---------------------------------------------------------------------------
+# Validate deployer key
+# ---------------------------------------------------------------------------
+DEPLOYER_ADDRESS=$(stellar keys address "$SOURCE" 2>&1) || true
+if [[ ! "$DEPLOYER_ADDRESS" =~ ^G[A-Z2-7]{54}$ ]]; then
+  echo "Error: '$SOURCE' key not found. Run: stellar keys generate --global $SOURCE --network $NETWORK" >&2
+  exit 1
+fi
+echo "Deployer address: $DEPLOYER_ADDRESS"
 
 # ---------------------------------------------------------------------------
 # Build
@@ -114,7 +124,7 @@ fi
 echo "Saving to $DEPLOYMENTS_FILE..."
 cat > "$DEPLOYMENTS_FILE" <<EOF
 {
-  "network": "testnet",
+  "network": "$NETWORK",
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
   "contracts": {
     "identity-oracle": "$IDENTITY_ID",
@@ -124,4 +134,5 @@ cat > "$DEPLOYMENTS_FILE" <<EOF
 }
 EOF
 
-echo "Done."
+echo "Done." 
+
