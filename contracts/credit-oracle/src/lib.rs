@@ -507,6 +507,27 @@ impl CreditOracle {
         env.storage().persistent().get(&DataKey::Score(subject))
     }
 
+    /// Check whether a subject's stored score is stale.
+    ///
+    /// Returns `true` when:
+    /// - No score has ever been computed for `subject` (no record exists), or
+    /// - The elapsed time since `last_updated` exceeds `max_age_seconds`.
+    ///
+    /// Consumers should call this before acting on a score and choose a
+    /// `max_age_seconds` threshold appropriate for their use case. See
+    /// `docs/scoring-spec.md` for recommended values.
+    pub fn is_stale(env: Env, subject: Address, max_age_seconds: u64) -> bool {
+        let record: Option<ScoreRecord> =
+            env.storage().persistent().get(&DataKey::Score(subject));
+        match record {
+            None => true,
+            Some(r) => {
+                let now = env.ledger().timestamp();
+                now.saturating_sub(r.last_updated) > max_age_seconds
+            }
+        }
+    }
+
     /// Propose new scoring weights with timelock.
     ///
     /// Auth: admin only — verified via `require_admin`.
@@ -1241,6 +1262,58 @@ mod tests {
         client.propose_new_admin(&admin1, &admin2);
 
         let _ = client.accept_admin(&non_admin);
+    }
+
+    #[test]
+    fn test_is_stale_no_score_returns_true() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert!(client.is_stale(&subject, &86_400));
+    }
+
+    #[test]
+    fn test_is_stale_fresh_score_not_stale() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.compute_score(&subject);
+        assert!(!client.is_stale(&subject, &86_400));
+    }
+
+    #[test]
+    fn test_is_stale_old_score_is_stale() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.compute_score(&subject);
+
+        // Jump ledger to advance timestamp past the staleness threshold.
+        let jump: u64 = 100;
+        env.ledger().set_timestamp(env.ledger().timestamp() + jump);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + jump as u32);
+
+        // With max_age_seconds = 50, the score (which is 100 ledgers old) is stale.
+        assert!(client.is_stale(&subject, &50));
     }
 
     fn setup_and_compute_score(

@@ -200,11 +200,20 @@ score = clamp(300 + 100×550÷100, 300, 850)
 
 ## Edge cases
 
-### Stale score (`last_updated` more than 30 days ago)
+### Stale score (`last_updated` more than `max_age_seconds` ago)
 
-The contract does not enforce score freshness. `get_score` returns whatever was last computed, regardless of age. The `last_updated` field in `ScoreRecord` is a ledger timestamp (Unix seconds) that consumers should check.
+The contract does not enforce score freshness. `get_score` returns whatever was last computed, regardless of age. Consumers should call `is_stale(subject, max_age_seconds)` to check whether the stored score is outdated.
 
-**Recommended consumer behaviour:** treat a score older than 30 days (2,592,000 seconds) as untrustworthy and prompt the subject or feeder to call `compute_score` again.
+**Recommended `max_age_seconds` values:**
+
+| Use case                         | Max age     | Seconds         | Rationale                                                  |
+| -------------------------------- | ----------- | --------------- | ---------------------------------------------------------- |
+| General lending (default)        | 30 days     | 2,592,000       | Balances freshness against compute cost; matches standard practice |
+| High-frequency micro-lending     | 7 days      | 604,800         | Frequent small loans need more current data                |
+| Collateralized lending           | 90 days     | 7,776,000       | Lower risk tolerance for staleness; collateral backs the loan |
+| One-shot / recovery check        | 1 day       | 86,400          | Quick health check before a time-sensitive decision        |
+
+When `is_stale` returns `true`, the caller should prompt the subject or feeder to call `compute_score` before relying on the score.
 
 The feeder is responsible for keeping `TxStats` and `VcCount` current. If the feeder stops updating, the score will drift from reality but will not error — it will simply reflect stale inputs.
 
