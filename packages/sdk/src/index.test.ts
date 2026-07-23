@@ -329,7 +329,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("get_score");
     });
 
-    it("throws a descriptive error when fetching the stored score fails after confirmation", async () => {
+    it("throws a descriptive error when the stored score is missing after confirmation", async () => {
       mockGetAccount.mockResolvedValue({ sequence: "123" });
       mockSendTransaction.mockResolvedValue({
         status: "PENDING",
@@ -338,7 +338,11 @@ describe("StellarDIDCreditSDK", () => {
       mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
       mockSimulateTransaction
         .mockResolvedValueOnce({ result: {} })
-        .mockResolvedValueOnce({ error: "score not computed" });
+        .mockResolvedValueOnce({
+          result: {
+            retval: xdr.ScVal.scvVoid(),
+          },
+        });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
@@ -413,26 +417,24 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("getScore", () => {
-    it("throws ScoreNotComputedError when score has not been computed", async () => {
-      const sdk = new StellarDIDCreditSDK(mockConfig);
-
-      // Mock the server and simulation to return "score not computed" error
-      mockSimulateTransaction.mockResolvedValue({
-        error: "score not computed",
-      });
-
-      await expect(sdk.getScore(subjectAddress)).rejects.toBeInstanceOf(
-        ScoreNotComputedError,
-      );
-    });
-
-    it("returns null when contract returns None (scvVoid)", async () => {
+    it("returns null for a fresh subject with no computed score", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: xdr.ScVal.scvVoid(),
         },
+      });
+
+      const result = await sdk.getScore(subjectAddress);
+      expect(result).toBeNull();
+    });
+
+    it("returns null when simulation reports score not computed", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      mockSimulateTransaction.mockResolvedValue({
+        error: "score not computed",
       });
 
       const result = await sdk.getScore(subjectAddress);

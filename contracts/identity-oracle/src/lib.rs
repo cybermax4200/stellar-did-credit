@@ -424,7 +424,9 @@ impl IdentityOracle {
     pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 

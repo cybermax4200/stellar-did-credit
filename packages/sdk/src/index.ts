@@ -416,7 +416,7 @@ export class StellarDIDCreditSDK {
     try {
       const score = await this.getScore(subjectAddress);
       if (!score) {
-        throw new Error("Score not computed after compute_score transaction");
+        throw new ScoreNotComputedError(subjectAddress);
       }
       return score;
     } catch (error) {
@@ -454,7 +454,7 @@ export class StellarDIDCreditSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
-        throw new ScoreNotComputedError(subjectAddress);
+        return null;
       }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
@@ -746,7 +746,7 @@ export class StellarDIDCreditSDK {
   }
 }
 
-/** Thrown when get_score is called for an address that has no computed score yet. */
+/** Thrown when a score was expected but could not be retrieved (e.g. after computeScore). */
 export class ScoreNotComputedError extends Error {
   constructor(address?: string) {
     super(
@@ -760,7 +760,7 @@ export class ScoreNotComputedError extends Error {
 
 /**
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
- * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
+ * Returns the ScoreRecord if Some, or null if None.
  */
 function parseScoreRecord(
   scVal: xdr.ScVal,

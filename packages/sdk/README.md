@@ -22,7 +22,11 @@ const sdk = new StellarDIDCreditSDK({
 });
 
 const score = await sdk.getScore("G...");
-console.log(score.score); // e.g. 612
+if (score) {
+  console.log(score.score); // e.g. 612
+} else {
+  console.log("No score computed yet");
+}
 ```
 
 ### Configuration options
@@ -64,19 +68,22 @@ const score = await sdk.computeScore(payerKeypair, "G...");
 console.log(score.score); // e.g. 612
 ```
 
-### `getScore(subjectAddress: string): Promise<ScoreRecord>`
+### `getScore(subjectAddress: string): Promise<ScoreRecord | null>`
 
 Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required.
 
+Returns `null` when no score has been computed for the subject (the contract returns `Option::None`). Throws only on simulation failures, RPC errors, or unexpected responses — not when the score simply does not exist.
+
 ```typescript
-interface ScoreRecord {
-    score: number; // 300–850
-    lastUpdated: number; // ledger timestamp
-    vcCount: number; // number of verified credentials
-    repaymentRate: number; // basis points (0–10000)
-    txVolume30d: bigint; // 30-day transaction volume in stroops
+const score = await sdk.getScore("G...");
+if (score) {
+  console.log(`Score: ${score.score}`); // e.g. 612
+} else {
+  console.log("No score computed yet — call computeScore first");
 }
 ```
+
+> **Note:** `computeScore` throws `ScoreNotComputedError` (wrapped in a descriptive message) if the transaction confirms but the follow-up `getScore` still returns `null`.
 
 ### `getWeights(): Promise<ScoringWeights>`
 
@@ -232,7 +239,9 @@ These are the conventions used across all exported types:
 
 ## Error handling
 
-`getScore()` can throw several types of errors. Applications should catch and distinguish between them:
+`getScore()` returns `null` when no score exists — this is not an error. It throws only for simulation failures, RPC connectivity issues, or unexpected responses.
+
+`computeScore()` throws a descriptive error (wrapping `ScoreNotComputedError`) if the transaction confirms but the stored score is still missing.
 
 ```typescript
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
@@ -241,7 +250,11 @@ const sdk = new StellarDIDCreditSDK({...});
 
 try {
   const score = await sdk.getScore("G...");
-  console.log(`Score: ${score.score}`);
+  if (score) {
+    console.log(`Score: ${score.score}`);
+  } else {
+    console.log("No score computed yet");
+  }
 } catch (error) {
   if (error instanceof SimulationError) {
     // Contract rejected the call (e.g., invalid subject address)
@@ -258,14 +271,16 @@ try {
 
 ### Error types and handling
 
-| Error Type | Cause | Message Pattern | Recommended Action |
+| Error Type / Return | Cause | Message Pattern | Recommended Action |
 |-----------|-------|-----------------|-------------------|
+| `null` return | Score not yet computed | _(no throw)_ | Call `computeScore` or treat as "no credit history" |
 | `SimulationError` | Contract call failed | `Simulation failed: ...` | Validate subject address format; check contract state |
 | `SimulationError` | Missing return value | `No return value in simulation result` | Verify RPC endpoint is compatible; check contract deployment |
 | `NetworkError` | RPC endpoint unreachable | `Failed to connect to RPC` | Retry with backoff; fallback to alternate RPC endpoint |
 | `NetworkError` | Request timeout | `Request timeout` | Increase timeout; check network connectivity |
 | Generic `Error` | Invalid subject address | `Invalid Stellar address` | Verify address starts with 'G' and is 56 chars |
 | Generic `Error` | Parsing failures | `Failed to parse response` | Log full response; file an issue if RPC format changed |
+| `ScoreNotComputedError` | `computeScore` confirmed but score missing | `No score computed for address: ...` | Investigate contract state; retry `computeScore` |
 
 ### Common error scenarios
 
@@ -278,12 +293,19 @@ try {
 }
 ```
 
+**Subject with no computed score:**
+```typescript
+const score = await sdk.getScore("GXXXXXX...");
+if (score === null) {
+  console.log("No score computed yet — call computeScore first");
+}
+```
+
 **Subject not registered in identity-oracle:**
 ```typescript
 try {
   const score = await sdk.getScore("GXXXXXX...");
-  // If score is valid but all fields are 0, subject may not be registered
-  if (score.score === 0 && score.vcCount === 0) {
+  if (score && score.score === 0 && score.vcCount === 0) {
     console.log("Subject has no verified credentials");
   }
 } catch (error) {
