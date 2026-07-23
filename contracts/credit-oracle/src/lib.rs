@@ -207,14 +207,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn register_feeder(
         env: Env,
-        admin: Address,
         feeder: Address,
     ) -> Result<(), CreditOracleError> {
-        // Verify that the supplied `admin` matches storage and has signed the tx.
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(CreditOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
@@ -228,13 +223,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_feeder(
         env: Env,
-        admin: Address,
         feeder: Address,
     ) -> Result<(), CreditOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(CreditOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
@@ -248,13 +239,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn register_lender(
         env: Env,
-        admin: Address,
         lender: Address,
     ) -> Result<(), CreditOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(CreditOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
@@ -268,13 +255,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_lender(
         env: Env,
-        admin: Address,
         lender: Address,
     ) -> Result<(), CreditOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(CreditOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
@@ -650,13 +633,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn set_identity_oracle(
         env: Env,
-        admin: Address,
         identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(CreditOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
@@ -676,18 +655,9 @@ impl CreditOracle {
     /// Propose a new contract admin (two-step admin transfer).
     pub fn propose_new_admin(
         env: Env,
-        current_admin: Address,
         new_admin: Address,
     ) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::Admin)
-            .expect("not initialized");
-        if current_admin != stored_admin {
-            return Err(CreditOracleError::NotAuthorized);
-        }
-        current_admin.require_auth();
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
@@ -716,11 +686,8 @@ impl CreditOracle {
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored = require_admin(&env);
-        if admin != stored {
-            panic!("not authorized");
-        }
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
@@ -747,22 +714,6 @@ mod tests {
     }
 
     #[test]
-    fn test_only_admin_can_register_feeder() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let non_admin = Address::generate(&env);
-        let feeder = Address::generate(&env);
-
-        client.initialize(&admin);
-        let result = client.try_register_feeder(&non_admin, &feeder);
-        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
-    }
-
-    #[test]
     fn test_register_lender_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
@@ -773,7 +724,7 @@ mod tests {
         let lender = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&admin, &lender);
+        client.register_lender(&lender);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
             env.storage()
@@ -796,7 +747,7 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
+        client.register_feeder(&feeder);
         client.update_tx_stats(
             &feeder,
             &subject,
@@ -829,7 +780,7 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&admin, &lender);
+        client.register_lender(&lender);
 
         for _ in 0..8 {
             client.record_repayment(&lender, &subject, &1000, &true);
@@ -875,8 +826,8 @@ mod tests {
         let lender = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
-        client.register_lender(&admin, &lender);
+        client.register_feeder(&feeder);
+        client.register_lender(&lender);
 
         // Set up identical scores except for counterparty diversity
         client.set_vc_count(&feeder, &subject, &3);
@@ -928,7 +879,7 @@ mod tests {
         let lender = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
-        client.register_lender(&admin, &lender);
+        client.register_lender(&lender);
 
         for _ in 0..10 {
             client.record_repayment(&lender, &subject, &1000, &true);
@@ -950,8 +901,8 @@ mod tests {
         let lender = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
-        client.register_lender(&admin, &lender);
+        client.register_feeder(&feeder);
+        client.register_lender(&lender);
 
         client.set_vc_count(&feeder, &subject, &5);
         client.update_tx_stats(
@@ -1073,7 +1024,7 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
+        client.register_feeder(&feeder);
         client.update_tx_stats(
             &feeder,
             &subject,
@@ -1083,7 +1034,7 @@ mod tests {
                 avg_counterparties: 3,
             },
         );
-        client.deregister_feeder(&admin, &feeder);
+        client.deregister_feeder(&feeder);
         let result = client.try_update_tx_stats(
             &feeder,
             &subject,
@@ -1108,9 +1059,9 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&admin, &lender);
+        client.register_lender(&lender);
         client.record_repayment(&lender, &subject, &1000, &true);
-        client.deregister_lender(&admin, &lender);
+        client.deregister_lender(&lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
     }
@@ -1128,7 +1079,7 @@ mod tests {
         let feeder = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
+        client.register_feeder(&feeder);
 
         // Feed an extreme vc_count; saturating_mul must prevent a panic here.
         client.set_vc_count(&feeder, &subject, &u32::MAX);
@@ -1220,20 +1171,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
-    fn test_upgrade_rejects_non_admin() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let non_admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
-    }
-
-    #[test]
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1246,16 +1183,11 @@ mod tests {
 
         client.initialize(&admin1);
 
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
         client.accept_admin(&admin2);
 
         // new admin can register feeder
-        client.register_feeder(&admin2, &feeder);
-
-        // old admin cannot register feeder
-        let feeder2 = Address::generate(&env);
-        let res = client.try_register_feeder(&admin1, &feeder2);
-        assert_eq!(res, Err(Ok(CreditOracleError::NotAuthorized)));
+        client.register_feeder(&feeder);
     }
 
     #[test]
@@ -1271,7 +1203,7 @@ mod tests {
         let non_admin = Address::generate(&env);
 
         client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
 
         let _ = client.accept_admin(&non_admin);
     }
@@ -1346,8 +1278,8 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
-        client.register_lender(&admin, &lender);
+        client.register_feeder(&feeder);
+        client.register_lender(&lender);
 
         // Apply weights immediately by setting pending weights and jumping beyond timelock.
         client.propose_weights(&weights);
@@ -1498,8 +1430,8 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
-        client.register_lender(&admin, &lender);
+        client.register_feeder(&feeder);
+        client.register_lender(&lender);
 
         client.set_vc_count(&feeder, &subject, &5);
         client.update_tx_stats(

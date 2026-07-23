@@ -235,7 +235,7 @@ mod tests {
         gov_client.initialize(&admin, &credit_oracle_id);
 
         // Propose governance contract as new admin of credit oracle
-        credit_oracle_client.propose_new_admin(&admin, &gov_id);
+        credit_oracle_client.propose_new_admin(&gov_id);
 
         // Accept oracle admin from governance
         gov_client.accept_oracle_admin();

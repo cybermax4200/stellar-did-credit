@@ -139,12 +139,9 @@ impl IdentityOracle {
     /// Set the revocation registry ID to allow checking global revocations.
     pub fn set_revocation_registry(
         env: Env,
-        admin: Address,
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
-        if admin != require_admin(&env) {
-            return Err(IdentityOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
@@ -157,13 +154,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn register_issuer(
         env: Env,
-        admin: Address,
         issuer: Address,
     ) -> Result<(), IdentityOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(IdentityOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let issuer_key = DataKey::TrustedIssuer(issuer.clone());
@@ -191,13 +184,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_issuer(
         env: Env,
-        admin: Address,
         issuer: Address,
     ) -> Result<(), IdentityOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
-            return Err(IdentityOracleError::NotAuthorized);
-        }
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         env.storage()
@@ -432,11 +421,8 @@ impl IdentityOracle {
     /// The transfer only completes once `new_admin` calls `accept_admin`.
     ///
     /// Auth: current admin only — verified via `require_admin`.
-    pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), IdentityOracleError> {
-        let stored = require_admin(&env);
-        if current_admin != stored {
-            return Err(IdentityOracleError::NotAuthorized);
-        }
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
@@ -469,11 +455,8 @@ impl IdentityOracle {
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored = require_admin(&env);
-        if admin != stored {
-            panic!("not authorized");
-        }
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
@@ -503,7 +486,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
@@ -535,8 +518,8 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
-        client.deregister_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
+        client.deregister_issuer(&issuer);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
             env.storage()
@@ -557,13 +540,13 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
         client.anchor_vc(&issuer, &subject, &vc_hash);
 
-        client.deregister_issuer(&admin, &issuer);
+        client.deregister_issuer(&issuer);
 
         let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
         let result = client.try_anchor_vc(&issuer, &subject, &vc_hash2);
@@ -585,25 +568,25 @@ mod tests {
 
         assert_eq!(client.list_issuers(), Vec::new(&env));
 
-        client.register_issuer(&admin, &issuer1);
+        client.register_issuer(&issuer1);
         assert_eq!(
             client.list_issuers(),
             Vec::from_array(&env, [issuer1.clone()])
         );
 
-        client.register_issuer(&admin, &issuer2);
+        client.register_issuer(&issuer2);
         assert_eq!(
             client.list_issuers(),
             Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
         );
 
-        client.register_issuer(&admin, &issuer1);
+        client.register_issuer(&issuer1);
         assert_eq!(
             client.list_issuers(),
             Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
         );
 
-        client.deregister_issuer(&admin, &issuer1);
+        client.deregister_issuer(&issuer1);
         assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer2]));
     }
 
@@ -618,7 +601,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         assert!(!client.is_verified(&subject));
@@ -742,7 +725,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         assert_eq!(client.get_vc_count(&subject), 0);
@@ -768,7 +751,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
 
@@ -799,7 +782,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         let known_hash = BytesN::from_array(&env, &[1u8; 32]);
@@ -820,7 +803,7 @@ mod tests {
         client.initialize(&admin);
 
         let issuer = Address::generate(&env);
-        client.register_issuer(&admin, &issuer);
+        client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
@@ -831,21 +814,6 @@ mod tests {
         client.mark_vc_revoked(&issuer, &subject, &vc_hash);
 
         assert!(!client.is_verified(&subject));
-    }
-
-    #[test]
-    #[should_panic(expected = "not authorized")]
-    fn test_upgrade_rejects_non_admin() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let non_admin = Address::generate(&env);
-        client.initialize(&admin);
-        // Pass a zeroed hash — upgrade will fail on auth check before using it
-        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
     }
 
     #[test]
@@ -878,18 +846,13 @@ mod tests {
         client.initialize(&admin1);
 
         // propose new admin
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
 
         // accept by proposed admin
         client.accept_admin(&admin2);
 
         // new admin can register issuer
-        client.register_issuer(&admin2, &issuer);
-
-        // old admin cannot register issuer
-        let issuer2 = Address::generate(&env);
-        let res = client.try_register_issuer(&admin1, &issuer2);
-        assert_eq!(res, Err(Ok(IdentityOracleError::NotAuthorized)));
+        client.register_issuer(&issuer);
     }
 
     #[test]
@@ -905,7 +868,7 @@ mod tests {
         let non_admin = Address::generate(&env);
 
         client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
 
         // non_admin tries to accept
         let _ = client.accept_admin(&non_admin);

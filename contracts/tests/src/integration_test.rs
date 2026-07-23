@@ -30,7 +30,7 @@ mod tests {
 
         // 3. Register an issuer in identity-oracle
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         // 4. Call anchor_did for a test subject
         let subject = soroban_sdk::Address::generate(&env);
@@ -47,8 +47,8 @@ mod tests {
         // 7. Register a lender and feeder in credit-oracle
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 8. Call set_vc_count(subject, 1)
         credit.set_vc_count(&feeder, &subject, &1);
@@ -95,7 +95,7 @@ mod tests {
         credit.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
@@ -105,7 +105,7 @@ mod tests {
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
         // Configure credit-oracle to call identity-oracle directly
-        credit.set_identity_oracle(&admin, &identity_id);
+        credit.set_identity_oracle(&identity_id);
 
         // Do not set cached VcCount; compute_score should read identity-oracle
         let score_live = credit.compute_score(&subject);
@@ -117,7 +117,7 @@ mod tests {
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_feeder(&feeder);
         credit.set_vc_count(&feeder, &subject, &0);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
@@ -148,7 +148,7 @@ mod tests {
         _revocation.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
@@ -159,8 +159,8 @@ mod tests {
 
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 1. Get initial score with vc_count = 1
         credit.set_vc_count(&feeder, &subject, &1);
@@ -216,10 +216,10 @@ mod tests {
         revocation.initialize(&admin);
 
         // Link identity-oracle to revocation-registry
-        identity.set_revocation_registry(&admin, &revocation_id);
+        identity.set_revocation_registry(&revocation_id);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[123u8; 32]);
@@ -301,7 +301,7 @@ mod tests {
 
         // 2. Register issuer
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         // 3. Create subject and DID
         let subject = soroban_sdk::Address::generate(&env);
@@ -375,8 +375,8 @@ mod tests {
         // 14. Setup credit-oracle to test score changes
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 15. Set initial VC count to 5 and compute score
         credit.set_vc_count(&feeder, &subject, &5);
@@ -425,7 +425,7 @@ mod tests {
         credit.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
 
@@ -440,7 +440,7 @@ mod tests {
         }
 
         // Configure credit-oracle to use cross-contract VC count lookup
-        credit.set_identity_oracle(&admin, &identity_id);
+        credit.set_identity_oracle(&identity_id);
 
         // Compute initial score (3 active VCs)
         let initial_score = credit.compute_score(&subject);
