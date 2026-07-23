@@ -59,6 +59,9 @@ fn require_admin_or_governor(env: &Env, caller: &Address) -> Result<(), CreditOr
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+pub const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
 /// Error types for the credit-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -210,6 +213,7 @@ impl CreditOracle {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let default_weights = ScoringWeights {
             vc_weight: 40,
@@ -239,6 +243,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
@@ -258,6 +263,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
@@ -277,6 +283,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedLender(lender.clone()), &true);
@@ -296,6 +303,7 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
@@ -605,7 +613,9 @@ impl CreditOracle {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        require_admin_or_governor(&env, &caller)?;
+        // require_admin loads the stored admin and calls require_auth() on it.
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -711,7 +721,7 @@ impl CreditOracle {
     pub fn set_identity_oracle(
         env: Env,
         admin: Address,
-        identity_oracle: Address,
+        identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
@@ -719,7 +729,7 @@ impl CreditOracle {
         }
         env.storage()
             .instance()
-            .set(&DataKey::IdentityOracleId, &identity_oracle);
+            .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
     }
 
@@ -759,6 +769,7 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         current_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -777,6 +788,7 @@ impl CreditOracle {
             None => return Err(CreditOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -790,6 +802,7 @@ impl CreditOracle {
         if admin != stored {
             panic!("not authorized");
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -1622,7 +1635,7 @@ mod tests {
                 weights,
             );
             assert!(
-                score >= MIN_SCORE && score <= MAX_SCORE,
+                (MIN_SCORE..=MAX_SCORE).contains(&score),
                 "score {score} out of [{MIN_SCORE}, {MAX_SCORE}] for weights ({vc_w}, {tx_w}, {repay_w})"
             );
          }

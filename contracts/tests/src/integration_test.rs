@@ -436,7 +436,7 @@ mod tests {
             BytesN::from_array(&env, &[3u8; 32]),
         ];
         for vc_hash in &vc_hashes {
-            identity.anchor_vc(&issuer, &subject, &vc_hash);
+            identity.anchor_vc(&issuer, &subject, vc_hash);
         }
 
         // Configure credit-oracle to use cross-contract VC count lookup

@@ -125,6 +125,42 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 
 ---
 
+## Instance storage TTL management
+
+Soroban entries have a limited time-to-live (TTL) measured in ledgers. If the TTL of a contract's **instance storage** entry reaches zero, the contract becomes archived — all its data is lost and it can never be called again. To prevent this, every function that reads or writes instance storage must periodically call `extend_ttl`.
+
+### Pattern
+
+Each contract defines two constants:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `INSTANCE_BUMP_THRESHOLD` | 5 000 | Extend when fewer than ~7 hours of ledgers remain |
+| `INSTANCE_BUMP_AMOUNT` | 500 000 | Extend TTL to ~30 days from now |
+
+The call is placed after authentication succeeds in every admin-gated function:
+
+```rust
+env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+```
+
+### Covered functions
+
+All three contracts apply this pattern in `initialize` and every admin-gated function:
+
+**identity-oracle**
+- `initialize`, `register_issuer`, `deregister_issuer`, `upgrade`
+
+**credit-oracle**
+- `initialize`, `register_feeder`, `deregister_feeder`, `register_lender`, `deregister_lender`, `propose_weights`, `upgrade`
+
+**revocation-registry**
+- `initialize`, `upgrade`
+
+Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`, etc. touch only persistent storage and do not need to extend the instance TTL. If the contract is not called by an admin for an extended period, anyone can call any of the covered admin-gated functions (with admin authentication) to refresh the TTL.
+
+---
+
 ## Cross-contract interaction
 
 Currently, the VC count fed into credit-oracle is supplied off-chain by a trusted feeder that reads identity-oracle and calls `set_vc_count`. This is a deliberate design choice for the v1 protocol: it avoids cross-contract call overhead and keeps the scoring gas cost predictable.

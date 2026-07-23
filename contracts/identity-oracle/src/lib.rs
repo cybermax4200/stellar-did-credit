@@ -45,6 +45,8 @@ pub enum IdentityOracleError {
     InvalidCID = 4,
     /// No pending admin proposal exists.
     NoPendingAdmin = 5,
+    /// A VC with the same hash has already been anchored for this subject.
+    DuplicateVC = 6,
 }
 
 /// Storage key variants for the identity-oracle contract.
@@ -79,6 +81,9 @@ pub struct VCRecord {
     /// Whether this credential has been revoked by the issuer.
     pub revoked: bool,
 }
+
+const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
 /// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
 /// `prefix` must be ≤ 32 bytes.
@@ -127,6 +132,7 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -139,6 +145,7 @@ impl IdentityOracle {
         if admin != require_admin(&env) {
             return Err(IdentityOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::RevocationRegistryId, &registry_id);
@@ -157,6 +164,7 @@ impl IdentityOracle {
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let issuer_key = DataKey::TrustedIssuer(issuer.clone());
         if !env.storage().persistent().has(&issuer_key) {
@@ -190,6 +198,7 @@ impl IdentityOracle {
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         env.storage()
             .persistent()
@@ -279,6 +288,13 @@ impl IdentityOracle {
             .persistent()
             .get(&key)
             .unwrap_or(Vec::new(&env));
+
+        // Reject duplicate vc_hash for this subject
+        for i in 0..anchors.len() {
+            if anchors.get(i).unwrap().vc_hash == vc_hash {
+                return Err(IdentityOracleError::DuplicateVC);
+            }
+        }
 
         let record = VCRecord {
             vc_hash: vc_hash.clone(),
@@ -421,6 +437,7 @@ impl IdentityOracle {
         if current_admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
@@ -443,6 +460,7 @@ impl IdentityOracle {
             None => return Err(IdentityOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -456,6 +474,7 @@ impl IdentityOracle {
         if admin != stored {
             panic!("not authorized");
         }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
