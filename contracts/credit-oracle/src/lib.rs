@@ -88,6 +88,8 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Last ledger sequence when a subject's score was computed
     LastComputed(Address),
+    /// Credential-type multiplier in basis points (100 = 1×).
+    CredentialTypeWeight(Symbol),
 }
 
 /// Credit score record with metadata, returned by `get_score`.
@@ -169,8 +171,96 @@ pub struct RepaymentRecord {
     pub total_count: u32,
 }
 
+/// Mirror of identity-oracle `VCRecord` for cross-contract deserialization.
+#[contracttype]
+#[derive(Clone)]
+struct AnchoredVCRecord {
+    pub vc_hash: BytesN<32>,
+    pub issuer: Address,
+    pub anchored_at: u64,
+    pub revoked: bool,
+}
+
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
+
+/// Base points contributed by one VC before issuer/type multipliers.
+pub const VC_BASE_POINTS: u32 = 20;
+/// Default credential-type multiplier: 100 basis points (1×).
+pub const DEFAULT_CREDENTIAL_TYPE_WEIGHT_BPS: u32 = 100;
+/// Maximum allowed credential-type multiplier.
+pub const MAX_CREDENTIAL_TYPE_WEIGHT_BPS: u32 = 300;
+
+/// Legacy VC component from a raw count (uniform 20 points per VC).
+pub fn vc_score_from_count(vc_count: u32) -> u32 {
+    vc_count.saturating_mul(VC_BASE_POINTS).min(100)
+}
+
+/// Weighted VC component from per-credential issuer and type multipliers.
+pub fn compute_weighted_vc_score(entries: &[(u32, u32)]) -> u32 {
+    let mut total: u32 = 0;
+    for (issuer_tier_bps, type_weight_bps) in entries.iter() {
+        let points = VC_BASE_POINTS
+            .saturating_mul(*issuer_tier_bps)
+            .saturating_mul(*type_weight_bps)
+            / 10_000;
+        total = total.saturating_add(points);
+    }
+    total.min(100)
+}
+
+fn credential_type_weight(env: &Env, credential_type: &Symbol) -> u32 {
+    env.storage()
+        .instance()
+        .get(&DataKey::CredentialTypeWeight(credential_type.clone()))
+        .unwrap_or(DEFAULT_CREDENTIAL_TYPE_WEIGHT_BPS)
+}
+
+fn compute_vc_score_from_identity(env: &Env, identity_id: &Address, subject: &Address) -> (u32, u32) {
+    let details_args: SorobanVec<Val> =
+        SorobanVec::from_array(env, [subject.clone().into_val(env)]);
+    let records: SorobanVec<AnchoredVCRecord> = env.invoke_contract(
+        identity_id,
+        &Symbol::new(env, "get_vc_details"),
+        details_args,
+    );
+
+    let mut total: u32 = 0;
+    let mut vc_count: u32 = 0;
+    for i in 0..records.len() {
+        let record = records.get(i).unwrap();
+        vc_count = vc_count.saturating_add(1);
+
+        let tier_args: SorobanVec<Val> =
+            SorobanVec::from_array(env, [record.issuer.clone().into_val(env)]);
+        let issuer_tier_bps: u32 = env.invoke_contract(
+            identity_id,
+            &Symbol::new(env, "get_issuer_tier"),
+            tier_args,
+        );
+
+        let type_args: SorobanVec<Val> = SorobanVec::from_array(
+            env,
+            [
+                subject.clone().into_val(env),
+                record.vc_hash.into_val(env),
+            ],
+        );
+        let credential_type: Symbol = env.invoke_contract(
+            identity_id,
+            &Symbol::new(env, "get_vc_credential_type"),
+            type_args,
+        );
+        let type_weight_bps = credential_type_weight(env, &credential_type);
+        let points = VC_BASE_POINTS
+            .saturating_mul(issuer_tier_bps)
+            .saturating_mul(type_weight_bps)
+            / 10_000;
+        total = total.saturating_add(points);
+    }
+
+    (total.min(100), vc_count)
+}
 
 #[contract]
 pub struct CreditOracle;
@@ -371,15 +461,17 @@ impl CreditOracle {
 /// without requiring a Soroban `Env`.
 ///
 /// All inputs mirror the fields read from storage in `compute_score`.
+/// `vc_score` must already be in the 0–100 range (see `vc_score_from_count`
+/// or `compute_weighted_vc_score`).
 pub fn compute_score_pure(
-    vc_count: u32,
+    vc_score: u32,
     volume_30d: i128,
     avg_counterparties: u32,
     on_time_count: u32,
     total_count: u32,
     weights: &ScoringWeights,
 ) -> u32 {
-    let vc_score = vc_count.saturating_mul(20).min(100);
+    let vc_score = vc_score.min(100);
     let tx_score = ((volume_30d / 100_000_000i128) as u32).min(100);
     let repay_score = on_time_count
         .saturating_mul(10000)
@@ -460,27 +552,23 @@ impl CreditOracle {
                 total_count: 0,
             });
 
-        // Prefer live lookup from identity-oracle when configured; fall back
-        // to the cached `VcCount` for backward compatibility.
-        let vc_count: u32 =
+        // Prefer live weighted lookup from identity-oracle when configured;
+        // fall back to the cached `VcCount` for backward compatibility.
+        let (vc_score, vc_count) =
             if let Some(identity_id) = env.storage().instance().get(&DataKey::IdentityOracleId) {
-                let args: SorobanVec<Val> =
-                    SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
-                env.invoke_contract(
-                    &identity_id,
-                    &Symbol::new(&env, "get_active_vc_count"),
-                    args,
-                )
+                compute_vc_score_from_identity(&env, &identity_id, &subject)
             } else {
-                env.storage()
+                let count = env
+                    .storage()
                     .persistent()
                     .get(&DataKey::VcCount(subject.clone()))
-                    .unwrap_or(0u32)
+                    .unwrap_or(0u32);
+                (vc_score_from_count(count), count)
             };
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
         let score = compute_score_pure(
-            vc_count,
+            vc_score,
             tx_stats.volume_30d,
             tx_stats.avg_counterparties,
             repayment.on_time_count,
@@ -661,6 +749,37 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
+    }
+
+    /// Set the scoring multiplier for a credential type label (100 = 1×, 200 = 2×).
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn set_credential_type_weight(
+        env: Env,
+        admin: Address,
+        credential_type: Symbol,
+        weight_bps: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored = require_admin(&env);
+        if admin != stored {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if weight_bps == 0 || weight_bps > MAX_CREDENTIAL_TYPE_WEIGHT_BPS {
+            panic!("invalid credential type weight");
+        }
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(
+            &DataKey::CredentialTypeWeight(credential_type.clone()),
+            &weight_bps,
+        );
+        env.events()
+            .publish((symbol_short!("VcTypWt"),), (credential_type, weight_bps));
+        Ok(())
+    }
+
+    /// Returns the configured credential-type multiplier, defaulting to 100 bps.
+    pub fn get_credential_type_weight(env: Env, credential_type: Symbol) -> u32 {
+        credential_type_weight(&env, &credential_type)
     }
 
     /// Get current scoring weights
@@ -1328,6 +1447,21 @@ mod tests {
         assert!(client.is_stale(&subject, &50));
     }
 
+    #[test]
+    fn test_compute_weighted_vc_score_issuer_tier() {
+        assert_eq!(compute_weighted_vc_score(&[(100, 100)]), 20);
+        assert_eq!(compute_weighted_vc_score(&[(200, 100)]), 40);
+        assert_eq!(compute_weighted_vc_score(&[(100, 150)]), 30);
+    }
+
+    #[test]
+    fn test_vc_score_from_count_matches_legacy_formula() {
+        assert_eq!(vc_score_from_count(0), 0);
+        assert_eq!(vc_score_from_count(3), 60);
+        assert_eq!(vc_score_from_count(5), 100);
+        assert_eq!(vc_score_from_count(u32::MAX), 100);
+    }
+
     fn setup_and_compute_score(
         vc_count: u32,
         volume_30d: i64,
@@ -1407,7 +1541,7 @@ mod tests {
             let on_time_count = on_time.min(total);
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
             let score = compute_score_pure(
-                vc_count,
+                vc_score_from_count(vc_count),
                 volume_30d as i128,
                 0,
                 on_time_count,
@@ -1435,8 +1569,8 @@ mod tests {
 
             let weights = ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 };
 
-            let score1 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time1, total1, &weights);
-            let score2 = compute_score_pure(vc_count, volume_30d as i128, 0, on_time2, total2, &weights);
+            let score1 = compute_score_pure(vc_score_from_count(vc_count), volume_30d as i128, 0, on_time1, total1, &weights);
+            let score2 = compute_score_pure(vc_score_from_count(vc_count), volume_30d as i128, 0, on_time2, total2, &weights);
 
             prop_assert!(score2 >= score1);
         }
@@ -1460,7 +1594,7 @@ mod tests {
 
             let on_time_count = on_time.min(total);
             let weights = ScoringWeights { vc_weight: a.min(100), tx_weight: b, repayment_weight: c };
-            let score = compute_score_pure(vc_count, volume_30d as i128, 0, on_time_count, total, &weights);
+            let score = compute_score_pure(vc_score_from_count(vc_count), volume_30d as i128, 0, on_time_count, total, &weights);
             prop_assert!(score >= MIN_SCORE && score <= MAX_SCORE);
         }
     }

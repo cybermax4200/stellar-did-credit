@@ -8,7 +8,10 @@ The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`
 
 | Input                           | Source                        | Storage key                      |
 | ------------------------------- | ----------------------------- | -------------------------------- |
-| `vc_count`                      | Feeder via `set_vc_count`     | `VcCount(subject)`               |
+| Active VC records               | identity-oracle via `get_vc_details` | cross-contract (when configured) |
+| Issuer tier (`issuer_tier_bps`) | identity-oracle admin         | `IssuerTier(issuer)`             |
+| Credential type weight          | credit-oracle admin           | `CredentialTypeWeight(type)`     |
+| `vc_count` (legacy fallback)    | Feeder via `set_vc_count`     | `VcCount(subject)`               |
 | `volume_30d`                    | Feeder via `update_tx_stats`  | `TxStats(subject).volume_30d`      |
 | `avg_counterparties`            | Feeder via `update_tx_stats`  | `TxStats(subject).avg_counterparties` |
 | `on_time_count` / `total_count` | Lender via `record_repayment` | `RepaymentRecord(subject)`         |
@@ -21,7 +24,25 @@ All inputs default to zero if never set. A subject with no history always scores
 
 ### Step 1: Component scores (0–100 each)
 
-**VC score** — rewards having verified credentials, capped at 5 VCs:
+**VC score** — rewards verified credentials with issuer-trust and type weighting (prototype). When identity-oracle is linked via `set_identity_oracle`, each active VC contributes weighted points; otherwise the legacy count formula applies.
+
+**Weighted path** (identity-oracle configured):
+
+```
+credential_points(vc) = base_points × issuer_tier_bps × type_weight_bps ÷ 10_000
+vc_score              = min( Σ credential_points(active_vc), 100 )
+```
+
+Defaults: `base_points = 20`, `issuer_tier_bps = 100` (1×), `type_weight_bps = 100` (1×, type `generic`).
+
+Admin configuration:
+
+- identity-oracle: `set_issuer_tier(admin, issuer, weight_bps)` — e.g. 200 = 2× issuer trust
+- credit-oracle: `set_credential_type_weight(admin, credential_type, weight_bps)` — e.g. `kyc` at 150 = 1.5×
+
+See [vc-weighting-design.md](vc-weighting-design.md) for recency decay (future) and worked tier/type examples.
+
+**Legacy fallback** (no identity-oracle link, or feeder cache only):
 
 ```
 vc_score = min(vc_count × 20, 100)
@@ -229,7 +250,7 @@ If a subject's VCs are all revoked in identity-oracle, `is_verified` returns `fa
 
 **Implication:** a lender should always check `is_verified` on identity-oracle independently of the credit score. A high score with `is_verified = false` indicates the feeder has not yet synced the revocation.
 
-In the future cross-contract version, `compute_score` will call `get_active_vc_count` directly, eliminating this lag.
+In the future cross-contract version, `compute_score` calls `get_vc_details` and applies issuer/type weighting directly, eliminating feeder lag for VC count. Revoked credentials are excluded automatically.
 
 ### Feeder not updated (inputs never set)
 

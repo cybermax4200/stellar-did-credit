@@ -473,4 +473,91 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
     }
+
+    #[test]
+    fn test_weighted_vc_issuer_tier_produces_different_scores() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let tier1_issuer = soroban_sdk::Address::generate(&env);
+        let tier2_issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &tier1_issuer);
+        identity.register_issuer(&admin, &tier2_issuer);
+        identity.set_issuer_tier(&admin, &tier2_issuer, &200);
+
+        let subject_tier1 = soroban_sdk::Address::generate(&env);
+        let subject_tier2 = soroban_sdk::Address::generate(&env);
+
+        let vc_hash_t1 = BytesN::from_array(&env, &[11u8; 32]);
+        let vc_hash_t2 = BytesN::from_array(&env, &[22u8; 32]);
+        identity.anchor_vc(&tier1_issuer, &subject_tier1, &vc_hash_t1);
+        identity.anchor_vc(&tier2_issuer, &subject_tier2, &vc_hash_t2);
+
+        let score_tier1 = credit.compute_score(&subject_tier1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_tier2 = credit.compute_score(&subject_tier2);
+
+        assert!(
+            score_tier2 > score_tier1,
+            "tier-2 issuer score ({}) should exceed tier-1 score ({})",
+            score_tier2,
+            score_tier1
+        );
+    }
+
+    #[test]
+    fn test_weighted_vc_credential_type_produces_different_scores() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let generic_type = soroban_sdk::symbol_short!("generic");
+        let kyc_type = soroban_sdk::symbol_short!("kyc");
+        credit.set_credential_type_weight(&admin, &kyc_type, &150);
+
+        let subject_generic = soroban_sdk::Address::generate(&env);
+        let subject_kyc = soroban_sdk::Address::generate(&env);
+
+        let vc_hash_generic = BytesN::from_array(&env, &[33u8; 32]);
+        let vc_hash_kyc = BytesN::from_array(&env, &[44u8; 32]);
+        identity.anchor_vc_typed(&issuer, &subject_generic, &vc_hash_generic, &generic_type);
+        identity.anchor_vc_typed(&issuer, &subject_kyc, &vc_hash_kyc, &kyc_type);
+
+        let score_generic = credit.compute_score(&subject_generic);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_kyc = credit.compute_score(&subject_kyc);
+
+        assert!(
+            score_kyc > score_generic,
+            "kyc-typed VC score ({}) should exceed generic score ({})",
+            score_kyc,
+            score_generic
+        );
+    }
 }
