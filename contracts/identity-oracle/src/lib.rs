@@ -432,13 +432,19 @@ impl IdentityOracle {
     /// The transfer only completes once `new_admin` calls `accept_admin`.
     ///
     /// Auth: current admin only — verified via `require_admin`.
-    pub fn propose_new_admin(env: Env, current_admin: Address, new_admin: Address) -> Result<(), IdentityOracleError> {
+    pub fn propose_new_admin(
+        env: Env,
+        current_admin: Address,
+        new_admin: Address,
+    ) -> Result<(), IdentityOracleError> {
         let stored = require_admin(&env);
         if current_admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
         Ok(())
     }
 

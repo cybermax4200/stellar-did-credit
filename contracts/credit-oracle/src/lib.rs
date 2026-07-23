@@ -591,8 +591,7 @@ impl CreditOracle {
     /// `max_age_seconds` threshold appropriate for their use case. See
     /// `docs/scoring-spec.md` for recommended values.
     pub fn is_stale(env: Env, subject: Address, max_age_seconds: u64) -> bool {
-        let record: Option<ScoreRecord> =
-            env.storage().persistent().get(&DataKey::Score(subject));
+        let record: Option<ScoreRecord> = env.storage().persistent().get(&DataKey::Score(subject));
         match record {
             None => true,
             Some(r) => {
@@ -740,7 +739,8 @@ impl CreditOracle {
 
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
-        let weights: Option<ScoringWeights> = env.storage().instance().get(&DataKey::PendingWeights);
+        let weights: Option<ScoringWeights> =
+            env.storage().instance().get(&DataKey::PendingWeights);
         let effective_ledger: Option<u32> = env
             .storage()
             .instance()
@@ -1063,11 +1063,14 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         // Invalid weights — should return error via try_
-        let result = client.try_propose_weights(&admin, &ScoringWeights {
-            vc_weight: 40,
-            tx_weight: 40,
-            repayment_weight: 40,
-        });
+        let result = client.try_propose_weights(
+            &admin,
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 40,
+                repayment_weight: 40,
+            },
+        );
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
     }
 
@@ -1084,11 +1087,14 @@ mod tests {
         let original_weights = client.get_scoring_weights();
         assert_eq!(original_weights.vc_weight, 40);
 
-        client.propose_weights(&admin, &ScoringWeights {
-            vc_weight: 50,
-            tx_weight: 30,
-            repayment_weight: 20,
-        });
+        client.propose_weights(
+            &admin,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 30,
+                repayment_weight: 20,
+            },
+        );
 
         let current_weights = client.get_scoring_weights();
         assert_eq!(current_weights.vc_weight, 40);
@@ -1104,11 +1110,14 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(&admin, &ScoringWeights {
-            vc_weight: 50,
-            tx_weight: 30,
-            repayment_weight: 20,
-        });
+        client.propose_weights(
+            &admin,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 30,
+                repayment_weight: 20,
+            },
+        );
         client.apply_weights();
     }
 
@@ -1121,11 +1130,14 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(&admin, &ScoringWeights {
-            vc_weight: 50,
-            tx_weight: 25,
-            repayment_weight: 25,
-        });
+        client.propose_weights(
+            &admin,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+            },
+        );
 
         // Extend instance TTL before jumping the ledger so it isn't archived.
         let jump = TIMELOCK_LEDGERS + 2;
@@ -1638,147 +1650,156 @@ mod tests {
                 (MIN_SCORE..=MAX_SCORE).contains(&score),
                 "score {score} out of [{MIN_SCORE}, {MAX_SCORE}] for weights ({vc_w}, {tx_w}, {repay_w})"
             );
-         }
-     }
+        }
+    }
 
-     // -----------------------------------------------------------------------
-     // Governor tests
-     // -----------------------------------------------------------------------
+    // -----------------------------------------------------------------------
+    // Governor tests
+    // -----------------------------------------------------------------------
 
-     #[test]
-     fn test_register_governor_succeeds() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_register_governor_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let governor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let governor = Address::generate(&env);
 
-         client.initialize(&admin);
-         client.register_governor(&admin, &governor);
+        client.initialize(&admin);
+        client.register_governor(&admin, &governor);
 
-         let is_governor: bool = env.as_contract(&contract_id, || {
-             env.storage()
-                 .persistent()
-                 .get(&DataKey::Governor(governor.clone()))
-                 .unwrap_or(false)
-         });
-         assert!(is_governor);
-     }
+        let is_governor: bool = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Governor(governor.clone()))
+                .unwrap_or(false)
+        });
+        assert!(is_governor);
+    }
 
-     #[test]
-     fn test_deregister_governor_removes_role() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_deregister_governor_removes_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let governor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let governor = Address::generate(&env);
 
-         client.initialize(&admin);
-         client.register_governor(&admin, &governor);
+        client.initialize(&admin);
+        client.register_governor(&admin, &governor);
 
-         let is_governor: bool = env.as_contract(&contract_id, || {
-             env.storage()
-                 .persistent()
-                 .get(&DataKey::Governor(governor.clone()))
-                 .unwrap_or(false)
-         });
-         assert!(is_governor);
+        let is_governor: bool = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Governor(governor.clone()))
+                .unwrap_or(false)
+        });
+        assert!(is_governor);
 
-         client.deregister_governor(&admin, &governor);
+        client.deregister_governor(&admin, &governor);
 
-         let is_governor: bool = env.as_contract(&contract_id, || {
-             env.storage()
-                 .persistent()
-                 .get(&DataKey::Governor(governor.clone()))
-                 .unwrap_or(false)
-         });
-         assert!(!is_governor);
-     }
+        let is_governor: bool = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::Governor(governor.clone()))
+                .unwrap_or(false)
+        });
+        assert!(!is_governor);
+    }
 
-     #[test]
-     fn test_only_admin_can_register_governor() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_only_admin_can_register_governor() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let non_admin = Address::generate(&env);
-         let governor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let governor = Address::generate(&env);
 
-         client.initialize(&admin);
-         let result = client.try_register_governor(&non_admin, &governor);
-         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
-     }
+        client.initialize(&admin);
+        let result = client.try_register_governor(&non_admin, &governor);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
 
-     #[test]
-     fn test_governor_can_propose_weights() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_governor_can_propose_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let governor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let governor = Address::generate(&env);
 
-         client.initialize(&admin);
-         client.register_governor(&admin, &governor);
+        client.initialize(&admin);
+        client.register_governor(&admin, &governor);
 
-         // Governor proposes weights
-         client.propose_weights(&governor, &ScoringWeights {
-             vc_weight: 50,
-             tx_weight: 25,
-             repayment_weight: 25,
-         });
+        // Governor proposes weights
+        client.propose_weights(
+            &governor,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+            },
+        );
 
-         let pending = client.get_pending_weights();
-         assert!(pending.is_some());
-         let pending = pending.unwrap();
-         assert_eq!(pending.weights.vc_weight, 50);
-     }
+        let pending = client.get_pending_weights();
+        assert!(pending.is_some());
+        let pending = pending.unwrap();
+        assert_eq!(pending.weights.vc_weight, 50);
+    }
 
-     #[test]
-     fn test_non_governor_cannot_propose_weights() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_non_governor_cannot_propose_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let stranger = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let stranger = Address::generate(&env);
 
-         client.initialize(&admin);
-         let result = client.try_propose_weights(&stranger, &ScoringWeights {
-             vc_weight: 50,
-             tx_weight: 25,
-             repayment_weight: 25,
-         });
-         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
-     }
+        client.initialize(&admin);
+        let result = client.try_propose_weights(
+            &stranger,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+            },
+        );
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
 
-     #[test]
-     fn test_deregistered_governor_cannot_propose_weights() {
-         let env = Env::default();
-         env.mock_all_auths();
-         let contract_id = env.register_contract(None, CreditOracle);
-         let client = CreditOracleClient::new(&env, &contract_id);
+    #[test]
+    fn test_deregistered_governor_cannot_propose_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
 
-         let admin = Address::generate(&env);
-         let governor = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let governor = Address::generate(&env);
 
-         client.initialize(&admin);
-         client.register_governor(&admin, &governor);
-         client.deregister_governor(&admin, &governor);
+        client.initialize(&admin);
+        client.register_governor(&admin, &governor);
+        client.deregister_governor(&admin, &governor);
 
-         let result = client.try_propose_weights(&governor, &ScoringWeights {
-             vc_weight: 50,
-             tx_weight: 25,
-             repayment_weight: 25,
-         });
-         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
-     }
- }
+        let result = client.try_propose_weights(
+            &governor,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+            },
+        );
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+}
