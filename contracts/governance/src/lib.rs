@@ -253,7 +253,7 @@ mod tests {
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.expiry_ledger, env.ledger().sequence() + 100);
-        assert_eq!(proposal.executed, false);
+        assert!(!proposal.executed);
 
         // Vote
         let voter1 = Address::generate(&env);
@@ -271,14 +271,14 @@ mod tests {
 
         // Advance ledger
         env.ledger().with_mut(|l| {
-            l.sequence_number = l.sequence_number + 101;
+            l.sequence_number += 101;
         });
 
         // Execute proposal
         gov_client.execute(&proposal_id);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
-        assert_eq!(proposal.executed, true);
+        assert!(proposal.executed);
 
         // Verify credit oracle weights updated
         let active_weights = credit_oracle_client.get_scoring_weights();

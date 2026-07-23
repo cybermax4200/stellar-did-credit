@@ -621,7 +621,7 @@ impl CreditOracle {
     pub fn set_identity_oracle(
         env: Env,
         admin: Address,
-        identity_oracle: Address,
+        identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
         let stored = require_admin(&env);
         if admin != stored {
@@ -629,7 +629,7 @@ impl CreditOracle {
         }
         env.storage()
             .instance()
-            .set(&DataKey::IdentityOracleId, &identity_oracle);
+            .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
     }
 
@@ -1469,7 +1469,7 @@ mod tests {
                 weights,
             );
             assert!(
-                score >= MIN_SCORE && score <= MAX_SCORE,
+                (MIN_SCORE..=MAX_SCORE).contains(&score),
                 "score {score} out of [{MIN_SCORE}, {MAX_SCORE}] for weights ({vc_w}, {tx_w}, {repay_w})"
             );
         }
