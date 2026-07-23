@@ -29,6 +29,9 @@ pub enum RevocationKey {
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
 }
 
+const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
 /// On-chain revocation registry contract.
 #[contract]
 pub struct RevocationRegistry;
@@ -42,6 +45,7 @@ impl RevocationRegistry {
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -90,6 +94,7 @@ impl RevocationRegistry {
             panic!("not authorized");
         }
         admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }

@@ -44,6 +44,9 @@ pub struct VCRecord {
     pub revoked: bool,
 }
 
+const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
 /// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
 /// `prefix` must be ≤ 32 bytes.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
@@ -70,6 +73,7 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -80,6 +84,7 @@ impl IdentityOracle {
             return Err(IdentityOracleError::NotAuthorized);
         }
         admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
         env.events()
             .publish((symbol_short!("IssReg"),), issuer);
@@ -95,6 +100,7 @@ impl IdentityOracle {
             return Err(IdentityOracleError::NotAuthorized);
         }
         admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().persistent().remove(&DataKey::TrustedIssuer(issuer.clone()));
         env.events()
             .publish((symbol_short!("IssDeReg"),), issuer);
@@ -274,6 +280,7 @@ impl IdentityOracle {
             panic!("not authorized");
         }
         admin.require_auth();
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
