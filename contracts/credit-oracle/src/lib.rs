@@ -612,8 +612,7 @@ impl CreditOracle {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        // require_admin loads the stored admin and calls require_auth() on it.
-        require_admin(&env);
+        require_admin_or_governor(&env, &caller)?;
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
