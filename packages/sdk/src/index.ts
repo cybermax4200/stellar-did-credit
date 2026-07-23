@@ -167,7 +167,11 @@ async function simulateWithRetry(
 }
 
 export class StellarDIDCreditSDK {
-  constructor(private config: ProtocolConfig) {}
+  private server: SorobanRpc.Server;
+
+  constructor(private config: ProtocolConfig) {
+    this.server = new SorobanRpc.Server(config.rpcUrl);
+  }
 
   /**
    * Anchor a DID document on-chain by storing its IPFS CID.
@@ -180,12 +184,11 @@ export class StellarDIDCreditSDK {
    * @returns Transaction hash on successful submission
    */
   async anchorDID(subjectKeypair: Keypair, didDocCid: string): Promise<string> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey = subjectKeypair.publicKey();
 
-    const accountData = await server.getAccount(publicKey);
+    const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -202,7 +205,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -215,7 +218,7 @@ export class StellarDIDCreditSDK {
     const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(subjectKeypair);
 
-    const response = await server.sendTransaction(preparedTx);
+    const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
@@ -240,12 +243,11 @@ export class StellarDIDCreditSDK {
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const publicKey = issuerKeypair.publicKey();
 
-    const accountData = await server.getAccount(publicKey);
+    const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
@@ -265,7 +267,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -278,7 +280,7 @@ export class StellarDIDCreditSDK {
     const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
-    const response = await server.sendTransaction(preparedTx);
+    const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
@@ -308,13 +310,12 @@ export class StellarDIDCreditSDK {
       throw new Error("vcHash must be exactly 32 bytes");
     }
 
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const revocationContract = new Contract(this.config.revocationRegistryId);
     const identityContract = new Contract(this.config.identityOracleId);
 
     const publicKey = issuerKeypair.publicKey();
 
-    const accountData = await server.getAccount(publicKey);
+    const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
@@ -338,7 +339,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -351,7 +352,7 @@ export class StellarDIDCreditSDK {
     const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair);
 
-    const response = await server.sendTransaction(preparedTx);
+    const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
@@ -374,12 +375,11 @@ export class StellarDIDCreditSDK {
     payerKeypair: Keypair,
     subjectAddress: string,
   ): Promise<ScoreRecord> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
     const publicKey = payerKeypair.publicKey();
 
-    const accountData = await server.getAccount(publicKey);
+    const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, getSequence(accountData));
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -392,7 +392,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -405,13 +405,13 @@ export class StellarDIDCreditSDK {
     const preparedTx = assembleTransaction(tx, sim).build();
     preparedTx.sign(payerKeypair);
 
-    const response = await server.sendTransaction(preparedTx);
+    const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
-    await waitForTransactionConfirmation(server, response.hash);
+    await waitForTransactionConfirmation(this.server, response.hash);
 
     try {
       const score = await this.getScore(subjectAddress);
@@ -436,7 +436,6 @@ export class StellarDIDCreditSDK {
    * @returns Parsed ScoreRecord, or null if not computed
    */
   async getScore(subjectAddress: string): Promise<ScoreRecord | null> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -450,7 +449,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
@@ -479,7 +478,6 @@ export class StellarDIDCreditSDK {
    * @returns Parsed ScoringWeights
    */
   async getWeights(): Promise<ScoringWeights> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.creditOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -491,7 +489,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -520,7 +518,6 @@ export class StellarDIDCreditSDK {
    * @returns IPFS CID string (e.g. "Qm...") if anchored, `null` otherwise
    */
   async getDIDDocument(subjectAddress: string): Promise<string | null> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -538,7 +535,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -574,7 +571,6 @@ export class StellarDIDCreditSDK {
       throw new Error("vcHash must be exactly 32 bytes");
     }
 
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -594,7 +590,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -626,7 +622,6 @@ export class StellarDIDCreditSDK {
    * @returns true if subject has ≥ 1 non-revoked credential
    */
   async isVerified(subjectAddress: string): Promise<boolean> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -640,7 +635,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -667,7 +662,6 @@ export class StellarDIDCreditSDK {
    * @returns Count of non-revoked anchored VCs
    */
   async getVCCount(subjectAddress: string): Promise<number> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -684,7 +678,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
@@ -710,7 +704,6 @@ export class StellarDIDCreditSDK {
    * @returns Stellar G... addresses of registered issuers
    */
   async getRegisteredIssuers(): Promise<string[]> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -722,7 +715,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(server, tx, this.config.maxRetries ?? 3);
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       throw new Error(`Simulation failed: ${sim.error}`);
