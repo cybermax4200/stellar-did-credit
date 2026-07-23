@@ -6,7 +6,8 @@
   "main": "src/index.ts",
   "scripts": {
     "start": "ts-node src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "node -e \"process.exit(0)\""
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0"
