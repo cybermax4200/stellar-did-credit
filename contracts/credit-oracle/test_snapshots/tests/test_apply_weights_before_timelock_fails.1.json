@@ -34,6 +34,9 @@
               "function_name": "propose_weights",
               "args": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
                   "map": [
                     {
                       "key": {
