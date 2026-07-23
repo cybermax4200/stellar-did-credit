@@ -243,6 +243,7 @@ impl RevocationRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
     use soroban_sdk::{testutils::Address as _, Env};
 
     #[test]
@@ -385,5 +386,56 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
         client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #[test]
+        fn proptest_batch_revoke_all_marked(
+            hash_bytes in proptest::collection::vec(any::<[u8; 32]>(), 0..=50),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, RevocationRegistry);
+            let client = RevocationRegistryClient::new(&env, &contract_id);
+
+            let issuer = Address::generate(&env);
+            let mut vc_hashes = Vec::new(&env);
+            for h in &hash_bytes {
+                vc_hashes.push_back(BytesN::from_array(&env, h));
+            }
+
+            let result = client.try_batch_revoke(&issuer, &vc_hashes);
+            assert!(result.is_ok());
+
+            for h in vc_hashes.iter() {
+                prop_assert!(client.is_revoked(&h));
+            }
+        }
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+        #[test]
+        fn proptest_is_revoked_idempotent(
+            hash_bytes in any::<[u8; 32]>(),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, RevocationRegistry);
+            let client = RevocationRegistryClient::new(&env, &contract_id);
+
+            let issuer = Address::generate(&env);
+            let vc_hash = BytesN::from_array(&env, &hash_bytes);
+
+            let result = client.try_revoke(&issuer, &vc_hash);
+            assert!(result.is_ok());
+            prop_assert!(client.is_revoked(&vc_hash));
+
+            // Revoking the same hash again should be idempotent
+            let result = client.try_revoke(&issuer, &vc_hash);
+            assert!(result.is_ok());
+            prop_assert!(client.is_revoked(&vc_hash));
+        }
     }
 }
