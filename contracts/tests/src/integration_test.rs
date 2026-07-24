@@ -473,4 +473,104 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
     }
+
+    #[test]
+    fn test_multi_issuer_anchoring_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer_a);
+        identity.register_issuer(&issuer_b);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        
+        let vc_hash_a = BytesN::from_array(&env, &[10u8; 32]);
+        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
+        
+        identity.anchor_vc(&issuer_a, &subject, &vc_hash_a);
+        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
+        
+        assert_eq!(identity.get_total_vc_count(&subject), 2);
+        assert_eq!(identity.get_active_vc_count(&subject), 2);
+    }
+
+    #[test]
+    fn test_multi_issuer_revocation_isolation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer_a);
+        identity.register_issuer(&issuer_b);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        
+        let vc_hash_a = BytesN::from_array(&env, &[10u8; 32]);
+        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
+        
+        identity.anchor_vc(&issuer_a, &subject, &vc_hash_a);
+        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
+        
+        // Issuer A revokes their VC
+        identity.mark_vc_revoked(&issuer_a, &subject, &vc_hash_a);
+        
+        // Total count remains 2
+        assert_eq!(identity.get_total_vc_count(&subject), 2);
+        
+        // Active count becomes 1
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+        
+        // verify_vc: issuer_a's hash is revoked (so verification fails/returns false)
+        assert!(!identity.verify_vc(&subject, &vc_hash_a));
+        
+        // verify_vc: issuer_b's hash is still valid
+        assert!(identity.verify_vc(&subject, &vc_hash_b));
+    }
+
+    #[test]
+    fn test_multi_issuer_cross_revocation_prevention() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer_a);
+        identity.register_issuer(&issuer_b);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        
+        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
+        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
+        
+        // Issuer A tries to revoke Issuer B's VC
+        let res = identity.try_mark_vc_revoked(&issuer_a, &subject, &vc_hash_b);
+        
+        // Expect a VCNotFound error
+        assert_eq!(
+            res,
+            Err(Ok(identity_oracle::IdentityOracleError::VCNotFound))
+        );
+        
+        // VC should remain active
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+        assert!(identity.verify_vc(&subject, &vc_hash_b));
+    }
 }
