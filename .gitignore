@@ -2,6 +2,9 @@
 target/
 **/*.rs.bk
 
+# Soroban proptest snapshots (generated, not source)
+contracts/**/test_snapshots/tests/proptest_*.json
+
 # Node
 node_modules/
 dist/
@@ -15,6 +18,6 @@ Thumbs.db
 
 # AI agent config (local only — do not commit)
 .claude/
-
+.idea
 # Deployment artifacts
 # deployments.testnet.json  (tracked in repo)

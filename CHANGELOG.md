@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `identity-oracle`: `deregister_issuer` no longer rebuilds the full `IssuersIndex` vector on every call. `TrustedIssuer(Address)` is now a tombstone flag (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `IssuersIndex` becomes an append-only record of every address ever registered. Deregistration is now a single storage write instead of an O(n) scan + rewrite. `list_issuers()` keeps its public signature and still returns only currently-registered issuers, now by filtering `IssuersIndex` against each entry's `TrustedIssuer` flag. No storage migration is required — both storage keys keep their original value types (#224)
+- TypeScript SDK (`@stellar-did-credit/sdk`): reuse a single `SorobanRpc.Server` instance created in the constructor instead of creating a new server on every method call (#231)
+
+### Added
+
+- `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
+- `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)
+- Integration test `test_cross_contract_score_not_inflated_after_revocation` verifies that revoking VCs via identity-oracle immediately lowers the credit score when the cross-contract path is active (#176)
+- TypeScript SDK (`@stellar-did-credit/sdk`): exported contract struct types `TxStats`, `ScoringWeights`, `RepaymentRecord`, and `VCRecord` (previously only `ScoreRecord` and `ProtocolConfig` were exported), with JSDoc Soroban-type annotations, export/structural tests, and a new "Types" section in the SDK README (#20)
+
+### Deprecated
+
+- `credit-oracle`: `set_vc_count(feeder, subject, count)` is deprecated; use `set_identity_oracle` + `compute_score` for live cross-contract VC count resolution instead (#176)
+
 ## [0.1.0] - 2026-06-24
 
 ### Added
