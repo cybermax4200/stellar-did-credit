@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
+    use credit_oracle::{CreditOracle, CreditOracleClient, ScoringWeights, TxStats};
+    use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
@@ -472,5 +473,49 @@ mod tests {
         // Also verify get_active_vc_count returns correct count
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
+    }
+
+    #[test]
+    fn test_governance_execute_fails_when_quorum_not_met() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        credit.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        // Quorum of 1000 combined votes required.
+        gov.initialize(&admin, &credit_id, &1000);
+
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 60,
+            tx_weight: 20,
+            repayment_weight: 20,
+        };
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100);
+
+        // Only 300 total votes cast — below the 1000 quorum.
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.vote(&voter, &proposal_id, &true, &300);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::QuorumNotMet)));
+
+        // Weights must remain unchanged and the proposal must not be marked executed.
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(!proposal.executed);
+        let active_weights = credit.get_scoring_weights();
+        assert_ne!(active_weights.vc_weight, 60);
     }
 }
