@@ -215,7 +215,9 @@ The contract does not enforce score freshness. `get_score` returns whatever was 
 
 When `is_stale` returns `true`, the caller should prompt the subject or feeder to call `compute_score` before relying on the score.
 
-The feeder is responsible for keeping `TxStats` and `VcCount` current. If the feeder stops updating, the score will drift from reality but will not error — it will simply reflect stale inputs.
+The feeder is responsible for keeping `TxStats` current. In the legacy cached path, the feeder also needs to keep `VcCount` current by calling `set_vc_count`; otherwise the score can drift from reality because the credit-oracle will continue using the last cached value. If the feeder stops updating, the score will not error — it will simply reflect stale inputs.
+
+When an `IdentityOracleId` is configured, `compute_score` reads the active VC count directly from identity-oracle instead of relying on the cached `VcCount`. That cross-contract path removes revocation-related staleness because the score is recomputed from the live identity-oracle state rather than the feeder’s last submission.
 
 ### Open-call recomputation cooldown
 
@@ -225,15 +227,16 @@ The contract stores the last successful computation ledger under `LastComputed(A
 
 ### All VCs revoked
 
-If a subject's VCs are all revoked in identity-oracle, `is_verified` returns `false`. However, the credit-oracle's `VcCount` cache is not automatically updated — it reflects whatever the feeder last submitted via `set_vc_count`.
+If a subject's VCs are all revoked in identity-oracle, `is_verified` returns `false`.
 
-**Implication:** a lender should always check `is_verified` on identity-oracle independently of the credit score. A high score with `is_verified = false` indicates the feeder has not yet synced the revocation.
+- In the legacy cached path, the credit-oracle's `VcCount` cache is not automatically updated and still reflects whatever the feeder last submitted via `set_vc_count`. A high score with `is_verified = false` can therefore indicate that the feeder has not yet synced the revocation into the oracle cache.
+- When an `IdentityOracleId` is configured, `compute_score` reads the active VC count directly from identity-oracle via `get_active_vc_count`. That cross-contract path eliminates revocation-related staleness, so the score reflects the current live VC state rather than the feeder's last cached submission.
 
-In the future cross-contract version, `compute_score` will call `get_active_vc_count` directly, eliminating this lag.
+**Implication:** a lender should always check `is_verified` on identity-oracle independently of the credit score, regardless of which VC-count path is in use.
 
 ### Feeder not updated (inputs never set)
 
-If `set_vc_count` and `update_tx_stats` have never been called for a subject, both default to zero. The score will be driven entirely by repayment history (weight 30), with a maximum possible score of:
+If `set_vc_count` and `update_tx_stats` have never been called for a subject, both default to zero in the legacy cached path. The score will be driven entirely by repayment history (weight 30), with a maximum possible score of:
 
 ```
 composite = (0×40 + 0×30 + 100×30) ÷ 100 = 30
@@ -241,6 +244,8 @@ score = 300 + 30×550÷100 = 300 + 165 = 465
 ```
 
 A subject with perfect repayment history but no feeder data is capped at **465**. This is intentional — the protocol requires active data submission to unlock higher scores.
+
+When the cross-contract path is configured, `VcCount` no longer depends on `set_vc_count` at all; it is fetched from identity-oracle during `compute_score`. In that mode, missing feeder submissions only affect the transaction-history portion of the score, while the VC component remains tied to the live identity-oracle state.
 
 ### Integer division truncation
 
