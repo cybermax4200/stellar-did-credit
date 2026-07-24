@@ -184,6 +184,10 @@ impl RevocationRegistry {
     }
 
     /// Revoke multiple verifiable credentials in a single batch operation.
+    ///
+    /// This operation is atomic (all-or-nothing). If any VC hash in the batch fails
+    /// (e.g., due to an `IssuerMismatch`), the entire transaction aborts and no
+    /// revocations from the batch are persisted.
     pub fn batch_revoke(
         env: Env,
         issuer: Address,

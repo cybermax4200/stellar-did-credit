@@ -473,4 +473,46 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
     }
+
+    #[test]
+    fn test_batch_revoke_mixed_hashes_atomicity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
+
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
+        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
+
+        // issuer2 revokes hash2 individually to claim authority
+        revocation.revoke(&issuer2, &hash2);
+        assert!(revocation.is_revoked(&hash2));
+
+        // Create a batch with mixed hashes
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash1.clone());
+        batch.push_back(hash2.clone()); // belongs to issuer2
+        batch.push_back(hash3.clone());
+
+        // issuer1 attempts to batch revoke the hashes
+        let res = revocation.try_batch_revoke(&issuer1, &batch);
+        
+        // Assert the call failed with IssuerMismatch
+        assert_eq!(
+            res,
+            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+        );
+
+        // Verify that hash1 and hash3 were NOT revoked (atomicity check)
+        assert!(!revocation.is_revoked(&hash1));
+        assert!(!revocation.is_revoked(&hash3));
+    }
 }
