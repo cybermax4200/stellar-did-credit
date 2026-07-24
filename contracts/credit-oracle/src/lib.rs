@@ -1391,8 +1391,16 @@ mod tests {
 
         client.initialize(&admin1);
 
+        // propose new admin
         client.propose_new_admin(&admin2);
+
+        // accept by proposed admin
         client.accept_admin(&admin2);
+
+        let stored_admin: Address = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Admin).unwrap()
+        });
+        assert_eq!(stored_admin, admin2);
 
         // new admin can register feeder
         client.register_feeder(&feeder);
