@@ -60,7 +60,8 @@ Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors f
 | Key                      | Type            | Description                                            |
 | ------------------------ | --------------- | ------------------------------------------------------ |
 | `Admin`                  | `Address`       | Instance storage — contract admin                      |
-| `TrustedIssuer(Address)` | `bool`          | Persistent — whether an address is a registered issuer |
+| `TrustedIssuer(Address)` | `bool`          | Persistent — tombstone flag: `true` while a registered issuer is trusted, `false` once deregistered |
+| `IssuersIndex`           | `Vec<Address>`  | Persistent — append-only list of every address ever registered; `list_issuers()` filters this against `TrustedIssuer` |
 | `DIDDocument(Address)`   | `String`        | Persistent — IPFS CID of the subject's DID document    |
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
 

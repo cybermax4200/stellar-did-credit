@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `identity-oracle`: `deregister_issuer` no longer rebuilds the full `IssuersIndex` vector on every call. `TrustedIssuer(Address)` is now a tombstone flag (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `IssuersIndex` becomes an append-only record of every address ever registered. Deregistration is now a single storage write instead of an O(n) scan + rewrite. `list_issuers()` keeps its public signature and still returns only currently-registered issuers, now by filtering `IssuersIndex` against each entry's `TrustedIssuer` flag. No storage migration is required — both storage keys keep their original value types (#224)
 - TypeScript SDK (`@stellar-did-credit/sdk`): reuse a single `SorobanRpc.Server` instance created in the constructor instead of creating a new server on every method call (#231)
 
 ### Added

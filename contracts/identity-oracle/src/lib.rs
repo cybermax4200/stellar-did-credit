@@ -58,9 +58,18 @@ pub enum DataKey {
     Admin,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
-    /// Global index of currently registered trusted issuers.
+    /// Append-only index of every address ever registered as a trusted
+    /// issuer. Entries are never removed on deregistration (that would
+    /// require an O(n) rewrite on every `deregister_issuer` call) — a
+    /// deregistered issuer's entry is left in place and its `TrustedIssuer`
+    /// flag is flipped to `false` instead. Use `list_issuers` (which filters
+    /// this index against `TrustedIssuer`) to get the currently-active set.
     IssuersIndex,
-    /// Whether the given address is a trusted credential issuer.
+    /// Whether the given address is a *currently* trusted credential issuer.
+    /// Present and `true` while registered; present and `false` once
+    /// deregistered (a tombstone, not removed) so re-registration can be
+    /// told apart from first-time registration without rescanning
+    /// `IssuersIndex`.
     TrustedIssuer(Address),
     /// The DID document hash anchored for the given subject address.
     DIDDocument(Address),
@@ -183,6 +192,11 @@ impl IdentityOracle {
     ///
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
     ///
+    /// This is a single tombstone write (`TrustedIssuer(issuer) = false`) —
+    /// it does not touch `IssuersIndex`, so cost does not scale with the
+    /// number of registered issuers. `list_issuers` is what hides
+    /// deregistered issuers from the returned set.
+    ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_issuer(
         env: Env,
@@ -193,22 +207,7 @@ impl IdentityOracle {
 
         env.storage()
             .persistent()
-            .remove(&DataKey::TrustedIssuer(issuer.clone()));
-
-        let issuers: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::IssuersIndex)
-            .unwrap_or(Vec::new(&env));
-        let mut updated = Vec::new(&env);
-        for registered_issuer in issuers.iter() {
-            if registered_issuer != issuer {
-                updated.push_back(registered_issuer);
-            }
-        }
-        env.storage()
-            .persistent()
-            .set(&DataKey::IssuersIndex, &updated);
+            .set(&DataKey::TrustedIssuer(issuer.clone()), &false);
 
         env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
@@ -265,11 +264,12 @@ impl IdentityOracle {
         vc_hash: BytesN<32>,
     ) -> Result<(), IdentityOracleError> {
         issuer.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedIssuer(issuer.clone()))
-        {
+            .get(&DataKey::TrustedIssuer(issuer.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(IdentityOracleError::IssuerNotRegistered);
         }
 
@@ -466,12 +466,29 @@ impl IdentityOracle {
         Ok(())
     }
 
-    /// Return the `IssuersIndex` vector of currently registered trusted issuers.
+    /// Returns the currently registered (non-deregistered) trusted issuers.
+    ///
+    /// `IssuersIndex` is append-only and may contain deregistered addresses,
+    /// so this filters it against each entry's live `TrustedIssuer` flag.
     pub fn list_issuers(env: Env) -> Vec<Address> {
-        env.storage()
+        let ever_registered: Vec<Address> = env
+            .storage()
             .persistent()
             .get(&DataKey::IssuersIndex)
-            .unwrap_or(Vec::new(&env))
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for issuer in ever_registered.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedIssuer(issuer.clone()))
+                .unwrap_or(false);
+            if is_trusted {
+                active.push_back(issuer);
+            }
+        }
+        active
     }
 }
 
@@ -526,10 +543,14 @@ mod tests {
         client.register_issuer(&issuer);
         client.deregister_issuer(&issuer);
 
+        // Deregistration tombstones the flag (sets it false) rather than
+        // removing the key, so `deregister_issuer` never has to rewrite
+        // IssuersIndex.
         let is_trusted: bool = env.as_contract(&contract_id, || {
             env.storage()
                 .persistent()
-                .has(&DataKey::TrustedIssuer(issuer.clone()))
+                .get(&DataKey::TrustedIssuer(issuer.clone()))
+                .unwrap_or(true)
         });
         assert!(!is_trusted);
     }
@@ -593,6 +614,34 @@ mod tests {
 
         client.deregister_issuer(&issuer1);
         assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer2]));
+    }
+
+    #[test]
+    fn test_reregistering_deregistered_issuer_does_not_duplicate_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        client.deregister_issuer(&issuer);
+        client.register_issuer(&issuer);
+
+        // list_issuers must show the issuer exactly once even though it went
+        // through register -> deregister -> register.
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer.clone()])
+        );
+
+        // And it must be able to anchor VCs again now that it's re-trusted.
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
     }
 
     #[test]
