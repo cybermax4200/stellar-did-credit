@@ -473,4 +473,101 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
     }
+
+    #[test]
+    fn test_score_recomputation_after_weight_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
+
+        // Setup some stats
+        credit.set_vc_count(&feeder, &subject, &5);
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &credit_oracle::TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+
+        // 1. compute score with old weights [40, 30, 30]
+        let initial_score = credit.compute_score(&subject);
+
+        // check initial weights
+        let weights = credit.get_scoring_weights();
+        assert_eq!(weights.vc_weight, 40);
+        assert_eq!(weights.tx_weight, 30);
+        assert_eq!(weights.repayment_weight, 30);
+
+        // initial score calculation:
+        // composite = (100 * 40 + 5 * 30 + 100 * 30 + 0) / 100 = 71
+        // score = 300 + (71 * 550 / 100) = 690
+        assert_eq!(initial_score, 690);
+
+        // 2. propose [50, 25, 25] (Weight increase for VC which is maxed out)
+        let new_weights = credit_oracle::ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 25,
+            repayment_weight: 25,
+        };
+        credit.propose_weights(&admin, &new_weights);
+
+        // advance ledger to pass timelock
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 17280);
+
+        // 3. apply
+        credit.apply_weights();
+
+        // 4. advance ledger to bypass cooldown
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // 5. recompute score
+        let new_score = credit.compute_score(&subject);
+
+        // New weights [50, 25, 25]:
+        // composite = (100 * 50 + 5 * 25 + 100 * 25 + 0) / 100 = 76
+        // score = 300 + (76 * 550 / 100) = 718
+        assert_eq!(new_score, 718);
+        assert!(new_score > initial_score);
+
+        // 6. Test a decrease scenario [20, 40, 40]
+        let decrease_weights = credit_oracle::ScoringWeights {
+            vc_weight: 20,
+            tx_weight: 40,
+            repayment_weight: 40,
+        };
+        credit.propose_weights(&admin, &decrease_weights);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 17280);
+        credit.apply_weights();
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        let final_score = credit.compute_score(&subject);
+        
+        // Decrease weights [20, 40, 40]:
+        // composite = (100 * 20 + 5 * 40 + 100 * 40 + 0) / 100 = 62
+        // score = 300 + (62 * 550 / 100) = 641
+        assert_eq!(final_score, 641);
+        assert!(final_score < initial_score);
+    }
 }
