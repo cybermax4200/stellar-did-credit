@@ -74,9 +74,6 @@
               "function_name": "register_issuer",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 }
               ]
@@ -359,9 +356,6 @@
               "function_name": "register_lender",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
-                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM"
                 }
               ]
@@ -380,9 +374,6 @@
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
               "function_name": "register_feeder",
               "args": [
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
-                },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAARQG5"
                 }
@@ -1065,7 +1056,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -1563,7 +1554,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -2013,7 +2004,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -2826,7 +2817,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ]
     ]

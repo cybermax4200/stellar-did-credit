@@ -280,10 +280,11 @@ impl IdentityOracle {
             .get(&key)
             .unwrap_or(Vec::new(&env));
 
-        // Reject duplicate vc_hash for this subject
+        // Dedup: same (issuer, vc_hash) pair is a no-op
         for i in 0..anchors.len() {
-            if anchors.get(i).unwrap().vc_hash == vc_hash {
-                return Err(IdentityOracleError::DuplicateVC);
+            let record = anchors.get(i).unwrap();
+            if record.vc_hash == vc_hash && record.issuer == issuer {
+                return Ok(());
             }
         }
 
@@ -792,6 +793,33 @@ mod tests {
         }
 
         assert_eq!(client.get_vc_count(&subject), 3);
+    }
+
+    #[test]
+    fn test_duplicate_vc_hash_same_issuer_is_noop() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+
+        // First anchor should succeed
+        assert!(client.try_anchor_vc(&issuer, &subject, &vc_hash).is_ok());
+
+        // Second anchor with same issuer + same hash should be a no-op (not error)
+        assert!(client.try_anchor_vc(&issuer, &subject, &vc_hash).is_ok());
+
+        // Count should be 1, not 2
+        assert_eq!(client.get_total_vc_count(&subject), 1);
+        assert_eq!(client.get_active_vc_count(&subject), 1);
     }
 
     #[test]
