@@ -56,19 +56,6 @@ fn require_admin_or_governor(env: &Env, caller: &Address) -> Result<(), CreditOr
     Err(CreditOracleError::NotAuthorized)
 }
 
-// ── Time-To-Live (TTL) constants ─────────────────────────────────────
-//
-// Instance storage entries (Admin, Config, PendingWeights) are extended to
-// ~1 year. Persistent entries are extended to ~30 days on every write.
-//
-// Threshold: if remaining TTL drops below this, extend.
-// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
-//
-const INST_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const INST_TTL_EXTEND: u32   = 6_307_200;  // ~1 year
-const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
-
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
@@ -807,6 +794,7 @@ impl CreditOracle {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use proptest::prelude::*;

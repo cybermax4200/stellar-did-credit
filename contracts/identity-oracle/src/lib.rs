@@ -29,18 +29,12 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
-}
-
-// ── Time-To-Live (TTL) constants ─────────────────────────────────────
-//
-// Instance storage entries (Admin) are extended to ~1 year.
+}// ── Persistent TTL constants ─────────────────────────────────────
 // Persistent entries are extended to ~30 days on every write.
 //
 // Threshold: if remaining TTL drops below this, extend.
-// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
 //
-const INST_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const INST_TTL_EXTEND: u32   = 6_307_200;  // ~1 year
 const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
 const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
 
@@ -522,6 +516,7 @@ impl IdentityOracle {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::Address as _, Env};
