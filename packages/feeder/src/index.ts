@@ -4,8 +4,11 @@
  * Each polling cycle the feeder:
  *   1. Reads get_active_vc_count(subject) from the identity-oracle.
  *   2. Queries the Horizon API for 30-day payment statistics for each subject.
- *   3. Submits set_vc_count(feeder, subject, count) to the credit-oracle.
- *   4. Submits update_tx_stats(feeder, subject, stats) to the credit-oracle.
+ *   3. Submits set_vc_count(feeder, subject, count) to the credit-oracle,
+ *      unless count is unchanged from the last value this feeder submitted.
+ *   4. Submits update_tx_stats(feeder, subject, stats) to the credit-oracle,
+ *      unless stats are unchanged from the last value this feeder submitted.
+ * A subject's first sync always submits both, regardless of value.
  *
  * Usage (CLI):
  *   FEEDER_SECRET=YOUR_STELLAR_SECRET_KEY SUBJECTS=G1...,G2... \
@@ -78,6 +81,50 @@ export interface TxStats {
   txCount30d: number;
   /** Average number of distinct counterparties per transaction. */
   avgCounterparties: number;
+}
+
+/** The most recently submitted values for a subject, used to detect no-op cycles. */
+export interface LastSubmitted {
+  vcCount: number;
+  stats: TxStats;
+}
+
+/** Which of the two per-cycle submissions are actually necessary this time. */
+export interface SubmissionDecision {
+  vcCountChanged: boolean;
+  statsChanged: boolean;
+}
+
+/** True if two TxStats represent the same on-chain values field-by-field. */
+export function statsEqual(a: TxStats, b: TxStats): boolean {
+  return (
+    a.volume30d === b.volume30d &&
+    a.txCount30d === b.txCount30d &&
+    a.avgCounterparties === b.avgCounterparties
+  );
+}
+
+/**
+ * Decides whether set_vc_count and update_tx_stats need to be submitted this
+ * cycle, given what (if anything) was last submitted for this subject.
+ *
+ * A subject with no prior submission (`previous === undefined`) always needs
+ * both submitted, regardless of value — including an all-zero first sync for
+ * an account with no activity, so the subject's initial state is recorded
+ * on-chain at least once.
+ */
+export function decideSubmissions(
+  previous: LastSubmitted | undefined,
+  vcCount: number,
+  stats: TxStats,
+): SubmissionDecision {
+  if (previous === undefined) {
+    return { vcCountChanged: true, statsChanged: true };
+  }
+  return {
+    vcCountChanged: previous.vcCount !== vcCount,
+    statsChanged: !statsEqual(previous.stats, stats),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -337,6 +384,14 @@ export async function waitForConfirmation(
 export class Feeder {
   private server: SorobanRpc.Server;
 
+  /**
+   * Last vc_count/TxStats successfully submitted per subject, kept in memory
+   * for the lifetime of this Feeder instance. A subject with no entry here
+   * has never been synced by this instance, so its first sync always
+   * submits both set_vc_count and update_tx_stats regardless of value.
+   */
+  private lastSubmitted = new Map<string, LastSubmitted>();
+
   constructor(
     private config: FeederConfig,
     private feederKeypair: Keypair,
@@ -345,8 +400,15 @@ export class Feeder {
   }
 
   /**
-   * Syncs a single subject: fetches stats, then submits set_vc_count followed
-   * by update_tx_stats, waiting for each transaction to be confirmed.
+   * Syncs a single subject: fetches stats, then submits set_vc_count and/or
+   * update_tx_stats, waiting for each submitted transaction to be confirmed.
+   *
+   * Each of those two submissions is skipped if its value is unchanged from
+   * the last value this instance submitted for the subject — this avoids
+   * paying transaction fees every cycle for subjects with no new activity
+   * (most visibly, accounts with zero payment history, whose fetched stats
+   * are always zero). A subject's first sync always submits both values so
+   * they get recorded on-chain at least once.
    *
    * If `signal` is aborted between steps, the in-flight step is allowed to
    * complete (transaction submission cannot be cancelled mid-flight) but no
@@ -392,65 +454,82 @@ export class Feeder {
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
 
-    // Step 3: submit set_vc_count
-    const vcCountTxHash = await withExponentialBackoff(
-      `set_vc_count(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () =>
-        submitOperation(
-          this.server,
-          this.config.networkPassphrase,
-          this.feederKeypair,
-          creditContract.call(
-            "set_vc_count",
-            new Address(feederAddress).toScVal(),
-            new Address(subjectAddress).toScVal(),
-            nativeToScVal(vcCount, { type: "u32" }),
-          ),
-        ),
+    const previous = this.lastSubmitted.get(subjectAddress);
+    const { vcCountChanged, statsChanged } = decideSubmissions(
+      previous,
+      vcCount,
+      stats,
     );
-    console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
 
-    await withExponentialBackoff(
-      `wait_set_vc_count_confirmation(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () => waitForConfirmation(this.server, vcCountTxHash),
-    );
+    // Step 3: submit set_vc_count, unless it's unchanged from the last sync
+    if (vcCountChanged) {
+      const vcCountTxHash = await withExponentialBackoff(
+        `set_vc_count(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          submitOperation(
+            this.server,
+            this.config.networkPassphrase,
+            this.feederKeypair,
+            creditContract.call(
+              "set_vc_count",
+              new Address(feederAddress).toScVal(),
+              new Address(subjectAddress).toScVal(),
+              nativeToScVal(vcCount, { type: "u32" }),
+            ),
+          ),
+      );
+      console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
+
+      await withExponentialBackoff(
+        `wait_set_vc_count_confirmation(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () => waitForConfirmation(this.server, vcCountTxHash),
+      );
+    } else {
+      console.log(`  set_vc_count      skipped (unchanged)`);
+    }
     if (signal?.aborted) {
       console.log(
-        `[feeder] ${subjectAddress} — aborted after set_vc_count confirmation`,
+        `[feeder] ${subjectAddress} — aborted after set_vc_count step`,
       );
       return;
     }
 
-    // Step 4: submit update_tx_stats
-    const statsTxHash = await withExponentialBackoff(
-      `update_tx_stats(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () =>
-        submitOperation(
-          this.server,
-          this.config.networkPassphrase,
-          this.feederKeypair,
-          creditContract.call(
-            "update_tx_stats",
-            new Address(feederAddress).toScVal(),
-            new Address(subjectAddress).toScVal(),
-            txStatsToScVal(stats),
+    // Step 4: submit update_tx_stats, unless it's unchanged from the last sync
+    if (statsChanged) {
+      const statsTxHash = await withExponentialBackoff(
+        `update_tx_stats(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          submitOperation(
+            this.server,
+            this.config.networkPassphrase,
+            this.feederKeypair,
+            creditContract.call(
+              "update_tx_stats",
+              new Address(feederAddress).toScVal(),
+              new Address(subjectAddress).toScVal(),
+              txStatsToScVal(stats),
+            ),
           ),
-        ),
-    );
-    console.log(`  update_tx_stats tx = ${statsTxHash}`);
+      );
+      console.log(`  update_tx_stats tx = ${statsTxHash}`);
 
-    await withExponentialBackoff(
-      `wait_update_tx_stats_confirmation(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () => waitForConfirmation(this.server, statsTxHash),
-    );
+      await withExponentialBackoff(
+        `wait_update_tx_stats_confirmation(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () => waitForConfirmation(this.server, statsTxHash),
+      );
+    } else {
+      console.log(`  update_tx_stats   skipped (unchanged)`);
+    }
+
+    this.lastSubmitted.set(subjectAddress, { vcCount, stats });
 
     console.log(`  done`);
   }
