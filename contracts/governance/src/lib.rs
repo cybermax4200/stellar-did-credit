@@ -264,7 +264,10 @@ impl Governance {
             .ok_or(GovernanceError::NotAuthorized)?;
 
         let client = CreditOracleClient::new(&env, &credit_oracle_addr);
-        client.accept_admin(&env.current_contract_address());
+        client
+            .try_accept_admin(&env.current_contract_address())
+            .map_err(|_| GovernanceError::NotAuthorized)?
+            .map_err(|_| GovernanceError::NotAuthorized)?;
         Ok(())
     }
 

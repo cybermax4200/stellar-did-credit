@@ -760,7 +760,7 @@ impl CreditOracle {
         match pending {
             Some(p) => {
                 if p != new_admin {
-                    panic!("not authorized");
+                    return Err(CreditOracleError::NotAuthorized);
                 }
             }
             None => return Err(CreditOracleError::NoPendingAdmin),
@@ -775,10 +775,11 @@ impl CreditOracle {
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), CreditOracleError> {
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 }
 
@@ -1399,7 +1400,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1413,7 +1413,8 @@ mod tests {
         client.initialize(&admin1);
         client.propose_new_admin(&admin2);
 
-        let _ = client.accept_admin(&non_admin);
+        let res = client.try_accept_admin(&non_admin);
+        assert_eq!(res, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
     #[test]
