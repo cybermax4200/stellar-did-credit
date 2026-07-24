@@ -10,6 +10,12 @@
  *      unless stats are unchanged from the last value this feeder submitted.
  * A subject's first sync always submits both, regardless of value.
  *
+ * Each Feeder instance keeps an in-memory record per subject of the last
+ * vc_count/stats it submitted, the RPC ledger sequence as of that sync, and
+ * the last observed credit score — used to decide which submissions can be
+ * skipped and to log sync/staleness diagnostics. This state is process-local
+ * and lost on restart, which simply causes a full re-sync of every subject.
+ *
  * Usage (CLI):
  *   FEEDER_SECRET=YOUR_STELLAR_SECRET_KEY SUBJECTS=G1...,G2... \
  *   CREDIT_ORACLE_ID=C... IDENTITY_ORACLE_ID=C... \
@@ -87,6 +93,20 @@ export interface TxStats {
 export interface LastSubmitted {
   vcCount: number;
   stats: TxStats;
+  /**
+   * RPC ledger sequence as of this feeder instance's most recent sync of this
+   * subject. Purely informational (staleness logging) — not used to decide
+   * whether a submission is needed.
+   */
+  ledger?: number;
+  /**
+   * Most recently observed credit score for this subject (from get_score),
+   * or null if no score had been computed yet as of that sync. Purely
+   * informational — score can change for reasons outside vc_count/stats
+   * (e.g. recorded repayments, updated scoring weights), so it isn't used to
+   * decide whether a submission is needed.
+   */
+  score?: number | null;
 }
 
 /** Which of the two per-cycle submissions are actually necessary this time. */
@@ -257,6 +277,80 @@ export async function getActiveVcCount(
   return Number(scValToNative(sim.result!.retval));
 }
 
+/** Mirrors the `ScoreRecord` struct in `contracts/credit-oracle`. */
+export interface ScoreRecord {
+  score: number;
+  lastUpdated: number;
+  vcCount: number;
+  repaymentRate: number;
+  txVolume30d: bigint;
+}
+
+/** Parses a Soroban ScVal representing an Option<ScoreRecord>. Returns null if None. */
+function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord | null {
+  if (
+    !scVal ||
+    (typeof scVal.switch === "function" &&
+      scVal.switch() === xdr.ScValType.scvVoid())
+  ) {
+    return null;
+  }
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined) {
+    return null;
+  }
+  const raw = native as Record<string, unknown>;
+  return {
+    score: Number(raw["score"]),
+    lastUpdated: Number(raw["last_updated"]),
+    vcCount: Number(raw["vc_count"]),
+    repaymentRate: Number(raw["repayment_rate"]),
+    txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
+  };
+}
+
+/**
+ * Reads the currently stored credit score for a subject from the
+ * credit-oracle. Uses a read-only simulation — no signing or fees required.
+ *
+ * Returns null if no score has been computed for the subject yet. This is
+ * purely a diagnostic read: the feeder does not call compute_score itself,
+ * so the returned record may be stale relative to the vc_count/stats this
+ * cycle just fetched.
+ */
+export async function getScore(
+  server: SorobanRpc.Server,
+  config: Pick<FeederConfig, "creditOracleId" | "networkPassphrase" | "simAccount">,
+  subjectAddress: string,
+): Promise<ScoreRecord | null> {
+  const contract = new Contract(config.creditOracleId);
+  const sourceAccount = new Account(config.simAccount, "0");
+
+  const tx = new TransactionBuilder(sourceAccount, {
+    fee: BASE_FEE,
+    networkPassphrase: config.networkPassphrase,
+  })
+    .addOperation(contract.call("get_score", new Address(subjectAddress).toScVal()))
+    .setTimeout(30)
+    .build();
+
+  const sim = await server.simulateTransaction(tx);
+
+  if (SorobanRpc.Api.isSimulationError(sim)) {
+    throw new Error(`get_score simulation failed: ${sim.error}`);
+  }
+  if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+    throw new Error("Unexpected simulation response for get_score");
+  }
+
+  const resultScVal = sim.result?.retval;
+  if (!resultScVal) {
+    throw new Error("No return value in simulation result for get_score");
+  }
+
+  return parseScoreRecord(resultScVal);
+}
+
 /**
  * Encodes a TxStats object as a Soroban ScVal struct (ScMap).
  * Keys are alphabetically sorted as required by the Soroban XDR encoding.
@@ -413,8 +507,19 @@ export class Feeder {
    * If `signal` is aborted between steps, the in-flight step is allowed to
    * complete (transaction submission cannot be cancelled mid-flight) but no
    * further steps are started — the subject may end up partially synced.
+   *
+   * Also reads the current score (get_score) and the RPC's latest ledger
+   * sequence purely for logging/diagnostics — tracked per subject alongside
+   * vc_count/stats so operators can see how stale a subject's synced state
+   * is. Neither affects the skip decision: score can change for reasons
+   * outside this feeder's own inputs (repayments, weight updates), and a
+   * failure reading it doesn't block the actual vc_count/stats sync.
    */
-  async feedSubject(subjectAddress: string, signal?: AbortSignal): Promise<void> {
+  async feedSubject(
+    subjectAddress: string,
+    signal?: AbortSignal,
+    currentLedger?: number,
+  ): Promise<void> {
     console.log(`[feeder] syncing ${subjectAddress}`);
 
     const maxRetries = this.config.maxRetries ?? 3;
@@ -451,15 +556,48 @@ export class Feeder {
       return;
     }
 
-    const creditContract = new Contract(this.config.creditOracleId);
-    const feederAddress = this.feederKeypair.publicKey();
-
     const previous = this.lastSubmitted.get(subjectAddress);
+
+    // Diagnostic-only read: current stored score, purely for logging. A
+    // failure here is logged and swallowed rather than aborting the sync —
+    // it must never block the actual vc_count/stats submission below.
+    let score: number | null | undefined;
+    try {
+      const record = await getScore(this.server, this.config, subjectAddress);
+      score = record?.score ?? null;
+      const scoreChangeNote =
+        previous?.score !== undefined && previous.score !== score
+          ? ` (was ${previous.score ?? "none"})`
+          : "";
+      console.log(
+        `  score             = ${score ?? "not yet computed"}${scoreChangeNote}`,
+      );
+    } catch (err) {
+      console.warn(
+        `[feeder] ${subjectAddress} — could not read score for logging:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+    console.log(
+      `  ledger            = ${currentLedger ?? "unknown"}` +
+        (previous?.ledger !== undefined
+          ? ` (last synced at ledger ${previous.ledger})`
+          : " (first sync)"),
+    );
+
     const { vcCountChanged, statsChanged } = decideSubmissions(
       previous,
       vcCount,
       stats,
     );
+    console.log(
+      `  sync              = ${
+        vcCountChanged || statsChanged ? "performed" : "skipped (no changes)"
+      }`,
+    );
+
+    const creditContract = new Contract(this.config.creditOracleId);
+    const feederAddress = this.feederKeypair.publicKey();
 
     // Step 3: submit set_vc_count, unless it's unchanged from the last sync
     if (vcCountChanged) {
@@ -529,7 +667,12 @@ export class Feeder {
       console.log(`  update_tx_stats   skipped (unchanged)`);
     }
 
-    this.lastSubmitted.set(subjectAddress, { vcCount, stats });
+    this.lastSubmitted.set(subjectAddress, {
+      vcCount,
+      stats,
+      ledger: currentLedger,
+      score,
+    });
 
     console.log(`  done`);
   }
@@ -541,8 +684,23 @@ export class Feeder {
    * the loop stops and no further subjects are started — subjects already
    * in progress when the signal was raised are left to `feedSubject` to wind
    * down gracefully.
+   *
+   * Reads the RPC's latest ledger sequence once for the whole cycle (not
+   * once per subject — it's the same value for all of them) and passes it
+   * to each `feedSubject` call for logging. A failure here is non-fatal:
+   * it's logged and the cycle proceeds with an unknown ledger for this run.
    */
   async runCycle(signal?: AbortSignal): Promise<void> {
+    let currentLedger: number | undefined;
+    try {
+      currentLedger = (await this.server.getLatestLedger()).sequence;
+    } catch (err) {
+      console.warn(
+        `[feeder] could not read latest ledger for this cycle:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+
     for (const subject of this.config.subjects) {
       if (signal?.aborted) {
         console.log(
@@ -551,7 +709,7 @@ export class Feeder {
         break;
       }
       try {
-        await this.feedSubject(subject, signal);
+        await this.feedSubject(subject, signal, currentLedger);
       } catch (err) {
         console.error(
           `[feeder] error syncing ${subject}:`,

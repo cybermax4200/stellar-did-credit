@@ -18,6 +18,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `feeder`: track per-subject sync state (last-synced RPC ledger, last observed credit score alongside the existing vc_count/stats) and log it each cycle for staleness diagnostics; purely informational, doesn't affect which submissions are skipped (#267)
 - `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
 - `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)
 - Integration test `test_cross_contract_score_not_inflated_after_revocation` verifies that revoking VCs via identity-oracle immediately lowers the credit score when the cross-contract path is active (#176)

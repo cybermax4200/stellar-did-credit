@@ -1,19 +1,30 @@
-import { Feeder } from "./index";
+import { Feeder, getScore } from "./index";
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
+import { SorobanRpc, scValToNative } from "@stellar/stellar-sdk";
 
 jest.mock("@stellar/stellar-sdk", () => ({
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({})),
+    Api: {
+      isSimulationError: jest.fn(),
+      isSimulationSuccess: jest.fn(),
+    },
   },
-  Contract: jest.fn(),
-  TransactionBuilder: jest.fn(),
+  Contract: jest.fn().mockImplementation(() => ({ call: jest.fn() })),
+  TransactionBuilder: jest.fn().mockImplementation(() => ({
+    addOperation: jest.fn().mockReturnThis(),
+    setTimeout: jest.fn().mockReturnThis(),
+    build: jest.fn(),
+  })),
   BASE_FEE: "100",
   Account: jest.fn(),
   scValToNative: jest.fn(),
   nativeToScVal: jest.fn(),
-  Address: jest.fn(),
-  xdr: {},
+  Address: jest.fn().mockImplementation(() => ({ toScVal: jest.fn() })),
+  xdr: {
+    ScValType: { scvVoid: jest.fn(() => "scvVoid") },
+  },
   Keypair: {},
   Horizon: { Server: jest.fn() },
 }));
@@ -84,5 +95,67 @@ describe("Feeder graceful shutdown", () => {
     expect(setTimeoutSpy).not.toHaveBeenCalled();
 
     setTimeoutSpy.mockRestore();
+  });
+});
+
+describe("getScore", () => {
+  const scoreConfig = {
+    creditOracleId: "CCREDIT",
+    networkPassphrase: "Test SDF Network ; September 2015",
+    simAccount: "GSIM",
+  };
+
+  function fakeServer(simResult: unknown) {
+    return {
+      simulateTransaction: jest.fn().mockResolvedValue(simResult),
+    } as unknown as SorobanRpc.Server;
+  }
+
+  afterEach(() => {
+    jest.clearAllMocks();
+  });
+
+  it("returns null when the contract has no score computed yet (void return)", async () => {
+    (SorobanRpc.Api.isSimulationError as unknown as jest.Mock).mockReturnValue(false);
+    (SorobanRpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    const voidScVal = { switch: () => "scvVoid" };
+    const server = fakeServer({ result: { retval: voidScVal } });
+
+    const result = await getScore(server, scoreConfig, "GSUBJECT1");
+
+    expect(result).toBeNull();
+  });
+
+  it("returns the parsed ScoreRecord when the contract returns Some(record)", async () => {
+    (SorobanRpc.Api.isSimulationError as unknown as jest.Mock).mockReturnValue(false);
+    (SorobanRpc.Api.isSimulationSuccess as unknown as jest.Mock).mockReturnValue(true);
+    const recordScVal = { switch: () => "scvMap" };
+    (scValToNative as jest.Mock).mockReturnValue({
+      score: 720,
+      last_updated: 1_700_000_000,
+      vc_count: 4,
+      repayment_rate: 9500,
+      tx_volume_30d: 123456n,
+    });
+    const server = fakeServer({ result: { retval: recordScVal } });
+
+    const result = await getScore(server, scoreConfig, "GSUBJECT1");
+
+    expect(result).toEqual({
+      score: 720,
+      lastUpdated: 1_700_000_000,
+      vcCount: 4,
+      repaymentRate: 9500,
+      txVolume30d: 123456n,
+    });
+  });
+
+  it("throws when the simulation itself fails", async () => {
+    (SorobanRpc.Api.isSimulationError as unknown as jest.Mock).mockReturnValue(true);
+    const server = fakeServer({ error: "host unreachable" });
+
+    await expect(getScore(server, scoreConfig, "GSUBJECT1")).rejects.toThrow(
+      "get_score simulation failed: host unreachable",
+    );
   });
 });
