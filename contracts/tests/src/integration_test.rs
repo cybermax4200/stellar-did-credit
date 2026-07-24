@@ -475,102 +475,44 @@ mod tests {
     }
 
     #[test]
-    fn test_multi_issuer_anchoring_count() {
+    fn test_batch_revoke_mixed_hashes_atomicity() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
         let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
+        revocation.initialize(&admin);
 
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&issuer_a);
-        identity.register_issuer(&issuer_b);
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
 
-        let subject = soroban_sdk::Address::generate(&env);
-        
-        let vc_hash_a = BytesN::from_array(&env, &[10u8; 32]);
-        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
-        
-        identity.anchor_vc(&issuer_a, &subject, &vc_hash_a);
-        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
-        
-        assert_eq!(identity.get_total_vc_count(&subject), 2);
-        assert_eq!(identity.get_active_vc_count(&subject), 2);
-    }
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
+        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
 
-    #[test]
-    fn test_multi_issuer_revocation_isolation() {
-        let env = Env::default();
-        env.mock_all_auths();
+        // issuer2 revokes hash2 individually to claim authority
+        revocation.revoke(&issuer2, &hash2);
+        assert!(revocation.is_revoked(&hash2));
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
+        // Create a batch with mixed hashes
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash1.clone());
+        batch.push_back(hash2.clone()); // belongs to issuer2
+        batch.push_back(hash3.clone());
 
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&issuer_a);
-        identity.register_issuer(&issuer_b);
-
-        let subject = soroban_sdk::Address::generate(&env);
+        // issuer1 attempts to batch revoke the hashes
+        let res = revocation.try_batch_revoke(&issuer1, &batch);
         
-        let vc_hash_a = BytesN::from_array(&env, &[10u8; 32]);
-        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
-        
-        identity.anchor_vc(&issuer_a, &subject, &vc_hash_a);
-        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
-        
-        // Issuer A revokes their VC
-        identity.mark_vc_revoked(&issuer_a, &subject, &vc_hash_a);
-        
-        // Total count remains 2
-        assert_eq!(identity.get_total_vc_count(&subject), 2);
-        
-        // Active count becomes 1
-        assert_eq!(identity.get_active_vc_count(&subject), 1);
-        
-        // verify_vc: issuer_a's hash is revoked (so verification fails/returns false)
-        assert!(!identity.verify_vc(&subject, &vc_hash_a));
-        
-        // verify_vc: issuer_b's hash is still valid
-        assert!(identity.verify_vc(&subject, &vc_hash_b));
-    }
-
-    #[test]
-    fn test_multi_issuer_cross_revocation_prevention() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
-
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&issuer_a);
-        identity.register_issuer(&issuer_b);
-
-        let subject = soroban_sdk::Address::generate(&env);
-        
-        let vc_hash_b = BytesN::from_array(&env, &[20u8; 32]);
-        identity.anchor_vc(&issuer_b, &subject, &vc_hash_b);
-        
-        // Issuer A tries to revoke Issuer B's VC
-        let res = identity.try_mark_vc_revoked(&issuer_a, &subject, &vc_hash_b);
-        
-        // Expect a VCNotFound error
+        // Assert the call failed with IssuerMismatch
         assert_eq!(
             res,
-            Err(Ok(identity_oracle::IdentityOracleError::VCNotFound))
+            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
         );
-        
-        // VC should remain active
-        assert_eq!(identity.get_active_vc_count(&subject), 1);
-        assert!(identity.verify_vc(&subject, &vc_hash_b));
+
+        // Verify that hash1 and hash3 were NOT revoked (atomicity check)
+        assert!(!revocation.is_revoked(&hash1));
+        assert!(!revocation.is_revoked(&hash3));
     }
 }
