@@ -785,6 +785,17 @@ impl CreditOracle {
         Ok(())
     }
 
+    /// Admin-only maintenance: extend instance storage TTL so critical
+    /// configuration (Admin, Config, pending weights) does not expire
+    /// on an idle contract.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn maintain_storage(env: Env) -> Result<(), CreditOracleError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
@@ -1861,5 +1872,38 @@ mod tests {
             },
         );
         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    // -----------------------------------------------------------------------
+    // maintain_storage tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_maintain_storage_succeeds_for_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let res = client.try_maintain_storage();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_maintain_storage_fails_for_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let res = client.try_maintain_storage();
+        assert!(res.is_err());
     }
 }

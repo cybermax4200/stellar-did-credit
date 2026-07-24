@@ -484,6 +484,17 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Admin-only maintenance: extend instance storage TTL so critical
+    /// configuration (Admin, RevocationRegistryId) does not expire on
+    /// an idle contract.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn maintain_storage(env: Env) -> Result<(), IdentityOracleError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
     /// Returns the currently registered (non-deregistered) trusted issuers.
     ///
     /// `IssuersIndex` is append-only and may contain deregistered addresses,
@@ -965,5 +976,36 @@ mod tests {
         // non_admin tries to accept
         let res = client.try_accept_admin(&non_admin);
         assert_eq!(res, Err(Ok(IdentityOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    fn test_maintain_storage_succeeds_for_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Admin can call maintain_storage without error
+        let res = client.try_maintain_storage();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_maintain_storage_fails_for_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Withdraw blanket auth so require_admin fails
+        env.mock_auths(&[]);
+        let res = client.try_maintain_storage();
+        assert!(res.is_err());
     }
 }

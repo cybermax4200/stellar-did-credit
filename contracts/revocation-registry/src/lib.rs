@@ -69,8 +69,15 @@ pub enum RevocationKey {
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
 }
 
+// ── Instance TTL bump constants ──────────────────────────────────
+// Used by admin-gated functions to extend instance storage.
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
+// ── Persistent TTL constants ─────────────────────────────────────
+// Extend persistent entries to ~30 days on every write.
+const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
 
 /// On-chain revocation registry contract.
 #[contract]
@@ -240,6 +247,16 @@ impl RevocationRegistry {
         }
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
+        Ok(())
+    }
+
+    /// Admin-only maintenance: extend instance storage TTL so the
+    /// Admin entry does not expire on an idle contract.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn maintain_storage(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -432,5 +449,34 @@ mod tests {
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
         }
+    }
+
+    #[test]
+    fn test_maintain_storage_succeeds_for_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let res = client.try_maintain_storage();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_maintain_storage_fails_for_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let res = client.try_maintain_storage();
+        assert!(res.is_err());
     }
 }
