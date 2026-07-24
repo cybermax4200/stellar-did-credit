@@ -43,6 +43,10 @@ graph TD
 
 Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors for subjects. It is the source of truth for whether a wallet address has been verified by a trusted issuer.
 
+#### Admin setup
+
+The protocol admin must register each trusted issuer before that address can call `anchor_vc`. This is done through `register_issuer(admin, issuer)` on the identity-oracle contract; the admin can later revoke trust with `deregister_issuer`.
+
 **Key functions**
 
 | Function                                    | Caller   | Description                                                 |
