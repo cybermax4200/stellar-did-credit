@@ -27,7 +27,8 @@ graph TD
     OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
     CON_APP     -->|record_repayment| SC_CR
     CON_APP     -->|compute_score| SC_CR
-    SC_CR       -->|get_active_vc_count| SC_ID
+    SC_CR       -->|get_active_vc_count\n(if IdentityOracleId set)| SC_ID
+    SC_CR       -.->|read VcCount\n(if IdentityOracleId NOT set)| SC_CR
 
     CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
     CON_SDK     -->|getScore| SC_CR
@@ -163,9 +164,11 @@ Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`
 
 ## Cross-contract interaction
 
-Currently, the VC count fed into credit-oracle is supplied off-chain by a trusted feeder that reads identity-oracle and calls `set_vc_count`. This is a deliberate design choice for the v1 protocol: it avoids cross-contract call overhead and keeps the scoring gas cost predictable.
+The `credit-oracle` supports a dual-path mechanism for resolving a subject's VC count during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
 
-In a future version, credit-oracle will call identity-oracle directly:
+### Cross-Contract Path (Live)
+
+If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract:
 
 ```mermaid
 sequenceDiagram
@@ -181,7 +184,22 @@ sequenceDiagram
     CreditOracle-->>Caller: score: u32
 ```
 
-Credit-oracle now stores the `identity-oracle` contract ID and uses `env.invoke_contract` to obtain live VC counts. The feeder role for VC count is deprecated when this cross-contract path is configured.
+In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+
+### Fallback Path (Cached)
+
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`. 
+
+While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+
+### Migration to Cross-Contract VC Count
+
+To migrate a deployment from the cached fallback path to the live cross-contract path:
+
+1. **Configure the Oracle ID**: The admin calls `set_identity_oracle(identity_oracle_id)` on `credit-oracle`.
+2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls will automatically use the cross-contract lookup.
+3. **Deprecate Feeder Input**: The trusted feeder should stop calling `set_vc_count`. Any further updates via `set_vc_count` will be successfully written to persistent storage but entirely ignored by `compute_score`.
+4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement `get_active_vc_count`, the `compute_score` transaction will unconditionally fail.
 
 ---
 
