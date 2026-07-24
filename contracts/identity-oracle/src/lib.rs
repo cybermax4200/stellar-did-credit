@@ -1,6 +1,19 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, String, Vec};
 
+// ── Time-To-Live (TTL) constants ─────────────────────────────────────
+//
+// Instance storage entries (Admin) are extended to ~1 year.
+// Persistent entries are extended to ~30 days on every write.
+//
+// Threshold: if remaining TTL drops below this, extend.
+// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+//
+const INST_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const INST_TTL_EXTEND: u32   = 6_307_200;  // ~1 year
+const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+
 /// Error types for the identity-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -70,6 +83,7 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
         Ok(())
     }
 
@@ -81,6 +95,9 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedIssuer(issuer.clone()), &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::TrustedIssuer(issuer.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events()
             .publish((symbol_short!("IssReg"),), issuer);
         Ok(())
@@ -126,6 +143,9 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::DIDDocument(subject.clone()), &did_doc_cid);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::DIDDocument(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
         Ok(())
@@ -170,6 +190,7 @@ impl IdentityOracle {
 
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
+        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events()
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
@@ -194,6 +215,7 @@ impl IdentityOracle {
             updated.push_back(record);
         }
         env.storage().persistent().set(&key, &updated);
+        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         Ok(())
     }
 
@@ -265,6 +287,18 @@ impl IdentityOracle {
             }
         }
         false
+    }
+
+    /// Admin-only maintenance: extend instance storage TTL so critical
+    /// configuration (Admin) does not expire on an idle contract.
+    pub fn maintain_storage(env: Env, admin: Address) -> Result<(), IdentityOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
+        Ok(())
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state

@@ -272,4 +272,99 @@ mod tests {
             score_with_5_vcs
         );
     }
+
+    #[test]
+    fn test_ttl_data_survives_ledger_advance() {
+        let env = Env::default();
+        env.mock_all_auths();
+        use soroban_sdk::testutils::Ledger;
+
+        // 1. Register and initialize all 3 contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // 2. Setup identity data
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&admin, &issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTTLTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[77u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+        assert!(identity.is_verified(&subject));
+
+        // 3. Setup credit data
+        let lender = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
+
+        credit.set_vc_count(&feeder, &subject, &1);
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats { volume_30d: 500_000_000i128, tx_count_30d: 10, avg_counterparties: 3 },
+        );
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+        let score = credit.compute_score(&subject);
+        assert!(score > 300);
+
+        // 4. Setup revocation-registry data (separate from identity-oracle's VCAnchors)
+        revocation.revoke(&issuer, &vc_hash);
+        assert!(revocation.is_revoked(&vc_hash));
+
+        // 5. Call maintain_storage on all 3 contracts to extend instance TTLs
+        identity.maintain_storage(&admin);
+        credit.maintain_storage(&admin);
+        revocation.maintain_storage(&admin);
+
+        // 6. Advance the ledger well past default Soroban TTL (~500K ledgers ≈ 30 days)
+        //    On testnet with default short TTLs this would normally archive entries.
+        //    Because we extended TTLs on every write + maintain_storage, data survives.
+        env.ledger().set_sequence_number(env.ledger().sequence() + 600_000);
+
+        // 7. Verify identity-oracle data is still accessible
+        // The VC is NOT revoked on identity-oracle (only on revocation-registry),
+        // so active count is 1 and is_verified is true.
+        assert!(
+            identity.is_verified(&subject),
+            "is_verified should still work after ledger advance"
+        );
+        assert_eq!(identity.get_vc_count(&subject), 1);
+        assert_eq!(identity.get_active_vc_count(&subject), 1); // not revoked on identity-oracle
+
+        // 8. Verify credit-oracle data is still accessible
+        let stored = credit.get_score(&subject);
+        assert!(
+            stored.is_some(),
+            "score should survive after ledger advance"
+        );
+        let score_record = stored.unwrap();
+        assert!(score_record.score > 300);
+        assert_eq!(score_record.vc_count, 1);
+
+        // 9. Verify revocation-registry data is still accessible
+        assert!(
+            revocation.is_revoked(&vc_hash),
+            "revocation status should survive after ledger advance"
+        );
+
+        // 10. Verify credit-oracle can still compute a fresh score (read + write)
+        let fresh_score = credit.compute_score(&subject);
+        assert!(fresh_score > 300);
+    }
 }

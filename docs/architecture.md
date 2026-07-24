@@ -152,6 +152,72 @@ This will require credit-oracle to store the identity-oracle contract ID and use
 
 ---
 
+## TTL management
+
+Soroban persistent and instance storage entries have a time-to-live (TTL) measured in ledgers. If an entry's TTL expires, the entry is **archived** (removed from storage). To prevent data loss, all three contracts proactively extend TTLs on every write and provide an admin-only `maintain_storage` function for passive maintenance.
+
+### Strategy: hybrid (automatic + maintenance)
+
+1. **Automatic extension on every write** — whenever a contract writes to persistent storage (`set`), it immediately calls `extend_ttl` on that entry. This ensures actively-used data stays alive without any external coordination.
+
+2. **`maintain_storage` admin function** — extends instance storage TTL (Admin, Config, PendingWeights). Can be called periodically by a cron job or manually to protect a contract whose configuration rarely changes.
+
+### TTL constants
+
+| Constant               | Value       | Approximate real time | Scope          |
+| ---------------------- | ----------- | --------------------- | -------------- |
+| `INST_TTL_THRESHOLD`   | 120 960     | ~7 days               | Instance       |
+| `INST_TTL_EXTEND`      | 6 307 200   | ~1 year               | Instance       |
+| `PERS_TTL_THRESHOLD`   | 120 960     | ~7 days               | Persistent     |
+| `PERS_TTL_EXTEND`      | 518 400     | ~30 days              | Persistent     |
+
+> Ledger time is calculated at ≈5 s/ledger (Stellar network average).
+
+### Where TTL is extended
+
+**identity-oracle**
+
+| Operation          | Entry extended                    |
+| ------------------ | --------------------------------- |
+| `initialize`       | Instance storage (Admin)          |
+| `register_issuer`  | `TrustedIssuer(issuer)`           |
+| `anchor_did`       | `DIDDocument(subject)`            |
+| `anchor_vc`        | `VCAnchors(subject)`              |
+| `mark_vc_revoked`  | `VCAnchors(subject)`              |
+| `maintain_storage` | Instance storage                  |
+
+**credit-oracle**
+
+| Operation            | Entry extended                              |
+| -------------------- | ------------------------------------------- |
+| `initialize`         | Instance storage (Admin, Config)            |
+| `register_feeder`    | `TrustedFeeder(feeder)`                     |
+| `register_lender`    | `TrustedLender(lender)`                     |
+| `update_tx_stats`    | `TxStats(subject)`                          |
+| `record_repayment`   | `RepaymentRecord(subject)`                  |
+| `set_vc_count`       | `VcCount(subject)`                          |
+| `compute_score`      | `Score(subject)`, `TxStats(subject)`, `RepaymentRecord(subject)`, `VcCount(subject)` |
+| `maintain_storage`   | Instance storage                            |
+
+**revocation-registry**
+
+| Operation        | Entry extended                             |
+| ---------------- | ------------------------------------------ |
+| `initialize`     | Instance storage (Admin)                   |
+| `revoke`         | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `batch_revoke`   | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `maintain_storage` | Instance storage                         |
+
+### Maintenance recommendations
+
+- Deploy an off-chain cron job (or serverless function) that calls `maintain_storage` on all three contracts at least once every **6 months** (well within the 1‑year instance TTL).
+- No additional action is needed for persistent entries — their TTLs are extended automatically whenever they are written.
+- If an entry has not been touched for more than ~30 days, it may be archived. This is by design: orphaned data can be garbage-collected by the network.
+
+---
+
+## Future work
+
 ## Data flow narrative
 
 ### 1. Subject establishes identity

@@ -1,6 +1,19 @@
 #![no_std]
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
 
+// ── Time-To-Live (TTL) constants ─────────────────────────────────────
+//
+// Instance storage entries (Admin, Config, PendingWeights) are extended to
+// ~1 year. Persistent entries are extended to ~30 days on every write.
+//
+// Threshold: if remaining TTL drops below this, extend.
+// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+//
+const INST_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const INST_TTL_EXTEND: u32   = 6_307_200;  // ~1 year
+const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
@@ -125,6 +138,7 @@ impl CreditOracle {
             repayment_weight: 30,
         };
         env.storage().instance().set(&DataKey::Config, &default_weights);
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
         Ok(())
     }
 
@@ -136,6 +150,11 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TrustedFeeder(feeder.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -160,6 +179,11 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TrustedLender(lender.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -182,7 +206,12 @@ impl CreditOracle {
         if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::TxStats(subject), &stats);
+        env.storage().persistent().set(&DataKey::TxStats(subject.clone()), &stats);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TxStats(subject),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         Ok(())
     }
 
@@ -199,7 +228,12 @@ impl CreditOracle {
             record.on_time_count += 1;
         }
         record.total_count += 1;
-        env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
+        env.storage().persistent().set(&DataKey::RepaymentRecord(subject.clone()), &record);
+        env.storage().persistent().extend_ttl(
+            &DataKey::RepaymentRecord(subject),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         Ok(())
     }
 
@@ -209,7 +243,12 @@ impl CreditOracle {
         if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage().persistent().set(&DataKey::VcCount(subject), &count);
+        env.storage().persistent().set(&DataKey::VcCount(subject.clone()), &count);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VcCount(subject),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         Ok(())
     }
 
@@ -242,7 +281,7 @@ impl CreditOracle {
 
         let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
-        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
+        let score_record = ScoreRecord {
             score,
             last_updated: env.ledger().timestamp(),
             vc_count,
@@ -250,7 +289,30 @@ impl CreditOracle {
                                 .checked_div(repayment.total_count)
                                 .unwrap_or(0),
             tx_volume_30d: tx_stats.volume_30d,
-        });
+        };
+        env.storage().persistent().set(&DataKey::Score(subject.clone()), &score_record);
+        // Also extend TTL for the input data that was read so the score
+        // inputs remain alive alongside the computed score.
+        env.storage().persistent().extend_ttl(
+            &DataKey::Score(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::TxStats(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::RepaymentRecord(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VcCount(subject),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         score
     }
@@ -321,6 +383,19 @@ impl CreditOracle {
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
         env.storage().instance().get(&DataKey::PendingWeights)
+    }
+
+    /// Admin-only maintenance: extend instance storage TTL so critical
+    /// configuration (Admin, Config, pending weights) does not expire
+    /// on an idle contract.
+    pub fn maintain_storage(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
+        Ok(())
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.

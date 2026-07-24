@@ -6,6 +6,16 @@ use soroban_sdk::{
     contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, Vec,
 };
 
+// ── Time-To-Live (TTL) constants ─────────────────────────────────────
+//
+// Instance storage (Admin) is extended to ~1 year.
+// Persistent revocation entries are extended to ~30 days on every write.
+//
+const INST_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const INST_TTL_EXTEND: u32   = 6_307_200;  // ~1 year
+const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -42,6 +52,7 @@ impl RevocationRegistry {
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
         Ok(())
     }
 
@@ -54,6 +65,13 @@ impl RevocationRegistry {
         env.storage()
             .persistent()
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+        // Extend TTL for both revocation entries
+        env.storage()
+            .persistent()
+            .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -77,9 +95,28 @@ impl RevocationRegistry {
             env.storage()
                 .persistent()
                 .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+            // Extend TTL for each revocation entry
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
+        Ok(())
+    }
+
+    /// Admin-only maintenance: extend instance storage TTL so the
+    /// Admin entry does not expire on an idle contract.
+    pub fn maintain_storage(env: Env, admin: Address) -> Result<(), RevocationRegistryError> {
+        let stored_admin: Address = env.storage().instance().get(&RevocationKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(RevocationRegistryError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().extend_ttl(INST_TTL_THRESHOLD, INST_TTL_EXTEND);
         Ok(())
     }
 
