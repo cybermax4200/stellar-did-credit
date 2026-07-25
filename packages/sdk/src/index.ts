@@ -175,6 +175,148 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Revoke a verifiable credential on-chain.
+   *
+   * Submits a single signed transaction that calls `revoke` on the revocation-registry
+   * contract and `mark_vc_revoked` on the identity-oracle contract. Requires the issuer
+   * keypair to authorize both operations.
+   *
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param subjectAddress - Stellar G... address of the credential subject
+   * @param vcHash - SHA-256 hash of the verifiable credential to revoke
+   * @returns Transaction hash on successful submission
+   */
+  async revokeVC(
+    issuerKeypair: Keypair,
+    subjectAddress: string,
+    vcHash: Buffer,
+  ): Promise<string> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
+    const revocationContract = new Contract(this.config.revocationRegistryId);
+    const identityContract = new Contract(this.config.identityOracleId);
+
+    const publicKey = issuerKeypair.publicKey();
+
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
+
+    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+    const issuerScVal = new Address(publicKey).toScVal();
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        revocationContract.call(
+          "revoke",
+          issuerScVal,
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .addOperation(
+        identityContract.call(
+          "mark_vc_revoked",
+          issuerScVal,
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = assembleTransaction(tx, sim).build();
+    preparedTx.sign(issuerKeypair);
+
+    const result = await this.server.sendTransaction(preparedTx);
+    if (result.status !== "PENDING") {
+      throw new Error(`Transaction failed: ${result.errorResult}`);
+    }
+
+    return result.hash;
+  }
+
+  /**
+   * Compute and persist a subject's credit score, then return the stored ScoreRecord.
+   *
+   * Submits a signed transaction to the credit-oracle contract, waits for ledger
+   * confirmation, then fetches the persisted score via `getScore`.
+   *
+   * @param payerKeypair - Stellar keypair paying the transaction fee
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
+   */
+  async computeScore(
+    payerKeypair: Keypair,
+    subjectAddress: string,
+  ): Promise<ScoreRecord> {
+    const contract = new Contract(this.config.creditOracleId);
+
+    const publicKey = payerKeypair.publicKey();
+
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, getSequence(accountData));
+
+    const tx = new TransactionBuilder(sourceAccount, {
+          fee: this.config.baseFee ?? BASE_FEE,
+          networkPassphrase: this.config.networkPassphrase,
+        })
+      .addOperation(
+        contract.call("compute_score", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = assembleTransaction(tx, sim).build();
+    preparedTx.sign(payerKeypair);
+
+    const response = await this.server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
+    }
+
+    await waitForTransactionConfirmation(this.server, response.hash);
+
+    try {
+      const score = await this.getScore(subjectAddress);
+      if (!score) {
+        throw new ScoreNotComputedError(subjectAddress);
+      }
+      return score;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `computeScore transaction succeeded and was confirmed, but fetching the stored score for ${subjectAddress} failed: ${message}`,
+      );
+    }
+  }
+
+  /**
    * Fetch the on-chain ScoreRecord for a subject address from the credit-oracle.
    *
    * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
@@ -343,6 +485,58 @@ function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
   };
+}
+
+function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_scoring_weights returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    vcWeight: Number(raw["vc_weight"]),
+    txWeight: Number(raw["tx_weight"]),
+    repaymentWeight: Number(raw["repayment_weight"]),
+  };
+}
+
+async function waitForTransactionConfirmation(
+  server: SorobanRpc.Server,
+  txHash: string,
+  attempts = 20,
+  delayMs = 1000,
+): Promise<void> {
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const result = await server.getTransaction(txHash);
+
+    switch (result.status) {
+      case "SUCCESS":
+        return;
+      case "FAILED": {
+        const errorDetails = JSON.stringify(result);
+        throw new Error(
+          `computeScore transaction failed for ${txHash}: ${errorDetails}`,
+        );
+      }
+      case "NOT_FOUND":
+      case "PENDING":
+        await sleep(delayMs);
+        break;
+      default:
+        throw new Error(
+          `Unexpected transaction status for ${txHash}: ${String((result as unknown as { status: string }).status)}`,
+        );
+    }
+  }
+
+  throw new Error(
+    `Timed out waiting for computeScore transaction confirmation: ${txHash}`,
+  );
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 export default StellarDIDCreditSDK;

@@ -9,6 +9,8 @@ NETWORK=${NETWORK:-testnet}
 SOURCE=${SOURCE:-deployer}
 DEPLOYMENTS_FILE=${DEPLOYMENTS_FILE:-}
 RESUME=false
+FUND=false
+FRIENDBOT_URL=${FRIENDBOT_URL:-https://friendbot.stellar.org}
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -27,13 +29,17 @@ while [[ $# -gt 0 ]]; do
       NETWORK="$2"
       shift 2
       ;;
+    --fund)
+      FUND=true
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
       exit 1
       ;;
   esac
@@ -51,6 +57,86 @@ fi
 if [[ "$NETWORK" == "mainnet" ]]; then
   echo "Mainnet deployment detected. Ensure the deployer account is funded and the admin key is held in secure offline storage." >&2
 fi
+
+# ---------------------------------------------------------------------------
+# Horizon helpers
+# ---------------------------------------------------------------------------
+
+get_native_balance() {
+  local account="$1"
+  local horizon
+
+  if [[ "$NETWORK" == "testnet" ]]; then
+    horizon="https://horizon-testnet.stellar.org"
+  else
+    horizon="https://horizon.stellar.org"
+  fi
+
+  local response
+  if ! response=$(curl -fsS --max-time 10 "$horizon/accounts/$account"); then
+    echo "0"
+    return
+  fi
+
+  local balance
+  balance=$(printf '%s' "$response" | grep -o '"asset_type":"native"[^}]*"balance":"[^"]*"' | sed -E 's/.*"balance":"([^"]*)".*/\1/')
+  if [[ -z "$balance" ]]; then
+    balance=$(printf '%s' "$response" | grep -o '"balance":"[^"]*"' | head -n1 | sed -E 's/.*"balance":"([^"]*)".*/\1/')
+  fi
+
+  if [[ -z "$balance" ]]; then
+    echo "0"
+  else
+    echo "$balance"
+  fi
+}
+
+is_account_funded() {
+  local balance
+  balance=$(get_native_balance "$1")
+  if [[ "$balance" == "0" || "$balance" == "0.0" || "$balance" == "0.0000000" || -z "$balance" ]]; then
+    return 1
+  fi
+  return 0
+}
+
+fund_deployer() {
+  if [[ "$NETWORK" != "testnet" ]]; then
+    echo "Error: --fund is only supported on testnet." >&2
+    exit 1
+  fi
+
+  if is_account_funded "$DEPLOYER_ADDRESS"; then
+    echo "Deployer already funded: $(get_native_balance "$DEPLOYER_ADDRESS") XLM"
+    return
+  fi
+
+  echo "Requesting funds from Friendbot ($FRIENDBOT_URL)..."
+
+  local attempt=1
+  local max_attempts=3
+  while [[ $attempt -le $max_attempts ]]; do
+    if curl -fsS --max-time 10 "$FRIENDBOT_URL/?addr=$DEPLOYER_ADDRESS" >/dev/null 2>&1; then
+      break
+    fi
+
+    echo "Friendbot request failed (attempt $attempt/$max_attempts). Retrying..."
+    attempt=$((attempt + 1))
+    sleep 2
+  done
+
+  if [[ $attempt -gt $max_attempts ]]; then
+    echo "Error: failed to fund deployer via Friendbot after $max_attempts attempts." >&2
+    exit 1
+  fi
+
+  if ! is_account_funded "$DEPLOYER_ADDRESS"; then
+    echo "Error: Friendbot call succeeded, but deployer balance is still zero." >&2
+    exit 1
+  fi
+
+  echo "Deployer funded successfully: $(get_native_balance "$DEPLOYER_ADDRESS") XLM"
+}
 
 # ---------------------------------------------------------------------------
 # Resume support
@@ -92,6 +178,10 @@ if [[ ! "$DEPLOYER_ADDRESS" =~ ^G[A-Z2-7]{54}$ ]]; then
   exit 1
 fi
 echo "Deployer address: $DEPLOYER_ADDRESS"
+
+if [[ "$FUND" == "true" ]]; then
+  fund_deployer
+fi
 
 # ---------------------------------------------------------------------------
 # Build
