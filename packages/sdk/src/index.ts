@@ -23,6 +23,28 @@ export interface ScoreRecord {
   txVolume30d: bigint;
 }
 
+export interface TxStats {
+  volume30d: bigint;
+  txCount30d: number;
+  avgCounterparties: number;
+}
+
+export interface ScoringWeights {
+  vcWeight: number;
+  txWeight: number;
+  repaymentWeight: number;
+}
+
+export interface RepaymentRecord {
+  onTimeCount: number;
+  totalCount: number;
+}
+
+export interface PendingWeightsRecord {
+  weights: ScoringWeights;
+  effectiveLedger: number;
+}
+
 export interface ProtocolConfig {
   identityOracleId: string;
   creditOracleId: string;
@@ -84,10 +106,9 @@ export class StellarDIDCreditSDK {
     }
 
     // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-      tx,
-      sim,
-    ).build();
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
     preparedTx.sign(subjectKeypair);
 
     // Submit to the network
@@ -158,10 +179,9 @@ export class StellarDIDCreditSDK {
     }
 
     // Apply simulation result and prepare the transaction
-    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
-      tx,
-      sim,
-    ).build();
+    const preparedTx = (SorobanRpc.Api as any)
+      .assembleTransaction(tx, sim)
+      .build();
     preparedTx.sign(issuerKeypair);
 
     // Submit to the network
@@ -320,7 +340,11 @@ export class StellarDIDCreditSDK {
 /** Thrown when get_score is called for an address that has no computed score yet. */
 export class ScoreNotComputedError extends Error {
   constructor(address?: string) {
-    super(address ? `No score computed for address: ${address}` : "Score has not been computed");
+    super(
+      address
+        ? `No score computed for address: ${address}`
+        : "Score has not been computed",
+    );
     this.name = "ScoreNotComputedError";
   }
 }
@@ -329,7 +353,10 @@ export class ScoreNotComputedError extends Error {
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
  * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
  */
-function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+function parseScoreRecord(
+  scVal: xdr.ScVal,
+  subjectAddress: string,
+): ScoreRecord {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
