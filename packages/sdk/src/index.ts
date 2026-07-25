@@ -23,6 +23,27 @@ export interface ScoreRecord {
   txVolume30d: bigint;
 }
 
+export interface TxStats {
+  volume30d: bigint;
+  txCount30d: number;
+  avgCounterparties: number;
+}
+export interface ScoringWeights {
+  vcWeight: number;
+  txWeight: number;
+  repaymentWeight: number;
+}
+export interface RepaymentRecord {
+  onTimeCount: number;
+  totalCount: number;
+}
+export interface VCRecord {
+  vcHash: Buffer;
+  issuer: string;
+  anchoredAt: number;
+  revoked: boolean;
+}
+
 export interface ProtocolConfig {
   identityOracleId: string;
   creditOracleId: string;
@@ -30,6 +51,9 @@ export interface ProtocolConfig {
   networkPassphrase: string;
   rpcUrl: string;
   simAccount: string;
+  timeoutSeconds?: number;
+  maxRetries?: number;
+  baseFee?: string;
 }
 
 export class StellarDIDCreditSDK {
@@ -180,51 +204,65 @@ export class StellarDIDCreditSDK {
    * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
    *
    * @param subjectAddress - Stellar G... address of the subject
-   * @returns Parsed ScoreRecord
-   * @throws {ScoreNotComputedError} If the score has not been computed for this address
+   * @returns Parsed ScoreRecord, or null if the score has not been computed
    */
-  async getScore(subjectAddress: string): Promise<ScoreRecord> {
-    // 1. Create RPC server
+  async getScore(subjectAddress: string): Promise<ScoreRecord | null> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
-
-    // 2. Instantiate the credit-oracle contract
     const contract = new Contract(this.config.creditOracleId);
-
-    // 3. Build a read-only transaction — use a well-known funded account as the fee source
-    //    for simulation; no actual submission occurs.
     const sourceAccount = new Account(this.config.simAccount, "0");
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        contract.call("get_score", new Address(subjectAddress).toScVal()),
-      )
-      .setTimeout(30)
-      .build();
 
-    // 4. Simulate to get the return value without submitting
-    const sim = await server.simulateTransaction(tx);
+    let attempts = 0;
+    const maxAttempts = (this.config.maxRetries ?? 0) + 1;
 
-    if (SorobanRpc.Api.isSimulationError(sim)) {
-      if (sim.error && sim.error.includes("score not computed")) {
-        throw new ScoreNotComputedError();
+    while (attempts < maxAttempts) {
+      const tx = new TransactionBuilder(sourceAccount, {
+        fee: this.config.baseFee || BASE_FEE,
+        networkPassphrase: this.config.networkPassphrase,
+      })
+        .addOperation(
+          contract.call("get_score", new Address(subjectAddress).toScVal()),
+        )
+        .setTimeout(this.config.timeoutSeconds ?? 30)
+        .build();
+
+      const sim = await server.simulateTransaction(tx);
+
+      if (SorobanRpc.Api.isSimulationError(sim)) {
+        if (sim.error && sim.error.includes("score not computed")) {
+          return null;
+        }
+        throw new Error(`Simulation failed: ${sim.error}`);
       }
-      throw new Error(`Simulation failed: ${sim.error}`);
+
+      if (SorobanRpc.Api.isSimulationSuccess(sim)) {
+        const resultScVal = sim.result?.retval;
+        if (!resultScVal) {
+          throw new Error("No return value in simulation result");
+        }
+        return parseScoreRecord(resultScVal, subjectAddress);
+      }
+
+      attempts++;
+      if (attempts < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 500 * attempts));
+      }
     }
 
-    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error("Simulation returned unexpected response");
-    }
+    throw new Error("Simulation returned unexpected response");
+  }
 
-    const resultScVal = sim.result?.retval;
-    if (!resultScVal) {
-      throw new Error("No return value in simulation result");
-    }
-
-    // 5. Parse the ScoreRecord struct.
-    //    Soroban structs are returned as ScMap with symbol keys.
-    return parseScoreRecord(resultScVal, subjectAddress);
+  // Stubs for remaining tests
+  async computeScore(_keypair: any, _subjectAddress: string): Promise<ScoreRecord> {
+    throw new Error("Not implemented");
+  }
+  async getVCCount(_subjectAddress: string): Promise<number> {
+    throw new Error("Not implemented");
+  }
+  async getDIDDocument(_subjectAddress: string): Promise<string | null> {
+    throw new Error("Not implemented");
+  }
+  async revokeVC(_issuerKeypair: any, _subjectAddress: string, _vcHash: Buffer): Promise<string> {
+    throw new Error("Not implemented");
   }
 
   /**
@@ -327,13 +365,13 @@ export class ScoreNotComputedError extends Error {
 
 /**
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
- * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
+ * Returns the ScoreRecord if Some, returns null if None.
  */
-function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord | null {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
-    throw new ScoreNotComputedError(subjectAddress);
+    return null;
   }
   const raw = native as Record<string, unknown>;
   return {
