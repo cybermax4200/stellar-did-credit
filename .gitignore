@@ -21,3 +21,7 @@ Thumbs.db
 .idea
 # Deployment artifacts
 # deployments.testnet.json  (tracked in repo)
+
+# Generated API documentation (produced by cargo doc / typedoc)
+target/doc/
+docs/api/

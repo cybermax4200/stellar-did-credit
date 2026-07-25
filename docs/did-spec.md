@@ -198,7 +198,7 @@ DID document at any time by calling `anchor_did` again.
 
 ### 3.4 Deactivate
 
-1. The subject calls a deactivation function (to be implemented) or anchors a null/empty CID to indicate deactivation.
+1. The subject calls `deactivate_did(subject)`. This removes the anchored DID Document CID from storage and revokes all active verifiable credentials for the subject. A `DIDDeact` event is emitted.
 
 ## 4. Security Considerations
 

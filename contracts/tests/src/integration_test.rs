@@ -10,6 +10,112 @@ mod tests {
     };
 
     #[test]
+    fn test_pause_unpause_blocks_writes_and_allows_reads() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmPauseTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[77u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+
+        identity.pause(&admin).unwrap();
+
+        let paused_anchor = identity.try_anchor_did(&subject, &cid);
+        assert_eq!(
+            paused_anchor,
+            Err(Ok(identity_oracle::IdentityOracleError::ContractPaused))
+        );
+
+        let paused_vc = identity.try_anchor_vc(&issuer, &subject, &vc_hash);
+        assert_eq!(
+            paused_vc,
+            Err(Ok(identity_oracle::IdentityOracleError::ContractPaused))
+        );
+
+        assert!(identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&feeder);
+
+        let paused_tx_stats = credit.try_update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 100_000_000i128,
+                tx_count_30d: 2,
+                avg_counterparties: 1,
+            },
+        );
+        assert_eq!(
+            paused_tx_stats,
+            Err(Ok(credit_oracle::CreditOracleError::ContractPaused))
+        );
+
+        let paused_score = credit.try_compute_score(&subject);
+        assert_eq!(
+            paused_score,
+            Err(Ok(credit_oracle::CreditOracleError::ContractPaused))
+        );
+
+        let weights = credit.get_scoring_weights();
+        assert_eq!(weights.vc_weight, 40);
+        assert_eq!(weights.tx_weight, 30);
+        assert_eq!(weights.repayment_weight, 30);
+
+        credit.unpause(&admin).unwrap();
+        let resumed = credit.try_update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 100_000_000i128,
+                tx_count_30d: 2,
+                avg_counterparties: 1,
+            },
+        );
+        assert!(resumed.is_ok());
+
+        let paused_revocation = revocation.try_revoke(&issuer, &vc_hash);
+        assert_eq!(
+            paused_revocation,
+            Err(Ok(revocation_registry::RevocationRegistryError::ContractPaused))
+        );
+
+        assert!(revocation.is_revoked(&vc_hash) == false);
+
+        revocation.pause(&admin).unwrap();
+        let paused_batch = revocation.try_batch_revoke(&issuer, &soroban_sdk::Vec::from_array(&env, [vc_hash.clone()]));
+        assert_eq!(
+            paused_batch,
+            Err(Ok(revocation_registry::RevocationRegistryError::ContractPaused))
+        );
+
+        assert!(!revocation.is_revoked(&vc_hash));
+    }
+
+    #[test]
     fn test_full_protocol_flow() {
         // 1. Create Env with mock_all_auths
         let env = Env::default();
@@ -37,6 +143,9 @@ mod tests {
         let subject = soroban_sdk::Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
+
+        let retrieved_cid = identity.get_did_document(&subject).expect("DID doc should exist");
+        assert_eq!(retrieved_cid, cid);
 
         // 5. Call anchor_vc for the subject with a test hash
         let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
@@ -230,7 +339,7 @@ mod tests {
         assert!(identity.is_verified(&subject));
 
         // Revoke via revocation-registry
-        revocation.revoke(&issuer, &vc_hash);
+        revocation.revoke(&issuer, &subject, &vc_hash);
 
         // Verify that is_revoked returns true on the registry
         assert!(revocation.is_revoked(&vc_hash));
@@ -263,16 +372,17 @@ mod tests {
         // Two different issuers
         let issuer_a = soroban_sdk::Address::generate(&env);
         let issuer_b = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
 
         // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
         let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
 
         // First revoke by issuer_a registers the authority.
-        revocation.revoke(&issuer_a, &vc_hash);
+        revocation.revoke(&issuer_a, &subject, &vc_hash);
         assert!(revocation.is_revoked(&vc_hash));
 
         // Second revoke by issuer_b must fail.
-        let res = revocation.try_revoke(&issuer_b, &vc_hash);
+        let res = revocation.try_revoke(&issuer_b, &subject, &vc_hash);
         assert_eq!(
             res,
             Err(Ok(
@@ -488,13 +598,14 @@ mod tests {
 
         let issuer1 = soroban_sdk::Address::generate(&env);
         let issuer2 = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
 
         let hash1 = BytesN::from_array(&env, &[1u8; 32]);
         let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
         let hash3 = BytesN::from_array(&env, &[3u8; 32]);
 
         // issuer2 revokes hash2 individually to claim authority
-        revocation.revoke(&issuer2, &hash2);
+        revocation.revoke(&issuer2, &subject, &hash2);
         assert!(revocation.is_revoked(&hash2));
 
         // Create a batch with mixed hashes
@@ -505,15 +616,70 @@ mod tests {
 
         // issuer1 attempts to batch revoke the hashes
         let res = revocation.try_batch_revoke(&issuer1, &batch);
-        
+
         // Assert the call failed with IssuerMismatch
         assert_eq!(
             res,
-            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+            Err(Ok(
+                revocation_registry::RevocationRegistryError::IssuerMismatch
+            ))
         );
 
         // Verify that hash1 and hash3 were NOT revoked (atomicity check)
         assert!(!revocation.is_revoked(&hash1));
         assert!(!revocation.is_revoked(&hash3));
+    }
+
+    #[test]
+    fn test_revocation_registry_count_and_list_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 0);
+        assert_eq!(revocation.get_revocation_count(&issuer2), 0);
+        assert_eq!(revocation.list_revoked(&issuer1, &0, &10).len(), 0);
+
+        // 1. Single revocation by issuer1
+        let hash_a = BytesN::from_array(&env, &[101u8; 32]);
+        revocation.revoke(&issuer1, &hash_a);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 1);
+        let list1 = revocation.list_revoked(&issuer1, &0, &10);
+        assert_eq!(list1.len(), 1);
+        assert_eq!(list1.get(0).unwrap(), hash_a);
+
+        // 2. Batch revocation by issuer1
+        let hash_b = BytesN::from_array(&env, &[102u8; 32]);
+        let hash_c = BytesN::from_array(&env, &[103u8; 32]);
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash_b.clone());
+        batch.push_back(hash_c.clone());
+        revocation.batch_revoke(&issuer1, &batch);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
+        let list1_all = revocation.list_revoked(&issuer1, &0, &10);
+        assert_eq!(list1_all.len(), 3);
+        assert_eq!(list1_all.get(0).unwrap(), hash_a);
+        assert_eq!(list1_all.get(1).unwrap(), hash_b);
+        assert_eq!(list1_all.get(2).unwrap(), hash_c);
+
+        // 3. Single revocation by issuer2
+        let hash_d = BytesN::from_array(&env, &[104u8; 32]);
+        revocation.revoke(&issuer2, &hash_d);
+
+        assert_eq!(revocation.get_revocation_count(&issuer2), 1);
+        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
+        let list2 = revocation.list_revoked(&issuer2, &0, &10);
+        assert_eq!(list2.len(), 1);
+        assert_eq!(list2.get(0).unwrap(), hash_d);
     }
 }

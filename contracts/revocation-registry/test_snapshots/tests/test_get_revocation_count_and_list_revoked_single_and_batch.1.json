@@ -5,6 +5,32 @@
   },
   "auth": [
     [],
+    [],
+    [],
+    [
+      [
+        "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+        {
+          "function": {
+            "contract_fn": {
+              "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+              "function_name": "revoke",
+              "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+                }
+              ]
+            }
+          },
+          "sub_invocations": []
+        }
+      ]
+    ],
+    [],
+    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -20,19 +46,13 @@
                 {
                   "vec": [
                     {
-                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                     },
                     {
-                      "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                     },
                     {
-                      "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
-                    },
-                    {
-                      "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
-                    },
-                    {
-                      "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                     }
                   ]
                 }
@@ -69,7 +89,7 @@
                   "symbol": "IssuerOfVC"
                 },
                 {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                 }
               ]
             },
@@ -89,7 +109,7 @@
                       "symbol": "IssuerOfVC"
                     },
                     {
-                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                     }
                   ]
                 },
@@ -114,7 +134,7 @@
                   "symbol": "IssuerOfVC"
                 },
                 {
-                  "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                 }
               ]
             },
@@ -134,7 +154,7 @@
                       "symbol": "IssuerOfVC"
                     },
                     {
-                      "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                     }
                   ]
                 },
@@ -159,7 +179,7 @@
                   "symbol": "IssuerOfVC"
                 },
                 {
-                  "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                 }
               ]
             },
@@ -179,7 +199,7 @@
                       "symbol": "IssuerOfVC"
                     },
                     {
-                      "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                     }
                   ]
                 },
@@ -204,7 +224,7 @@
                   "symbol": "IssuerOfVC"
                 },
                 {
-                  "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                 }
               ]
             },
@@ -224,7 +244,7 @@
                       "symbol": "IssuerOfVC"
                     },
                     {
-                      "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                     }
                   ]
                 },
@@ -246,10 +266,10 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "IssuerOfVC"
+                  "symbol": "IssuerRevokedList"
                 },
                 {
-                  "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                 }
               ]
             },
@@ -266,16 +286,29 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "IssuerOfVC"
+                      "symbol": "IssuerRevokedList"
                     },
                     {
-                      "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                  "vec": [
+                    {
+                      "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
+                    },
+                    {
+                      "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
+                    },
+                    {
+                      "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
+                    },
+                    {
+                      "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
+                    }
+                  ]
                 }
               }
             },
@@ -294,7 +327,7 @@
                   "symbol": "RegisteredVCIssuer"
                 },
                 {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                 }
               ]
             },
@@ -314,7 +347,7 @@
                       "symbol": "RegisteredVCIssuer"
                     },
                     {
-                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                     }
                   ]
                 },
@@ -339,7 +372,7 @@
                   "symbol": "RegisteredVCIssuer"
                 },
                 {
-                  "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                 }
               ]
             },
@@ -359,7 +392,7 @@
                       "symbol": "RegisteredVCIssuer"
                     },
                     {
-                      "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                     }
                   ]
                 },
@@ -384,7 +417,7 @@
                   "symbol": "RegisteredVCIssuer"
                 },
                 {
-                  "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                 }
               ]
             },
@@ -404,7 +437,7 @@
                       "symbol": "RegisteredVCIssuer"
                     },
                     {
-                      "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                     }
                   ]
                 },
@@ -429,7 +462,7 @@
                   "symbol": "RegisteredVCIssuer"
                 },
                 {
-                  "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                 }
               ]
             },
@@ -449,52 +482,7 @@
                       "symbol": "RegisteredVCIssuer"
                     },
                     {
-                      "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "RegisteredVCIssuer"
-                },
-                {
-                  "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "RegisteredVCIssuer"
-                    },
-                    {
-                      "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                     }
                   ]
                 },
@@ -519,7 +507,7 @@
                   "symbol": "Status"
                 },
                 {
-                  "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                 }
               ]
             },
@@ -539,7 +527,7 @@
                       "symbol": "Status"
                     },
                     {
-                      "bytes": "0000000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a"
                     }
                   ]
                 },
@@ -564,7 +552,7 @@
                   "symbol": "Status"
                 },
                 {
-                  "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                 }
               ]
             },
@@ -584,7 +572,7 @@
                       "symbol": "Status"
                     },
                     {
-                      "bytes": "0100000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1414141414141414141414141414141414141414141414141414141414141414"
                     }
                   ]
                 },
@@ -609,7 +597,7 @@
                   "symbol": "Status"
                 },
                 {
-                  "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                 }
               ]
             },
@@ -629,7 +617,7 @@
                       "symbol": "Status"
                     },
                     {
-                      "bytes": "0200000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e"
                     }
                   ]
                 },
@@ -654,7 +642,7 @@
                   "symbol": "Status"
                 },
                 {
-                  "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
+                  "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                 }
               ]
             },
@@ -674,52 +662,7 @@
                       "symbol": "Status"
                     },
                     {
-                      "bytes": "0300000000000000000000000000000000000000000000000000000000000000"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "bool": true
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          518400
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
-                  "symbol": "Status"
-                },
-                {
-                  "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "Status"
-                    },
-                    {
-                      "bytes": "0400000000000000000000000000000000000000000000000000000000000000"
+                      "bytes": "2828282828282828282828282828282828282828282828282828282828282828"
                     }
                   ]
                 },
@@ -788,6 +731,39 @@
                 "key": {
                   "ledger_key_nonce": {
                     "nonce": 801925984706572462
+                  }
+                },
+                "durability": "temporary",
+                "val": "void"
+              }
+            },
+            "ext": "v0"
+          },
+          6311999
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+            "key": {
+              "ledger_key_nonce": {
+                "nonce": 5541220902715666415
+              }
+            },
+            "durability": "temporary"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
+                "key": {
+                  "ledger_key_nonce": {
+                    "nonce": 5541220902715666415
                   }
                 },
                 "durability": "temporary",
