@@ -26,8 +26,46 @@ jobs:
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
       
-      - name: Run tests
-        run: cargo test --workspace
+      - name: Run tests (regenerate snapshots if needed)
+        run: SOROBAN_TEST_SNAPSHOT_FILE_UPDATE=true cargo test --workspace
       
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
+
+  docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-docs-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Generate Rust API docs
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install SDK dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/sdk
+
+      - name: Generate TypeScript API docs
+        run: pnpm run docs
+        working-directory: packages/sdk

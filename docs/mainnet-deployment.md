@@ -6,13 +6,57 @@ This guide covers the planning, security, and operational requirements for deplo
 
 ## Table of contents
 
+- [Mainnet deployment workflow](#mainnet-deployment-workflow)
 - [Pre-deployment security checklist](#pre-deployment-security-checklist)
 - [Admin key ceremony](#admin-key-ceremony)
 - [Initial scoring weight configuration](#initial-scoring-weight-configuration)
 - [Feeder and lender onboarding](#feeder-and-lender-onboarding)
 - [Contract upgrade path](#contract-upgrade-path)
 - [Monitoring and observability](#monitoring-and-observability)
+- [Post-deployment verification](#post-deployment-verification)
 - [Incident response](#incident-response)
+
+---
+
+## Mainnet deployment workflow
+
+Treat mainnet deployment as a controlled operations exercise. The deployment order below keeps the process auditable and minimizes the chance of an irreversible mistake.
+
+1. Prepare the deployer and admin identities.
+   - Use a dedicated funded deployer account for the network transaction.
+   - Use a separate admin account for contract governance. The admin should be a hardware wallet address or a multi-sig account.
+   - Keep the deployer key offline except when broadcasting transactions.
+2. Complete the pre-deployment checklist.
+   - Confirm the security audit is complete, the code is pinned, and the deployment artifact is reproducible.
+   - Review the initial scoring weights and the timelock window before deployment.
+3. Deploy the contracts.
+   - Run the deployment script with the target network set explicitly:
+     `NETWORK=mainnet bash scripts/deploy.sh --resume`
+   - The script writes the deployment addresses to `deployments.mainnet.json` and preserves previously deployed contracts when resumed.
+4. Configure the live deployment.
+   - Record the three contract addresses, the admin account, and the WASM hashes in a protected runbook.
+   - Register the initial issuers, feeders, and lenders only after the admin approval path has been verified.
+5. Verify the deployment.
+   - Confirm the deployment file contains the expected contract addresses.
+   - Verify that contracts respond and that the admin and scoring weights are set as intended.
+   - Watch for unusual score changes or failed contract calls during the first 24 hours.
+
+### Multi-sig requirements for admin actions
+
+Any admin operation that changes governance, upgrades the contract, or registers or deregisters issuers, feeders, or lenders must require an explicit approval flow. A single operator key should never be sufficient. The recommended path is:
+
+- A 2-of-3 or 3-of-5 multi-signature setup using Stellar native multisig if available
+- Hardware wallet signers for the privileged keys
+- A documented sign-off sequence and emergency contact list for every change
+
+### Rollback and recovery
+
+If deployment or initialization produces the wrong state:
+
+1. Stop all further admin actions immediately and preserve the deployment record and previous WASM hash.
+2. If the issue is caused by a bad upgrade or initialization, revert to the last known-good WASM hash using the documented upgrade path.
+3. If a key is compromised or the deployer account becomes unusable, use the recovery runbook to rotate the admin or deployer path and notify stakeholders.
+4. Keep a written timeline of the issue, the mitigation, and the final recovery state so the incident can be reviewed later.
 
 ---
 
@@ -590,6 +634,19 @@ After any P1 or P0 incident:
    - What improvements prevent recurrence
 3. Assign action items (e.g., "add monitoring for metric X", "document runbook for scenario Y")
 4. Share the post-mortem with the community (redacting if necessary)
+
+---
+
+## Post-deployment verification
+
+Once the deployment completes, verify the live state before opening the protocol to production traffic.
+
+1. Confirm that the deployment artifact contains the expected contract addresses for the network in use.
+2. Verify that the admin account is the intended hardware wallet or multi-signature address, not the deployer key.
+3. Confirm the initial scoring weights are set to the agreed values and remain unchanged until the governance timelock completes.
+4. Check that the initial issuer, feeder, and lender registrations are present and that the owner/admin approval path is documented.
+5. Record the deployed contract IDs, admin address, and the initial WASM hashes in the operations runbook and distribute them to the on-call team.
+6. Keep monitoring and alerting active for the first 24 hours, because mainnet issues often surface immediately after launch.
 
 ---
 

@@ -8,3 +8,4 @@ soroban-sdk = { workspace = true, features = ["testutils"] }
 identity-oracle = { path = "../identity-oracle" }
 credit-oracle = { path = "../credit-oracle" }
 revocation-registry = { path = "../revocation-registry" }
+governance = { path = "../governance" }
