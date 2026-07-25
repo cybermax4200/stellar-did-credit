@@ -24,9 +24,9 @@ npm install
 
 ```bash
 ISSUER_SECRET=YOUR_ISSUER_SECRET_KEY \
-IDENTITY_ORACLE_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
-CREDIT_ORACLE_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
-REVOCATION_REG_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+IDENTITY_ORACLE_ID=C... \
+CREDIT_ORACLE_ID=C... \
+REVOCATION_REG_ID=C... \
 npm run issue -- \
   --subject GSUBJECTADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
   --kyc-level basic \
@@ -35,17 +35,17 @@ npm run issue -- \
 
 ### Environment variables
 
-| Variable             | Required | Default                           | Description |
-| -------------------- | -------- | --------------------------------- | ----------- |
-| `ISSUER_SECRET`      | Yes      | —                                 | Secret key of the registered issuer |
-| `IDENTITY_ORACLE_ID` | Yes      | Placeholder C...                  | identity-oracle contract address |
-| `CREDIT_ORACLE_ID`   | Yes      | Placeholder C...                  | credit-oracle contract address |
-| `REVOCATION_REG_ID`  | Yes      | Placeholder C...                  | revocation-registry contract address |
-| `NETWORK_PASSPHRASE` | No       | Stellar testnet passphrase        | Set to mainnet passphrase for mainnet |
+| Variable             | Required | Default                               | Description |
+| -------------------- | -------- | ------------------------------------- | ----------- |
+| `ISSUER_SECRET`      | Yes      | —                                     | Secret key of the registered issuer |
+| `IDENTITY_ORACLE_ID` | Yes      | —                                     | identity-oracle contract address |
+| `CREDIT_ORACLE_ID`   | Yes      | —                                     | credit-oracle contract address |
+| `REVOCATION_REG_ID`  | Yes      | —                                     | revocation-registry contract address |
+| `NETWORK_PASSPHRASE` | No       | Stellar testnet passphrase            | Set to mainnet passphrase for mainnet |
 | `RPC_URL`            | No       | `https://soroban-testnet.stellar.org` | Soroban RPC endpoint |
-| `SIM_ACCOUNT`        | No       | Well-known funded testnet address | Fee source for read-only simulations |
+| `SIM_ACCOUNT`        | No       | Well-known funded testnet address     | Fee source for read-only simulations |
 
-Contract addresses for the current testnet deployment are in [deployments.testnet.json](../../deployments.testnet.json).
+The script exits immediately with a clear error message if any required variable is missing. Contract addresses for the current testnet deployment are in [deployments.testnet.json](../../deployments.testnet.json).
 
 ## What the script does
 
