@@ -3,7 +3,8 @@
 //!
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    IntoVal, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,6 +59,8 @@ pub enum RevocationKey {
     Admin,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
+    /// Identity-oracle contract ID for callback sync.
+    IdentityOracleId,
 
     /// Registered authority (first issuer) for a VC hash.
     /// vc_hash → Address
@@ -85,17 +88,33 @@ impl RevocationRegistry {
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    /// Set the identity-oracle contract ID for revocation callbacks.
+    pub fn set_identity_oracle(
+        env: Env,
+        identity_oracle_id: Address,
+    ) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&RevocationKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(
-        env: Env,
-        new_admin: Address,
-    ) -> Result<(), RevocationRegistryError> {
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), RevocationRegistryError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::PendingAdmin, &new_admin);
@@ -117,7 +136,9 @@ impl RevocationRegistry {
         }
 
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::Admin, &new_admin);
@@ -131,6 +152,7 @@ impl RevocationRegistry {
     pub fn revoke(
         env: Env,
         issuer: Address,
+        subject: Address,
         vc_hash: BytesN<32>,
     ) -> Result<(), RevocationRegistryError> {
         issuer.require_auth();
@@ -160,6 +182,24 @@ impl RevocationRegistry {
         env.storage()
             .persistent()
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+
+        if let Some(identity_oracle_id) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&RevocationKey::IdentityOracleId)
+        {
+            env.invoke_contract::<()>(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "mark_vc_revoked"),
+                soroban_sdk::vec![
+                    &env,
+                    issuer.into_val(&env),
+                    subject.into_val(&env),
+                    vc_hash.clone().into_val(&env)
+                ],
+            );
+        }
+
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -234,7 +274,9 @@ impl RevocationRegistry {
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -253,10 +295,11 @@ mod tests {
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
 
         assert!(!client.is_revoked(&vc_hash));
-        client.revoke(&issuer, &vc_hash);
+        client.revoke(&issuer, &subject, &vc_hash);
         assert!(client.is_revoked(&vc_hash));
     }
 
@@ -279,14 +322,15 @@ mod tests {
 
         let issuer_a = Address::generate(&env);
         let issuer_b = Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
 
         // First revoke registers issuer_a for this vc_hash.
-        client.revoke(&issuer_a, &vc_hash);
-        client.revoke(&issuer_a, &vc_hash);
+        client.revoke(&issuer_a, &subject, &vc_hash);
+        client.revoke(&issuer_a, &subject, &vc_hash);
 
         // issuer_b must not be able to revoke the same hash.
-        let res = client.try_revoke(&issuer_b, &vc_hash);
+        let res = client.try_revoke(&issuer_b, &subject, &vc_hash);
         assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
@@ -407,14 +451,15 @@ mod tests {
             let client = RevocationRegistryClient::new(&env, &contract_id);
 
             let issuer = Address::generate(&env);
+            let subject = Address::generate(&env);
             let vc_hash = BytesN::from_array(&env, &hash_bytes);
 
-            let result = client.try_revoke(&issuer, &vc_hash);
+            let result = client.try_revoke(&issuer, &subject, &vc_hash);
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
 
             // Revoking the same hash again should be idempotent
-            let result = client.try_revoke(&issuer, &vc_hash);
+            let result = client.try_revoke(&issuer, &subject, &vc_hash);
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
         }

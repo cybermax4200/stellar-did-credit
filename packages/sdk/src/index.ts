@@ -326,7 +326,12 @@ export class StellarDIDCreditSDK {
           networkPassphrase: this.config.networkPassphrase,
         })
       .addOperation(
-        revocationContract.call("revoke", issuerScVal, hashScVal),
+        revocationContract.call(
+          "revoke",
+          issuerScVal,
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
       )
       .addOperation(
         identityContract.call(

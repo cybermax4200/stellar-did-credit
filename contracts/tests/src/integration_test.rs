@@ -230,7 +230,7 @@ mod tests {
         assert!(identity.is_verified(&subject));
 
         // Revoke via revocation-registry
-        revocation.revoke(&issuer, &vc_hash);
+        revocation.revoke(&issuer, &subject, &vc_hash);
 
         // Verify that is_revoked returns true on the registry
         assert!(revocation.is_revoked(&vc_hash));
@@ -263,16 +263,17 @@ mod tests {
         // Two different issuers
         let issuer_a = soroban_sdk::Address::generate(&env);
         let issuer_b = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
 
         // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
         let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
 
         // First revoke by issuer_a registers the authority.
-        revocation.revoke(&issuer_a, &vc_hash);
+        revocation.revoke(&issuer_a, &subject, &vc_hash);
         assert!(revocation.is_revoked(&vc_hash));
 
         // Second revoke by issuer_b must fail.
-        let res = revocation.try_revoke(&issuer_b, &vc_hash);
+        let res = revocation.try_revoke(&issuer_b, &subject, &vc_hash);
         assert_eq!(
             res,
             Err(Ok(
@@ -488,13 +489,14 @@ mod tests {
 
         let issuer1 = soroban_sdk::Address::generate(&env);
         let issuer2 = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
 
         let hash1 = BytesN::from_array(&env, &[1u8; 32]);
         let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
         let hash3 = BytesN::from_array(&env, &[3u8; 32]);
 
         // issuer2 revokes hash2 individually to claim authority
-        revocation.revoke(&issuer2, &hash2);
+        revocation.revoke(&issuer2, &subject, &hash2);
         assert!(revocation.is_revoked(&hash2));
 
         // Create a batch with mixed hashes
@@ -505,11 +507,13 @@ mod tests {
 
         // issuer1 attempts to batch revoke the hashes
         let res = revocation.try_batch_revoke(&issuer1, &batch);
-        
+
         // Assert the call failed with IssuerMismatch
         assert_eq!(
             res,
-            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+            Err(Ok(
+                revocation_registry::RevocationRegistryError::IssuerMismatch
+            ))
         );
 
         // Verify that hash1 and hash3 were NOT revoked (atomicity check)
