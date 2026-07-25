@@ -43,6 +43,27 @@ fn require_admin(env: &Env) -> Address {
 const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
 const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
 
+/// Probes `target` by calling `is_revoked` with a dummy all-zero hash.
+///
+/// Storing a revocation registry ID without checking it first means the
+/// mistake only surfaces later, opaquely, the first time `is_revoked` is
+/// actually needed to check a real VC. Calling it here instead — with a
+/// throwaway hash, since the return value doesn't matter, only whether the
+/// call succeeds against the expected interface — catches a non-contract or
+/// mismatched-interface address at configuration time instead.
+fn probe_revocation_registry(env: &Env, target: &Address) -> bool {
+    let dummy_hash = BytesN::from_array(env, &[0u8; 32]);
+    let result: Result<
+        Result<bool, soroban_sdk::ConversionError>,
+        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
+    > = env.try_invoke_contract(
+        target,
+        &soroban_sdk::Symbol::new(env, "is_revoked"),
+        soroban_sdk::vec![env, dummy_hash.into_val(env)],
+    );
+    matches!(result, Ok(Ok(_)))
+}
+
 /// Error types for the identity-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -61,13 +82,16 @@ pub enum IdentityOracleError {
     DuplicateVC = 6,
     /// No matching VC record was found for the given hash/issuer.
     VCNotFound = 7,
+    /// The provided address did not respond to a probe call matching the
+    /// revocation registry's expected interface (is_revoked).
+    InvalidRevocationRegistry = 8,
 }
 
 /// Storage key variants for the identity-oracle contract.
 #[contracttype]
 pub enum DataKey {
     /// The contract administrator address.
-    Admin,
+    Admin,https://github.com/cybermax4200/stellar-did-credit/pull/377/conflict?name=CHANGELOG.md&ancestor_oid=ba1fef79c860d373cad24bb0fcfd7890f6448eef&base_oid=95fb270e37da9e05b5ba24695e50e9488eba1d30&head_oid=204e6c6baf21f2a6391b6f7694590acb9ac728d7
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
     /// Append-only index of every address ever registered as a trusted
@@ -89,6 +113,10 @@ pub enum DataKey {
     VCAnchors(Address),
     /// The ID of the revocation registry contract.
     RevocationRegistryId,
+    /// Whether the given subject has deactivated their identity. Present and
+    /// `true` while deactivated; removed on reactivation. Absent means
+    /// active (never deactivated, or reactivated since).
+    Deactivated(Address),
     /// Issuer trust multiplier in basis points (100 = 1×). Defaults to 100 when unset.
     IssuerTier(Address),
     /// Credential type label for a subject's anchored VC hash.
@@ -202,6 +230,9 @@ impl IdentityOracle {
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
         require_admin(&env);
+        if !probe_revocation_registry(&env, &registry_id) {
+            return Err(IdentityOracleError::InvalidRevocationRegistry);
+        }
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
@@ -406,8 +437,93 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Deactivates a subject's identity: revokes every currently non-revoked
+    /// VC anchored for them and marks them deactivated. On-chain data can't
+    /// be deleted, so this is the opt-out mechanism — once deactivated,
+    /// `is_verified` returns false regardless of any VC anchored before or
+    /// after this call, and the credit-oracle's cross-contract scoring path
+    /// floors the subject's score.
+    ///
+    /// Auth: the subject themselves, same as `anchor_did` — this contract
+    /// treats subjects as first-class principals over their own data, not
+    /// something only an issuer or admin can act on.
+    ///
+    /// Reversible via `reactivate_identity`, but reactivation does not
+    /// restore the VCs revoked here — matching the rest of this contract,
+    /// where revocation is a one-way action; a reactivated subject needs
+    /// their issuers to anchor fresh credentials.
+    ///
+    /// Idempotent: calling this again on an already-deactivated subject
+    /// simply revokes whatever (if anything) is still unrevoked and returns
+    /// that count, which is 0 once nothing is left to revoke.
+    ///
+    /// Returns the number of VCs actually revoked by this call.
+    pub fn deactivate_identity(env: Env, subject: Address) -> Result<u32, IdentityOracleError> {
+        subject.require_auth();
+
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut revoked_count: u32 = 0;
+        let mut updated = Vec::new(&env);
+        for mut record in anchors.iter() {
+            if !record.revoked {
+                record.revoked = true;
+                revoked_count += 1;
+            }
+            updated.push_back(record);
+        }
+        env.storage().persistent().set(&key, &updated);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deactivated(subject.clone()), &true);
+
+        env.events()
+            .publish((symbol_short!("Deactiv"),), (subject, revoked_count));
+        Ok(revoked_count)
+    }
+
+    /// Reverses a prior `deactivate_identity` call: `is_verified` and the
+    /// credit-oracle's score floor no longer apply. Does not un-revoke the
+    /// VCs that were revoked at deactivation time (see `deactivate_identity`
+    /// docs) — a reactivated subject starts with zero active VCs until
+    /// issuers anchor new ones.
+    ///
+    /// Auth: the subject themselves. A no-op (not an error) if the subject
+    /// wasn't deactivated to begin with.
+    pub fn reactivate_identity(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
+        subject.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Deactivated(subject));
+        Ok(())
+    }
+
+    /// Whether `subject` has deactivated their identity via
+    /// `deactivate_identity` (and not since reactivated). Exposed so
+    /// credit-oracle can check this cross-contract before computing a score.
+    pub fn is_deactivated(env: Env, subject: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject))
+            .unwrap_or(false)
+    }
+
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
     pub fn is_verified(env: Env, subject: Address) -> bool {
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
             .storage()

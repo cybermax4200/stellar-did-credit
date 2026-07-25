@@ -35,6 +35,23 @@ fn require_admin(env: &Env) -> Address {
     admin
 }
 
+/// Probes `target` by calling `get_active_vc_count` with `probe_subject`
+/// (the admin's own address is a harmless choice — the call is read-only and
+/// the returned count is discarded).
+///
+/// Storing an identity-oracle ID without checking it first means the mistake
+/// only surfaces later, opaquely, the first time `compute_score` tries the
+/// cross-contract VC count lookup. Probing here instead catches a
+/// non-contract or mismatched-interface address at configuration time.
+fn probe_identity_oracle(env: &Env, target: &Address, probe_subject: &Address) -> bool {
+    let args: SorobanVec<Val> = SorobanVec::from_array(env, [probe_subject.clone().into_val(env)]);
+    let result: Result<
+        Result<u32, soroban_sdk::ConversionError>,
+        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
+    > = env.try_invoke_contract(target, &Symbol::new(env, "get_active_vc_count"), args);
+    matches!(result, Ok(Ok(_)))
+}
+
 /// Load the stored admin address and call `require_auth()` on it, or check
 /// that `caller` is a registered governor.
 ///
@@ -85,6 +102,9 @@ pub enum CreditOracleError {
     NoPendingAdmin = 6,
     /// Score was computed too recently for this subject.
     ComputeCooldownActive = 7,
+    /// The provided address did not respond to a probe call matching the
+    /// identity-oracle's expected interface (get_active_vc_count).
+    InvalidIdentityOracle = 8,
 }
 
 /// Storage keys for the credit oracle contract
@@ -585,6 +605,14 @@ impl CreditOracle {
     /// Calls are rate-limited per subject by `ComputeCooldownLedgers`. The
     /// default is one ledger, preventing repeated same-ledger refreshes from
     /// gaming the persisted `last_updated` timestamp.
+    ///
+    /// # Deactivated identities
+    ///
+    /// When `IdentityOracleId` is configured, a subject who has deactivated
+    /// their identity there (opted out) always gets a floored `MIN_SCORE`
+    /// here, regardless of their real `TxStats`/`RepaymentRecord` — this
+    /// check only runs when the cross-contract link is configured, since
+    /// without it there's no way to know about the deactivation at all.
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
         let current_ledger = env.ledger().sequence();
         let cooldown: u32 = env
@@ -602,6 +630,38 @@ impl CreditOracle {
                 if current_ledger < last_ledger.saturating_add(cooldown) {
                     return Err(CreditOracleError::ComputeCooldownActive);
                 }
+            }
+        }
+
+        // A deactivated identity (opted out via identity-oracle's
+        // deactivate_identity) always floors to MIN_SCORE, bypassing the
+        // usual inputs entirely — this only applies when the cross-contract
+        // identity-oracle link is configured; without it there's no way to
+        // know a subject deactivated their identity there.
+        if let Some(identity_id) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::IdentityOracleId)
+        {
+            let args: SorobanVec<Val> =
+                SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
+            let deactivated: bool =
+                env.invoke_contract(&identity_id, &Symbol::new(&env, "is_deactivated"), args);
+            if deactivated {
+                env.storage().persistent().set(
+                    &DataKey::Score(subject.clone()),
+                    &ScoreRecord {
+                        score: MIN_SCORE,
+                        last_updated: env.ledger().timestamp(),
+                        vc_count: 0,
+                        repayment_rate: 0,
+                        tx_volume_30d: 0,
+                    },
+                );
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::LastComputed(subject), &current_ledger);
+                return Ok(MIN_SCORE);
             }
         }
 
@@ -826,7 +886,10 @@ impl CreditOracle {
         env: Env,
         identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
-        require_admin(&env);
+        let admin = require_admin(&env);
+        if !probe_identity_oracle(&env, &identity_oracle_id, &admin) {
+            return Err(CreditOracleError::InvalidIdentityOracle);
+        }
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
