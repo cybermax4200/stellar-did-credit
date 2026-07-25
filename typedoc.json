@@ -7,5 +7,7 @@
   "includeVersion": true,
   "searchInComments": true,
   "categorizeByGroup": true,
-  "tsconfig": "packages/sdk/tsconfig.json"
+  "tsconfig": "packages/sdk/tsconfig.json",
+  "skipErrorChecking": true,
+  "exclude": ["**/*.test.ts", "**/__tests__/**/*"]
 }

@@ -7,7 +7,7 @@
     "build": "tsc",
     "test": "jest",
     "lint": "tsc --noEmit && eslint src",
-    "docs": "typedoc --tsconfig tsconfig.json --out docs-api src/index.ts"
+    "docs": "typedoc --tsconfig tsconfig.json --out docs-api --skipErrorChecking src/index.ts"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^12.0.0"

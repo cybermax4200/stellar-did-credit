@@ -67,5 +67,5 @@ jobs:
         working-directory: packages/sdk
 
       - name: Generate TypeScript API docs
-        run: pnpm docs
+        run: pnpm run docs
         working-directory: packages/sdk
