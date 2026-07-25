@@ -27,7 +27,8 @@ graph TD
     OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
     CON_APP     -->|record_repayment| SC_CR
     CON_APP     -->|compute_score| SC_CR
-    SC_CR       -->|get_active_vc_count| SC_ID
+    SC_CR       -->|get_active_vc_count\n(if IdentityOracleId set)| SC_ID
+    SC_CR       -.->|read VcCount\n(if IdentityOracleId NOT set)| SC_CR
 
     CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
     CON_SDK     -->|getScore| SC_CR
@@ -41,6 +42,10 @@ graph TD
 ### identity-oracle
 
 Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors for subjects. It is the source of truth for whether a wallet address has been verified by a trusted issuer.
+
+#### Admin setup
+
+The protocol admin must register each trusted issuer before that address can call `anchor_vc`. This is done through `register_issuer(admin, issuer)` on the identity-oracle contract; the admin can later revoke trust with `deregister_issuer`.
 
 **Key functions**
 
@@ -60,7 +65,8 @@ Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors f
 | Key                      | Type            | Description                                            |
 | ------------------------ | --------------- | ------------------------------------------------------ |
 | `Admin`                  | `Address`       | Instance storage — contract admin                      |
-| `TrustedIssuer(Address)` | `bool`          | Persistent — whether an address is a registered issuer |
+| `TrustedIssuer(Address)` | `bool`          | Persistent — tombstone flag: `true` while a registered issuer is trusted, `false` once deregistered |
+| `IssuersIndex`           | `Vec<Address>`  | Persistent — append-only list of every address ever registered; `list_issuers()` filters this against `TrustedIssuer` |
 | `DIDDocument(Address)`   | `String`        | Persistent — IPFS CID of the subject's DID document    |
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
 
@@ -125,11 +131,49 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 
 ---
 
+## Instance storage TTL management
+
+Soroban entries have a limited time-to-live (TTL) measured in ledgers. If the TTL of a contract's **instance storage** entry reaches zero, the contract becomes archived — all its data is lost and it can never be called again. To prevent this, every function that reads or writes instance storage must periodically call `extend_ttl`.
+
+### Pattern
+
+Each contract defines two constants:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `INSTANCE_BUMP_THRESHOLD` | 5 000 | Extend when fewer than ~7 hours of ledgers remain |
+| `INSTANCE_BUMP_AMOUNT` | 500 000 | Extend TTL to ~30 days from now |
+
+The call is placed after authentication succeeds in every admin-gated function:
+
+```rust
+env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+```
+
+### Covered functions
+
+All three contracts apply this pattern in `initialize` and every admin-gated function:
+
+**identity-oracle**
+- `initialize`, `register_issuer`, `deregister_issuer`, `upgrade`
+
+**credit-oracle**
+- `initialize`, `register_feeder`, `deregister_feeder`, `register_lender`, `deregister_lender`, `propose_weights`, `upgrade`
+
+**revocation-registry**
+- `initialize`, `upgrade`
+
+Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`, etc. touch only persistent storage and do not need to extend the instance TTL. If the contract is not called by an admin for an extended period, anyone can call any of the covered admin-gated functions (with admin authentication) to refresh the TTL.
+
+---
+
 ## Cross-contract interaction
 
-Currently, the VC count fed into credit-oracle is supplied off-chain by a trusted feeder that reads identity-oracle and calls `set_vc_count`. This is a deliberate design choice for the v1 protocol: it avoids cross-contract call overhead and keeps the scoring gas cost predictable.
+The `credit-oracle` supports a dual-path mechanism for resolving a subject's VC count during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
 
-In a future version, credit-oracle will call identity-oracle directly:
+### Cross-Contract Path (Live)
+
+If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract:
 
 ```mermaid
 sequenceDiagram
@@ -145,9 +189,90 @@ sequenceDiagram
     CreditOracle-->>Caller: score: u32
 ```
 
-Credit-oracle now stores the `identity-oracle` contract ID and uses `env.invoke_contract` to obtain live VC counts. The feeder role for VC count is deprecated when this cross-contract path is configured.
+In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+
+### Fallback Path (Cached)
+
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`. 
+
+While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+
+### Migration to Cross-Contract VC Count
+
+To migrate a deployment from the cached fallback path to the live cross-contract path:
+
+1. **Configure the Oracle ID**: The admin calls `set_identity_oracle(identity_oracle_id)` on `credit-oracle`.
+2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls will automatically use the cross-contract lookup.
+3. **Deprecate Feeder Input**: The trusted feeder should stop calling `set_vc_count`. Any further updates via `set_vc_count` will be successfully written to persistent storage but entirely ignored by `compute_score`.
+4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement `get_active_vc_count`, the `compute_score` transaction will unconditionally fail.
 
 ---
+
+## TTL management
+
+Soroban persistent and instance storage entries have a time-to-live (TTL) measured in ledgers. If an entry's TTL expires, the entry is **archived** (removed from storage). To prevent data loss, all three contracts proactively extend TTLs on every write and provide an admin-only `maintain_storage` function for passive maintenance.
+
+### Strategy: hybrid (automatic + maintenance)
+
+1. **Automatic extension on every write** — whenever a contract writes to persistent storage (`set`), it immediately calls `extend_ttl` on that entry. This ensures actively-used data stays alive without any external coordination.
+
+2. **`maintain_storage` admin function** — extends instance storage TTL (Admin, Config, PendingWeights). Can be called periodically by a cron job or manually to protect a contract whose configuration rarely changes.
+
+### TTL constants
+
+| Constant               | Value       | Approximate real time | Scope          |
+| ---------------------- | ----------- | --------------------- | -------------- |
+| `INST_TTL_THRESHOLD`   | 120 960     | ~7 days               | Instance       |
+| `INST_TTL_EXTEND`      | 6 307 200   | ~1 year               | Instance       |
+| `PERS_TTL_THRESHOLD`   | 120 960     | ~7 days               | Persistent     |
+| `PERS_TTL_EXTEND`      | 518 400     | ~30 days              | Persistent     |
+
+> Ledger time is calculated at ≈5 s/ledger (Stellar network average).
+
+### Where TTL is extended
+
+**identity-oracle**
+
+| Operation          | Entry extended                    |
+| ------------------ | --------------------------------- |
+| `initialize`       | Instance storage (Admin)          |
+| `register_issuer`  | `TrustedIssuer(issuer)`           |
+| `anchor_did`       | `DIDDocument(subject)`            |
+| `anchor_vc`        | `VCAnchors(subject)`              |
+| `mark_vc_revoked`  | `VCAnchors(subject)`              |
+| `maintain_storage` | Instance storage                  |
+
+**credit-oracle**
+
+| Operation            | Entry extended                              |
+| -------------------- | ------------------------------------------- |
+| `initialize`         | Instance storage (Admin, Config)            |
+| `register_feeder`    | `TrustedFeeder(feeder)`                     |
+| `register_lender`    | `TrustedLender(lender)`                     |
+| `update_tx_stats`    | `TxStats(subject)`                          |
+| `record_repayment`   | `RepaymentRecord(subject)`                  |
+| `set_vc_count`       | `VcCount(subject)`                          |
+| `compute_score`      | `Score(subject)`, `TxStats(subject)`, `RepaymentRecord(subject)`, `VcCount(subject)` |
+| `maintain_storage`   | Instance storage                            |
+
+**revocation-registry**
+
+| Operation        | Entry extended                             |
+| ---------------- | ------------------------------------------ |
+| `initialize`     | Instance storage (Admin)                   |
+| `revoke`         | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `batch_revoke`   | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `maintain_storage` | Instance storage                         |
+
+### Maintenance recommendations
+
+- Deploy an off-chain cron job (or serverless function) that calls `maintain_storage` on all three contracts at least once every **6 months** (well within the 1‑year instance TTL).
+- No additional action is needed for persistent entries — their TTLs are extended automatically whenever they are written.
+- If an entry has not been touched for more than ~30 days, it may be archived. This is by design: orphaned data can be garbage-collected by the network.
+
+---
+
+## Future work
 
 ## Data flow narrative
 
@@ -243,6 +368,75 @@ caller-supplied `admin` to preserve the existing API surface.
 - `require_auth()` is always called on the *stored* admin, not on an
   unvalidated caller-supplied value.
 - The public function signatures are unchanged; no SDK or script updates needed.
+
+---
+
+### ADR-003 — Persistent storage TTL policy
+
+**Status:** Accepted
+
+**Context**
+
+Soroban persistent storage entries expire (become archived) unless their TTL
+is explicitly extended via `extend_ttl`. Prior to this change, none of the
+three contracts called `extend_ttl` on any persistent entry — only instance
+storage (admin, config) was kept alive, via `INSTANCE_BUMP_THRESHOLD` /
+`INSTANCE_BUMP_AMOUNT`. This meant issuer registrations, DID documents, VC
+anchors, revocation status, feeder/lender/governor registrations, cached tx
+stats, repayment counters, and computed scores could all silently expire,
+after which reads would return `None`/default values as if the data had
+never existed — e.g. a revoked credential could appear "not revoked" again,
+or a registered issuer could appear unregistered, purely because enough
+ledgers passed without a write refreshing the entry's TTL.
+
+**Decision**
+
+Each contract defines its own `PERSISTENT_BUMP_THRESHOLD` /
+`PERSISTENT_BUMP_AMOUNT` pair (mirroring the existing `INSTANCE_BUMP_*`
+naming), both expressed in ledgers (~5s each on Stellar):
+
+| Constant | Value | Approx. duration |
+| --- | --- | --- |
+| `PERSISTENT_BUMP_THRESHOLD` | `120_960` | ~7 days |
+| `PERSISTENT_BUMP_AMOUNT` | `6_312_000` | ~365 days |
+
+Every function that writes a persistent entry calls
+`env.storage().persistent().extend_ttl(&key, PERSISTENT_BUMP_THRESHOLD, PERSISTENT_BUMP_AMOUNT)`
+immediately after the `set()` (or, for entries only ever written once inside
+a conditional branch such as `RegisteredVCIssuer`, immediately after that
+`set()` too).
+
+**Rationale for the specific values**
+
+- **Threshold (~7 days):** chosen to comfortably exceed the ~24h
+  `TIMELOCK_LEDGERS` window used for the weight-proposal timelock elsewhere
+  in this protocol, so no in-flight workflow can be interrupted by an entry
+  crossing its expiry threshold mid-process.
+- **Extension (~365 days):** this data represents a subject's durable
+  financial/credit identity (DID documents, VC anchors, revocation status,
+  repayment history) — not transient session or cache data. The cost of an
+  unwanted archival (a lender query silently returning "no history" for a
+  real, active identity) is far higher than the marginal storage-rent cost
+  of extending generously. Contracts and off-chain indexers that write
+  regularly (e.g. a feeder posting tx stats) will keep re-extending well
+  before the ~365-day mark in practice; the value is a safety margin for
+  entries that go quiet, not an expected typical lifetime.
+
+Both constants are the same across all three contracts for consistency and
+ease of audit. A future ADR may split them per-entry-type if operational
+experience shows one category needs a materially different policy (e.g.
+`LastComputed`, which is more transient than a `DIDDocument`).
+
+**Consequences**
+
+- Every persistent write now costs one additional host call
+  (`extend_ttl`), which is a negligible increase in transaction resource
+  usage compared to the write itself.
+- See `contracts/tests/src/integration_test.rs::test_persistent_data_survives_ledger_advance`
+  for a test that simulates a multi-year ledger jump and confirms
+  previously-written data (issuer registration, DID document, VC anchor,
+  revocation status, feeder registration, tx stats) is still readable
+  afterward, whereas without the TTL extension it would be archived.
 
 ---
 
