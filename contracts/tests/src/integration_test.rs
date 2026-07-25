@@ -1,12 +1,14 @@
+#![allow(deprecated)]
+
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, ScoringWeights, TxStats};
-    use governance::{Governance, GovernanceClient, GovernanceError};
+    use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
+    use governance::{Governance, GovernanceClient};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
         testutils::{Address as _, Ledger as _},
-        BytesN, Env, String,
+        Address, BytesN, Env, String,
     };
 
     #[test]
@@ -78,6 +80,80 @@ mod tests {
 
         // 13. Assert score <= 850
         assert!(score <= 850, "expected score <= 850, got {}", score);
+    }
+
+    #[test]
+    fn test_two_step_admin_transfer_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let governance_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let governance = GovernanceClient::new(&env, &governance_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        governance.initialize(&admin, &credit_id, &1000);
+
+        // Identity oracle admin transfer requires both steps.
+        let identity_candidate = Address::generate(&env);
+        identity.propose_new_admin(&identity_candidate);
+
+        let current_identity_admin: Address = env.as_contract(&identity_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(current_identity_admin, admin);
+
+        identity.accept_admin(&identity_candidate);
+
+        let new_identity_admin: Address = env.as_contract(&identity_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(new_identity_admin, identity_candidate);
+
+        // Credit oracle admin transfer requires both steps.
+        let credit_candidate = Address::generate(&env);
+        credit.propose_new_admin(&credit_candidate);
+
+        let pending_credit_admin: Option<Address> = env.as_contract(&credit_id, || {
+            env.storage()
+                .instance()
+                .get(&credit_oracle::DataKey::PendingAdmin)
+        });
+        assert_eq!(pending_credit_admin, Some(credit_candidate.clone()));
+
+        credit.accept_admin(&credit_candidate);
+
+        let new_credit_admin: Address = env.as_contract(&credit_id, || {
+            env.storage()
+                .instance()
+                .get(&credit_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(new_credit_admin, credit_candidate);
+
+        // Governance acceptance path also requires a prior proposal.
+        credit.propose_new_admin(&governance_id);
+        governance.accept_oracle_admin();
+
+        let current_credit_admin: Address = env.as_contract(&credit_id, || {
+            env.storage()
+                .instance()
+                .get(&credit_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(current_credit_admin, governance_id);
     }
 
     #[test]
@@ -505,11 +581,13 @@ mod tests {
 
         // issuer1 attempts to batch revoke the hashes
         let res = revocation.try_batch_revoke(&issuer1, &batch);
-        
+
         // Assert the call failed with IssuerMismatch
         assert_eq!(
             res,
-            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+            Err(Ok(
+                revocation_registry::RevocationRegistryError::IssuerMismatch
+            ))
         );
 
         // Verify that hash1 and hash3 were NOT revoked (atomicity check)

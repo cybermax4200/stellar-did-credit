@@ -92,7 +92,10 @@ pub enum CreditOracleError {
 pub enum DataKey {
     /// Contract administrator address
     Admin,
-    /// Pending contract admin address for two-step transfer
+    /// Pending contract admin address for two-step transfer.
+    ///
+    /// This value is set by `propose_new_admin` and cleared only when the
+    /// proposed address later calls `accept_admin`.
     PendingAdmin,
 
     /// Global configuration
@@ -218,7 +221,9 @@ impl CreditOracle {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let default_weights = ScoringWeights {
             vc_weight: 40,
@@ -238,12 +243,11 @@ impl CreditOracle {
     /// Register a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_feeder(
-        env: Env,
-        feeder: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn register_feeder(env: Env, feeder: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
@@ -254,12 +258,11 @@ impl CreditOracle {
     /// Deregister a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_feeder(
-        env: Env,
-        feeder: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn deregister_feeder(env: Env, feeder: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
@@ -270,12 +273,11 @@ impl CreditOracle {
     /// Register a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn register_lender(env: Env, lender: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedLender(lender.clone()), &true);
@@ -286,12 +288,11 @@ impl CreditOracle {
     /// Deregister a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn deregister_lender(env: Env, lender: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
@@ -621,7 +622,9 @@ impl CreditOracle {
             return Err(CreditOracleError::InvalidWeights);
         }
         require_admin_or_governor(&env, &caller)?;
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -767,12 +770,17 @@ impl CreditOracle {
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(
-        env: Env,
-        new_admin: Address,
-    ) -> Result<(), CreditOracleError> {
+    ///
+    /// This is step 1 of the transfer flow: the current admin names a pending
+    /// admin by storing it in `DataKey::PendingAdmin`. The active `Admin`
+    /// remains unchanged until the pending admin calls `accept_admin`.
+    ///
+    /// Auth: current admin only — verified via `require_admin`.
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -780,6 +788,15 @@ impl CreditOracle {
     }
 
     /// Accept a proposed admin role (two-step admin transfer).
+    ///
+    /// This is step 2 of the transfer flow. It reads the stored pending admin
+    /// from `DataKey::PendingAdmin`, verifies the caller matches the pending
+    /// address, then promotes that address to active `Admin` and clears the
+    /// pending entry.
+    ///
+    /// Auth: the proposed `new_admin` must sign the transaction.
+    ///
+    /// If no pending admin exists, this returns `NoPendingAdmin`.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         match pending {
@@ -791,7 +808,9 @@ impl CreditOracle {
             None => return Err(CreditOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -804,7 +823,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -813,7 +834,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }

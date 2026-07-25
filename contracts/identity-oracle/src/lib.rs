@@ -34,14 +34,14 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
-}// ── Persistent TTL constants ─────────────────────────────────────
-// Persistent entries are extended to ~30 days on every write.
-//
-// Threshold: if remaining TTL drops below this, extend.
-// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
-//
-const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+} // ── Persistent TTL constants ─────────────────────────────────────
+  // Persistent entries are extended to ~30 days on every write.
+  //
+  // Threshold: if remaining TTL drops below this, extend.
+  // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+  //
+const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Error types for the identity-oracle contract.
 #[contracterror]
@@ -155,7 +155,9 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -170,7 +172,9 @@ impl IdentityOracle {
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::RevocationRegistryId, &registry_id);
@@ -180,12 +184,11 @@ impl IdentityOracle {
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_issuer(
-        env: Env,
-        issuer: Address,
-    ) -> Result<(), IdentityOracleError> {
+    pub fn register_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let issuer_key = DataKey::TrustedIssuer(issuer.clone());
         if !env.storage().persistent().has(&issuer_key) {
@@ -215,12 +218,11 @@ impl IdentityOracle {
     /// deregistered issuers from the returned set.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_issuer(
-        env: Env,
-        issuer: Address,
-    ) -> Result<(), IdentityOracleError> {
+    pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         env.storage()
             .persistent()
@@ -268,9 +270,11 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::DIDDocument(subject.clone()), &did_doc_cid);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DIDDocument(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DIDDocument(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
         Ok(())
@@ -316,7 +320,9 @@ impl IdentityOracle {
 
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
-        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events()
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
@@ -353,7 +359,9 @@ impl IdentityOracle {
         }
 
         env.storage().persistent().set(&key, &updated);
-        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         Ok(())
     }
 
@@ -444,10 +452,15 @@ impl IdentityOracle {
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
     /// The transfer only completes once `new_admin` calls `accept_admin`.
     ///
+    /// This preserves the existing admin until the proposed administrator
+    /// explicitly accepts the role.
+    ///
     /// Auth: current admin only — verified via `require_admin`.
     pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -457,10 +470,13 @@ impl IdentityOracle {
     /// Accept a pending admin proposal (step 2 of two-step admin transfer).
     ///
     /// Reads `DataKey::PendingAdmin` from instance storage and verifies that
-    /// `new_admin` matches, then promotes `new_admin` to `DataKey::Admin` and
-    /// clears the pending entry.
+    /// `new_admin` matches the pending address. If the check succeeds, the
+    /// new admin is promoted to `DataKey::Admin` and `PendingAdmin` is cleared.
     ///
     /// Auth: the proposed `new_admin` address must sign the transaction.
+    ///
+    /// This function does not bypass the proposal step. It requires a prior
+    /// call to `propose_new_admin` and the same approved address.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         match pending {
@@ -472,7 +488,9 @@ impl IdentityOracle {
             None => return Err(IdentityOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -483,7 +501,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -495,7 +515,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 

@@ -105,6 +105,37 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 
 ---
 
+### two-step admin transfer flow
+
+All protocol contracts use the same two-step pattern for changing the administrator:
+
+1. The current admin calls `propose_new_admin(new_admin)`.
+2. The nominated address calls `accept_admin(new_admin)`.
+
+This means the contract's active `Admin` does not change until the pending
+admin explicitly accepts the role. The proposed address is stored in
+`DataKey::PendingAdmin` until acceptance.
+
+#### Why this matters
+
+- `propose_new_admin` only nominates the next admin; it does not grant any
+  administrative rights.
+- `accept_admin` is required to complete the transfer.
+- If no pending admin exists, `accept_admin` fails with `NoPendingAdmin`.
+
+#### Governance-specific flow
+
+When Governance becomes the credit-oracle admin, the flow is:
+
+1. The current credit-oracle admin calls `CreditOracle::propose_new_admin(gov_id)`.
+2. The governance admin calls `Governance::accept_oracle_admin()`.
+
+`accept_oracle_admin` is not a shortcut or bypass. It only succeeds when the
+governance contract address has already been proposed as the credit-oracle's
+pending admin, and the governance admin signs the transaction.
+
+---
+
 ### revocation-registry
 
 A minimal, standalone registry that maps VC hashes to their revocation status. It is intentionally separate from identity-oracle so that revocation can be checked by any party without needing to traverse the full VC anchor list.

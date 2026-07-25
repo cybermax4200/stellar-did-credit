@@ -305,8 +305,15 @@ impl Governance {
 
     /// Accept the admin role of the credit-oracle on behalf of this contract.
     ///
-    /// Must be called after the current oracle admin proposes this contract as
-    /// the new admin via `propose_new_admin`. Admin auth is required.
+    /// This is step 2 of the credit-oracle's existing two-step admin transfer
+    /// flow. It must be called after the current credit-oracle admin has
+    /// proposed this governance contract as the pending admin via
+    /// `propose_new_admin(gov_id)`.
+    ///
+    /// Auth: the current governance admin must sign the transaction.
+    ///
+    /// This does not bypass the proposal step. It simply completes the transfer
+    /// once the governance contract has been nominated as `PendingAdmin`.
     pub fn accept_oracle_admin(env: Env) -> Result<(), GovernanceError> {
         let admin: Address = env
             .storage()
