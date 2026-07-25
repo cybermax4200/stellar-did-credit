@@ -117,7 +117,7 @@ pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 
-fn generic_credential_type(env: &Env) -> Symbol {
+fn generic_credential_type(_env: &Env) -> Symbol {
     symbol_short!("generic")
 }
 
@@ -316,7 +316,7 @@ impl IdentityOracle {
         vc_hash: BytesN<32>,
     ) -> Result<(), IdentityOracleError> {
         Self::anchor_vc_typed(
-            env,
+            env.clone(),
             issuer,
             subject,
             vc_hash,
@@ -364,6 +364,7 @@ impl IdentityOracle {
         };
 
         anchors.push_back(record);
+        store_credential_type(&env, &subject, &vc_hash, credential_type);
         env.storage().persistent().set(&key, &anchors);
         env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
