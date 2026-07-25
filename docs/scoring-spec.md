@@ -1,4 +1,4 @@
-# Scoring Specification
+﻿# Scoring Specification
 
 The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`MAX_SCORE` (850)**, matching the conventional credit score scale. The formula is deterministic, fully on-chain, and uses only data that has been explicitly submitted by trusted parties (feeders and lenders).
 
@@ -103,7 +103,58 @@ score = clamp(MIN_SCORE + 0×550÷100, MIN_SCORE, MAX_SCORE) = MIN_SCORE
 
 ---
 
-### Example 2: 3 VCs, moderate volume, 80% repayment, diverse counterparties → score 630
+### Example 2: Early stage -- 1 VC, 5 XLM, 70% repayment -> score 465
+
+This is the "Early stage" profile from the README scoring table.
+The trace below confirms the score using the exact integer arithmetic
+executed by compute_score_pure in the contract.
+
+| Input              | Value                        | Notes                             |
+| ------------------ | ---------------------------- | --------------------------------- |
+| vc_count           | 1                            |                                   |
+| volume_30d         | 500,000,000 stroops (5 XLM)  |                                   |
+| avg_counterparties | 0                            | no counterparty bonus             |
+| on_time / total    | 7 / 10                       | 70% repayment as raw u32 counters |
+
+> **Integer division note:** on_time_count and total_count are raw u32 counters,
+> not a pre-computed percentage. '70% repayment' maps to any (on_time, total) pair
+> whose integer division yields 70 -- e.g. (7,10), (14,20), (70,100).
+> All give repay_score = 70. This example uses (7,10) as the minimal case.
+
+**Calculation:**
+
+```
+vc_score    = min(1 x 20, 100) = min(20, 100) = 20
+
+tx_score    = min(500_000_000 / 100_000_000, 100)   [integer division]
+            = min(5, 100) = 5
+
+repay_score = (7 x 10000 / 10) / 100               [integer division throughout]
+            = 70000 / 10 / 100
+            = 7000 / 100
+            = 70
+
+counterparty_bonus = 0  (avg_counterparties < 10)
+
+composite = (20 x 40 + (5 + 0) x 30 + 70 x 30) / 100
+          = (800 + 150 + 2100) / 100
+          = 3050 / 100
+          = 30   <- truncates: 3050 / 100 = 30.5, Rust u32 floors to 30
+
+score = clamp(300 + 30 x 550 / 100, 300, 850)
+      = clamp(300 + 16500 / 100, 300, 850)
+      = clamp(300 + 165, 300, 850)
+      = 465
+```
+
+**Result: 465** -- confirmed correct. The README table value is accurate.
+
+The critical step is the composite truncation: 3050 / 100 = 30.5 in real arithmetic,
+but Rust u32 integer division floors it to 30, producing a final score of 465 not 467.
+
+---
+
+### Example 3: 3 VCs, moderate volume, 80% repayment, diverse counterparties → score 630
 
 | Input              | Value                          |
 | ------------------ | ------------------------------ |
@@ -135,7 +186,7 @@ score = clamp(300 + 60×550÷100, 300, 850)
 
 ---
 
-### Example 3: 5 VCs, high volume, 100% repayment, diverse counterparties → score 833
+### Example 4: 5 VCs, high volume, 100% repayment, diverse counterparties → score 833
 
 | Input              | Value                          |
 | ------------------ | ------------------------------ |
@@ -167,7 +218,7 @@ score = clamp(300 + 97×550÷100, 300, 850)
 
 ---
 
-### Example 4: 5 VCs, 100 XLM volume, 100% repayment, no counterparty bonus → score 850 (MAX_SCORE)
+### Example 5: 5 VCs, 100 XLM volume, 100% repayment, no counterparty bonus → score 850 (MAX_SCORE)
 
 | Input              | Value                              |
 | ------------------ | ---------------------------------- |
