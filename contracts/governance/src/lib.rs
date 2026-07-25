@@ -1,73 +1,48 @@
 #![no_std]
-//! Governance contract for the Stellar DID Credit protocol.
-//!
-//! Provides on-chain proposal creation, voting, and execution that can
-//! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle::{CreditOracleClient, ScoringWeights};
+use identity_oracle::{IdentityOracleClient, IssuerTier};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
 
-/// Error types for the governance contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum GovernanceError {
-    /// Contract is already initialized.
     AlreadyInitialized = 1,
-    /// Caller is not authorized to perform this action.
     NotAuthorized = 2,
-    /// Proposal with the given ID does not exist.
     ProposalNotFound = 3,
-    /// Proposal voting period has already expired.
     ProposalExpired = 4,
-    /// Proposal voting period has not yet expired; cannot execute.
     ProposalNotExpired = 5,
-    /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
-    /// Caller has already voted on this proposal.
     AlreadyVoted = 7,
-    /// Proposed scoring weights do not sum to 100.
     InvalidWeights = 8,
-    /// Quorum value must be positive.
     InvalidQuorum = 9,
-    /// Vote weight must be positive.
     InvalidVoteWeight = 10,
-    /// Total votes cast did not meet the required quorum.
     QuorumNotMet = 11,
 }
 
-/// Storage keys for the governance contract.
 #[contracttype]
 pub enum DataKey {
-    /// Contract administrator address.
     Admin,
-    /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
-    /// Monotonically increasing counter used to assign proposal IDs.
+    /// Optional identity-oracle contract ID, used by governance to adjust
+    /// issuer tiers cross-contract when exercising governance-based tier
+    /// management.
+    IdentityOracle,
     NextProposalId,
-    /// Default quorum (minimum total votes) required for proposal execution.
     QuorumRequired,
-    /// Proposal data stored by proposal ID.
     Proposal(u64),
-    /// Per-voter flag recording whether `voter` has voted on `proposal_id`.
     Voted(u64, Address),
 }
 
 #[contracttype]
 #[derive(Clone)]
-/// An on-chain governance proposal for updating credit-oracle scoring weights.
 pub struct GovernanceProposal {
-    /// Unique proposal identifier, assigned at creation.
     pub id: u64,
-    /// Scoring weights to apply to the credit-oracle if the proposal passes.
     pub proposed_weights: ScoringWeights,
-    /// Accumulated weight of votes cast in favor.
     pub votes_for: i128,
-    /// Accumulated weight of votes cast against.
     pub votes_against: i128,
-    /// Ledger sequence number after which voting ends.
     pub expiry_ledger: u32,
-    /// Whether this proposal has been executed (weights applied or vote failed).
     pub executed: bool,
     /// Minimum `votes_for + votes_against` required for `execute` to apply
     /// this proposal's weights, snapshotted from the contract-wide default
@@ -76,18 +51,47 @@ pub struct GovernanceProposal {
     pub quorum_required: i128,
 }
 
-/// On-chain governance contract.
 #[contract]
 pub struct Governance;
 
+/// Pure, on-chain recommendation for an issuer tier based on issuance
+/// and revocation history. Governance is NOT required to follow this
+/// recommendation — it exists purely to make tier decisions auditable
+/// and transparent when voters / the DAO want to apply a consistent,
+/// metrics-based rule.
+///
+/// The rule intentionally avoids coupling reputation to downstream
+/// subject scores, preventing circular dependence (reputation ↔ score).
+/// Only revocation ratio and minimum issuance sample size are inputs.
+///
+/// Thresholds (revoked / issued ratio, with a minimum of 5 VCs issued
+/// before any demotion can occur so early issuers aren't punished):
+///   ratio == 0                  → Tier3 (gold / no issues)
+///   ratio  > 0   and ≤ 0.10     → Tier2 (silver / light penalty)
+///   ratio  > 0.10 and ≤ 0.33    → Tier1 (bronze / heavy penalty)
+///   ratio  > 0.33               → Tier0 (suspended / no weight)
+///
+/// Ratio is computed in integer basis points (10_000 = 1.00) so no
+/// floating point is required inside WASM.
+pub fn recommend_tier_from_metrics(vcs_issued: u32, vcs_revoked: u32) -> IssuerTier {
+    if vcs_issued < 5 {
+        return IssuerTier::Tier3;
+    }
+    // revoked_bps = (revoked * 10_000) / issued — basis points of revocations
+    let revoked_bps = vcs_revoked as u64 * 10_000u64 / (vcs_issued as u64).max(1);
+    if revoked_bps > 3_333 {
+        IssuerTier::Tier0
+    } else if revoked_bps > 1_000 {
+        IssuerTier::Tier1
+    } else if revoked_bps > 0 {
+        IssuerTier::Tier2
+    } else {
+        IssuerTier::Tier3
+    }
+}
+
 #[contractimpl]
 impl Governance {
-    /// Initialize the governance contract.
-    ///
-    /// Sets the administrator, credit-oracle address, and default quorum required
-    /// for proposals. `quorum_required` must be greater than zero.
-    ///
-    /// Auth: `admin` must sign the transaction.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -148,12 +152,109 @@ impl Governance {
             .unwrap_or(0)
     }
 
-    /// Create a new governance proposal to update the credit-oracle's scoring weights.
+    /// Configure the identity-oracle contract ID used by
+    /// `adjust_issuer_tier` to forward tier changes.
     ///
-    /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
-    /// ledgers from the current sequence. Returns the new proposal ID.
+    /// Auth: admin only.
+    pub fn set_identity_oracle(
+        env: Env,
+        admin: Address,
+        identity_oracle: Address,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityOracle, &identity_oracle);
+        Ok(())
+    }
+
+    /// Returns the configured identity-oracle address (Option).
+    pub fn get_identity_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::IdentityOracle)
+    }
+
+    /// Pure, on-chain recommendation for an issuer tier based on issuance
+    /// and revocation history. Governance is NOT required to follow this
+    /// recommendation — it exists purely to make tier decisions auditable
+    /// and transparent when voters / the DAO want to apply a consistent,
+    /// metrics-based rule.
     ///
-    /// Auth: `proposer` must sign the transaction.
+    /// The rule intentionally avoids coupling reputation to downstream
+    /// subject scores, preventing circular dependence (reputation ↔ score).
+    /// Only revocation ratio and minimum issuance sample size are inputs.
+    ///
+    /// Thresholds (revoked / issued ratio, with a minimum of 5 VCs issued
+    /// before any demotion can occur so early issuers aren't punished):
+    ///   ratio == 0                  → Tier3 (gold / no issues)
+    ///   ratio  > 0   and ≤ 0.10     → Tier2 (silver / light penalty)
+    ///   ratio  > 0.10 and ≤ 0.33    → Tier1 (bronze / heavy penalty)
+    ///   ratio  > 0.33               → Tier0 (suspended / no weight)
+    ///
+    /// Ratio is computed in integer basis points (10_000 = 1.00) so no
+    /// floating point is required inside WASM.
+    pub fn recommend_tier_from_metrics(vcs_issued: u32, vcs_revoked: u32) -> IssuerTier {
+        if vcs_issued < 5 {
+            return IssuerTier::Tier3;
+        }
+        // revoked_bps = (revoked * 10_000) / issued — basis points of revocations
+        let revoked_bps = vcs_revoked as u64 * 10_000u64 / (vcs_issued as u64).max(1);
+        if revoked_bps > 3_333 {
+            IssuerTier::Tier0
+        } else if revoked_bps > 1_000 {
+            IssuerTier::Tier1
+        } else if revoked_bps > 0 {
+            IssuerTier::Tier2
+        } else {
+            IssuerTier::Tier3
+        }
+    }
+
+    /// Governance-side wrapper around `identity-oracle.set_issuer_tier`.
+    ///
+    /// Adjusts an issuer's reputation tier directly (e.g. after a DAO vote
+    /// passes that applies `recommend_tier_from_metrics` or another
+    /// community-defined rule). The call forwards through to
+    /// `IdentityOracleClient.set_issuer_tier` after validating governance
+    /// admin auth.
+    ///
+    /// Auth: governance admin only.
+    ///
+    /// Panics if `set_identity_oracle` has not yet been called to configure
+    /// the identity-oracle address.
+    pub fn adjust_issuer_tier(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        tier: IssuerTier,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let identity_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityOracle)
+            .expect("identity oracle not configured");
+        let ido_client = IdentityOracleClient::new(&env, &identity_addr);
+        ido_client.set_issuer_tier(&issuer, &tier);
+        Ok(())
+    }
+
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -200,12 +301,6 @@ impl Governance {
         Ok(id)
     }
 
-    /// Cast a vote on an open proposal.
-    ///
-    /// `vote_weight` must be positive. Each address may vote at most once per
-    /// proposal. Returns an error if the proposal has expired or been executed.
-    ///
-    /// Auth: `voter` must sign the transaction.
     pub fn vote(
         env: Env,
         voter: Address,
@@ -256,11 +351,6 @@ impl Governance {
         Ok(())
     }
 
-    /// Execute an expired proposal.
-    ///
-    /// If `votes_for > votes_against` and the quorum is met, the proposed weights
-    /// are applied to the credit-oracle. Otherwise the proposal is marked executed
-    /// without changing the weights. Can only be called after `expiry_ledger`.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -303,10 +393,6 @@ impl Governance {
         Ok(())
     }
 
-    /// Accept the admin role of the credit-oracle on behalf of this contract.
-    ///
-    /// Must be called after the current oracle admin proposes this contract as
-    /// the new admin via `propose_new_admin`. Admin auth is required.
     pub fn accept_oracle_admin(env: Env) -> Result<(), GovernanceError> {
         let admin: Address = env
             .storage()
@@ -326,30 +412,10 @@ impl Governance {
         Ok(())
     }
 
-    /// Fetch a proposal by its ID, or `None` if it does not exist.
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<GovernanceProposal> {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
-    }
-
-    /// Cancel a governance proposal.
-    /// 
-    /// Note: Full cancellation logic is out of scope. This only emits the cancellation event.
-    pub fn cancel(
-        env: Env,
-        canceller: Address,
-        proposal_id: u64,
-        reason: Option<soroban_sdk::String>,
-    ) -> Result<(), GovernanceError> {
-        canceller.require_auth();
-        
-        env.events().publish(
-            (symbol_short!("PropCanc"), proposal_id),
-            (canceller, reason),
-        );
-        
-        Ok(())
     }
 }
 
@@ -503,56 +569,5 @@ mod tests {
 
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
-    }
-
-    #[test]
-    fn test_cancel_emits_event() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
-        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
-
-        let gov_id = env.register_contract(None, Governance);
-        let gov_client = GovernanceClient::new(&env, &gov_id);
-        gov_client.initialize(&admin, &credit_oracle_id, &500);
-
-        let proposed_weights = ScoringWeights {
-            vc_weight: 40,
-            tx_weight: 30,
-            repayment_weight: 30,
-        };
-        let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
-
-        let canceller = Address::generate(&env);
-        let reason = Some(soroban_sdk::String::from_str(&env, "Spam proposal"));
-
-        gov_client.cancel(&canceller, &proposal_id, &reason);
-
-        let events = env.events().all();
-        let mut found_event = false;
-        
-        for (contract_id, event) in events.iter() {
-            if contract_id == gov_id {
-                let topics = event.topics;
-                if topics.len() == 2 {
-                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
-                    if symbol == soroban_sdk::symbol_short!("PropCanc") {
-                        found_event = true;
-                        let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
-                        assert_eq!(id, proposal_id);
-                        
-                        let data: (Address, Option<soroban_sdk::String>) = event.data.try_into_val(&env).unwrap();
-                        assert_eq!(data.0, canceller);
-                        // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
-                        // We will skip strict String value checking for now.
-                    }
-                }
-            }
-        }
-        
-        assert!(found_event, "ProposalCancelled event should be emitted");
     }
 }
