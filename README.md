@@ -207,12 +207,11 @@ pnpm test
 ### Deploy to testnet
 
 ```bash
-# Fund your deployer key
-curl "https://friendbot.stellar.org/?addr=$(stellar keys address deployer)"
-
-# Deploy all three contracts
-bash scripts/deploy.sh
+# Fund your deployer key and deploy all three contracts in one step
+bash scripts/deploy.sh --fund
 ```
+
+If the deployer account is already funded, the script will skip the Friendbot step and proceed directly to deployment.
 
 Contract addresses will be saved to `deployments.testnet.json`.
 
