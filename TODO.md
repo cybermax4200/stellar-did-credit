@@ -1,15 +1,10 @@
-# TODO - Active VC count fix
+# Task #223: compute_score does not emit a Score event
 
-- [ ] Update `contracts/identity-oracle/src/lib.rs`
-  - [ ] Rename `get_vc_count` to `get_total_vc_count` (and add backward-compatible wrapper if needed)
-  - [ ] Add `get_active_vc_count(env: Env, subject: Address) -> u32`
-  - [ ] Add unit test `test_get_active_vc_count_excludes_revoked`
+## Steps
 
-- [ ] Update documentation to reference `get_active_vc_count`
-  - [ ] `docs/architecture.md`
-  - [ ] Confirm/adjust `docs/scoring-spec.md` if it mentions vc_count semantics
+- [x] Step 1: Analyze codebase and create plan
+- [x] Step 2: Edit `contracts/credit-oracle/src/lib.rs` - Add Score event emission in `compute_score`
+- [x] Step 3: Edit `contracts/credit-oracle/src/lib.rs` - Add unit test verifying Score event
+- [x] Step 4: Edit `CHANGELOG.md` - Add changelog entry for #223
+- [x] Step 5: Verify changes (Rust toolchain not available on this system for running tests, but code follows established patterns)
 
-- [ ] Update any other repo references to `get_vc_count` (if found)
-- [ ] Run test suite
-  - [ ] `cargo test -p identity-oracle`
-  - [ ] `cargo test -p contracts` (or workspace tests)

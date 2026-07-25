@@ -2,6 +2,8 @@
 
 ## ⚠️ Never commit secrets
 
+> A pre-commit hook (via [lefthook](https://github.com/evilmartians/lefthook)) is installed automatically by `pnpm install`. It will block any commit containing a Stellar secret key pattern before it reaches GitHub.
+
 **Stellar secret keys start with `S` and are 56 characters long.** Never commit them.
 
 Common ways contributors accidentally expose secrets:
@@ -12,6 +14,13 @@ Common ways contributors accidentally expose secrets:
 GitHub's secret scanner will detect any committed Stellar secret key, flag your commit, and may restrict your account. The `.gitignore` already excludes `.env` files — do not work around it.
 
 If you need a throwaway key for testing, generate one with `stellar keys generate` and let `stellar-cli` manage it locally. Never paste the secret into any file tracked by git.
+
+---
+
+## Reporting vulnerabilities
+
+**Do not open a public issue for security bugs.**
+Please use [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new) to report vulnerabilities privately. See [SECURITY.md](../SECURITY.md) for scope, response SLA, and disclosure policy.
 
 ---
 
@@ -71,15 +80,19 @@ For more details, see the [Soroban testutils snapshot documentation](https://doc
 Root-level commands for testing, linting, and building all Rust and TypeScript packages:
 
 ```bash
-pnpm test    # Run Rust and TypeScript tests
-pnpm lint    # Run Clippy and linters
-pnpm build   # Build Rust and TypeScript packages
+pnpm test       # Run Rust and TypeScript tests
+pnpm lint       # Run Clippy and ESLint (check only, no writes)
+pnpm lint:fix   # Auto-fix ESLint and Clippy warnings where possible
+pnpm build      # Build Rust and TypeScript packages
 ```
 
 Each command:
 - Exits with non-zero status if any sub-command fails
 - Runs Rust tests first, then TypeScript tests
 - Is the recommended way to validate before opening a PR
+
+`pnpm lint:fix` is safe to run on a dirty working tree — it uses `--allow-dirty` for
+Clippy and writes ESLint fixes in-place. Review the diff before committing.
 
 ## Opening a pull request
 
@@ -98,7 +111,20 @@ PRs opened against your own fork instead of the upstream repo will not be seen b
 - Snapshot files must be committed if code changes them
 - Follow conventional commit format (see below)
 - Reference the issue number in your PR description
-- Any PR that changes contract behavior, SDK methods, or public APIs must add an entry under `[Unreleased]` in [CHANGELOG.md](../CHANGELOG.md)
+- Any PR that changes contract behavior, SDK methods, or public APIs must add an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
+
+## Changelog updates
+
+User-facing changes should be documented in [CHANGELOG.md](CHANGELOG.md) before opening a PR whenever a change affects behavior, public APIs, CLI output, or other visible project capabilities.
+
+- Add a bullet under the appropriate section of `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
+- Follow the Keep a Changelog structure already used in the file: `Added`, `Changed`, `Deprecated`, `Removed`, or `Fixed`
+- Keep entries concise and user-focused, and include the issue or PR number at the end of the bullet (for example, `(#174)`)
+- Internal-only changes that are not user-visible usually do not need a changelog entry
+
+Example:
+
+- `sdk`: added a convenience helper for reading the latest score from the chain (#174)
 
 ## Auth pattern for initialize functions
 

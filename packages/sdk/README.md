@@ -41,34 +41,6 @@ interface ScoreRecord {
 }
 ```
 
-### Exported types
-
-The SDK also exposes several public interfaces for contract-facing data structures.
-
-```typescript
-interface TxStats {
-  volume30d: bigint;
-  txCount30d: number;
-  avgCounterparties: number;
-}
-
-interface ScoringWeights {
-  vcWeight: number;
-  txWeight: number;
-  repaymentWeight: number;
-}
-
-interface RepaymentRecord {
-  onTimeCount: number;
-  totalCount: number;
-}
-
-interface PendingWeightsRecord {
-  weights: ScoringWeights;
-  effectiveLedger: number;
-}
-```
-
 ### Other methods (coming soon)
 
 - `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain
@@ -104,31 +76,27 @@ try {
 
 ### Error types and handling
 
-| Error Type        | Cause                    | Message Pattern                        | Recommended Action                                           |
-| ----------------- | ------------------------ | -------------------------------------- | ------------------------------------------------------------ |
-| `SimulationError` | Contract call failed     | `Simulation failed: ...`               | Validate subject address format; check contract state        |
-| `SimulationError` | Missing return value     | `No return value in simulation result` | Verify RPC endpoint is compatible; check contract deployment |
-| `NetworkError`    | RPC endpoint unreachable | `Failed to connect to RPC`             | Retry with backoff; fallback to alternate RPC endpoint       |
-| `NetworkError`    | Request timeout          | `Request timeout`                      | Increase timeout; check network connectivity                 |
-| Generic `Error`   | Invalid subject address  | `Invalid Stellar address`              | Verify address starts with 'G' and is 56 chars               |
-| Generic `Error`   | Parsing failures         | `Failed to parse response`             | Log full response; file an issue if RPC format changed       |
+| Error Type | Cause | Message Pattern | Recommended Action |
+|-----------|-------|-----------------|-------------------|
+| `SimulationError` | Contract call failed | `Simulation failed: ...` | Validate subject address format; check contract state |
+| `SimulationError` | Missing return value | `No return value in simulation result` | Verify RPC endpoint is compatible; check contract deployment |
+| `NetworkError` | RPC endpoint unreachable | `Failed to connect to RPC` | Retry with backoff; fallback to alternate RPC endpoint |
+| `NetworkError` | Request timeout | `Request timeout` | Increase timeout; check network connectivity |
+| Generic `Error` | Invalid subject address | `Invalid Stellar address` | Verify address starts with 'G' and is 56 chars |
+| Generic `Error` | Parsing failures | `Failed to parse response` | Log full response; file an issue if RPC format changed |
 
 ### Common error scenarios
 
 **Invalid subject address:**
-
 ```typescript
 try {
   const score = await sdk.getScore("invalid");
 } catch (error) {
-  console.error(
-    "Subject address must be a valid Stellar address (56 chars, starts with G)",
-  );
+  console.error("Subject address must be a valid Stellar address (56 chars, starts with G)");
 }
 ```
 
 **Subject not registered in identity-oracle:**
-
 ```typescript
 try {
   const score = await sdk.getScore("GXXXXXX...");
@@ -142,7 +110,6 @@ try {
 ```
 
 **Network connectivity issues:**
-
 ```typescript
 async function getScoreWithRetry(address: string, maxRetries = 3) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
@@ -151,8 +118,8 @@ async function getScoreWithRetry(address: string, maxRetries = 3) {
     } catch (error) {
       if (attempt === maxRetries - 1) throw error;
       // Exponential backoff: 1s, 2s, 4s
-      await new Promise((resolve) =>
-        setTimeout(resolve, Math.pow(2, attempt) * 1000),
+      await new Promise(resolve => 
+        setTimeout(resolve, Math.pow(2, attempt) * 1000)
       );
     }
   }

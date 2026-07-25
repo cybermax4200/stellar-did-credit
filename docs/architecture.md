@@ -8,36 +8,31 @@ stellar-did-credit is a three-contract protocol on Stellar/Soroban that lets any
 
 ```mermaid
 graph TD
-    subgraph Consumers
-        APP[Application / Lender UI]
-        SDK[TypeScript SDK]
-    end
+    CON_APP[Application / Lender UI]
+    CON_SDK[TypeScript SDK]
 
-    subgraph Soroban Contracts
-        ID[identity-oracle\nCATORJPJ...]
-        CR[credit-oracle\nCBMMX6GJ...]
-        RV[revocation-registry\nCDNQLXKK...]
-    end
+    SC_ID[identity-oracle\nCATORJPJ...]
+    SC_CR[credit-oracle\nCBMMX6GJ...]
+    SC_RV[revocation-registry\nCDNQLXKK...]
 
-    subgraph Off-chain
-        FEEDER[Trusted Feeder\noff-chain indexer]
-        ISSUER[Credential Issuer]
-        SUBJECT[Subject / Wallet]
-    end
+    OFF_FEEDER[Trusted Feeder\noff-chain indexer]
+    OFF_ISSUER[Credential Issuer]
+    OFF_SUBJECT[Subject / Wallet]
 
-    SUBJECT -->|anchor_did| ID
-    ISSUER  -->|anchor_vc| ID
-    ISSUER  -->|revoke| RV
-    ID      -.->|mark_vc_revoked| ID
+    OFF_SUBJECT -->|anchor_did| SC_ID
+    OFF_ISSUER  -->|anchor_vc| SC_ID
+    OFF_ISSUER  -->|revoke| SC_RV
+    SC_ID       -.->|mark_vc_revoked| SC_ID
 
-    FEEDER  -->|set_vc_count\nupdate_tx_stats| CR
-    APP     -->|record_repayment| CR
-    APP     -->|compute_score| CR
-get_active_vc_count| ID
+    OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
+    CON_APP     -->|record_repayment| SC_CR
+    CON_APP     -->|compute_score| SC_CR
+    SC_CR       -->|get_active_vc_count\n(if IdentityOracleId set)| SC_ID
+    SC_CR       -.->|read VcCount\n(if IdentityOracleId NOT set)| SC_CR
 
-    SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| ID
-    SDK     -->|getScore| CR
-    APP     --> SDK
+    CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
+    CON_SDK     -->|getScore| SC_CR
+    CON_APP     --> CON_SDK
 ```
 
 ---
@@ -47,6 +42,10 @@ get_active_vc_count| ID
 ### identity-oracle
 
 Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors for subjects. It is the source of truth for whether a wallet address has been verified by a trusted issuer.
+
+#### Admin setup
+
+The protocol admin must register each trusted issuer before that address can call `anchor_vc`. This is done through `register_issuer(admin, issuer)` on the identity-oracle contract; the admin can later revoke trust with `deregister_issuer`.
 
 **Key functions**
 
@@ -66,7 +65,8 @@ Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors f
 | Key                      | Type            | Description                                            |
 | ------------------------ | --------------- | ------------------------------------------------------ |
 | `Admin`                  | `Address`       | Instance storage — contract admin                      |
-| `TrustedIssuer(Address)` | `bool`          | Persistent — whether an address is a registered issuer |
+| `TrustedIssuer(Address)` | `bool`          | Persistent — tombstone flag: `true` while a registered issuer is trusted, `false` once deregistered |
+| `IssuersIndex`           | `Vec<Address>`  | Persistent — append-only list of every address ever registered; `list_issuers()` filters this against `TrustedIssuer` |
 | `DIDDocument(Address)`   | `String`        | Persistent — IPFS CID of the subject's DID document    |
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
 
@@ -85,7 +85,7 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `register_lender(admin, lender)`                     | admin    | Whitelists a lender                                |
 | `set_vc_count(feeder, subject, count)`               | feeder   | Caches the subject's VC count from identity-oracle |
 | `update_tx_stats(feeder, subject, stats)`            | feeder   | Updates 30-day transaction volume and count        |
-| `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event                          |
+| `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event; current v1 behavior does not verify a real loan relationship and should be treated as a lender attestation rather than proof of disbursement |
 | `compute_score(subject)`                             | anyone   | Runs the scoring formula and persists the result   |
 | `get_score(subject)`                                 | anyone   | Returns the last computed ScoreRecord              |
 | `update_weights(weights)`                            | admin    | Changes scoring weights (must sum to 100)          |
@@ -114,8 +114,9 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | Function                          | Caller   | Description                                   |
 | --------------------------------- | -------- | --------------------------------------------- |
 | `initialize(admin)`               | deployer | Sets the contract administrator               |
-| `revoke(issuer, vc_hash)`         | issuer   | Marks a VC hash as revoked                    |
-| `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction |
+| `revoke(issuer, vc_hash)`         | issuer   | Marks a VC hash as revoked (issuer authority enforced per `vc_hash`) |
+| `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction (issuer authority enforced per `vc_hash`) |
+
 | `is_revoked(vc_hash)`             | anyone   | Returns true if the hash has been revoked     |
 
 **Storage layout**
@@ -124,15 +125,55 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | ------------------------ | --------- | ------------------------------------------- |
 | `Admin`                  | `Address` | Instance storage — contract admin           |
 | `Status(BytesN<32>)`     | `bool`    | Persistent — revocation flag for a VC hash  |
-| `IssuerOfVC(BytesN<32>)` | `Address` | Persistent — which issuer revoked this hash |
+| `RegisteredVCIssuer(BytesN<32>)` | `Address` | Persistent — authority that is allowed to revoke this hash (first issuer wins) |
+| `IssuerOfVC(BytesN<32>)` | `Address` | Persistent — which issuer performed the latest revoke call for this hash |
+
+
+---
+
+## Instance storage TTL management
+
+Soroban entries have a limited time-to-live (TTL) measured in ledgers. If the TTL of a contract's **instance storage** entry reaches zero, the contract becomes archived — all its data is lost and it can never be called again. To prevent this, every function that reads or writes instance storage must periodically call `extend_ttl`.
+
+### Pattern
+
+Each contract defines two constants:
+
+| Constant | Value | Purpose |
+|---|---|---|
+| `INSTANCE_BUMP_THRESHOLD` | 5 000 | Extend when fewer than ~7 hours of ledgers remain |
+| `INSTANCE_BUMP_AMOUNT` | 500 000 | Extend TTL to ~30 days from now |
+
+The call is placed after authentication succeeds in every admin-gated function:
+
+```rust
+env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+```
+
+### Covered functions
+
+All three contracts apply this pattern in `initialize` and every admin-gated function:
+
+**identity-oracle**
+- `initialize`, `register_issuer`, `deregister_issuer`, `upgrade`
+
+**credit-oracle**
+- `initialize`, `register_feeder`, `deregister_feeder`, `register_lender`, `deregister_lender`, `propose_weights`, `upgrade`
+
+**revocation-registry**
+- `initialize`, `upgrade`
+
+Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`, etc. touch only persistent storage and do not need to extend the instance TTL. If the contract is not called by an admin for an extended period, anyone can call any of the covered admin-gated functions (with admin authentication) to refresh the TTL.
 
 ---
 
 ## Cross-contract interaction
 
-Currently, the VC count fed into credit-oracle is supplied off-chain by a trusted feeder that reads identity-oracle and calls `set_vc_count`. This is a deliberate design choice for the v1 protocol: it avoids cross-contract call overhead and keeps the scoring gas cost predictable.
+The `credit-oracle` supports a dual-path mechanism for resolving a subject's VC count during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
 
-In a future version, credit-oracle will call identity-oracle directly:
+### Cross-Contract Path (Live)
+
+If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract:
 
 ```mermaid
 sequenceDiagram
@@ -148,9 +189,90 @@ sequenceDiagram
     CreditOracle-->>Caller: score: u32
 ```
 
-This will require credit-oracle to store the identity-oracle contract ID and use `env.invoke_contract`. The feeder role for VC count will be deprecated once this is live.
+In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+
+### Fallback Path (Cached)
+
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`. 
+
+While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+
+### Migration to Cross-Contract VC Count
+
+To migrate a deployment from the cached fallback path to the live cross-contract path:
+
+1. **Configure the Oracle ID**: The admin calls `set_identity_oracle(identity_oracle_id)` on `credit-oracle`.
+2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls will automatically use the cross-contract lookup.
+3. **Deprecate Feeder Input**: The trusted feeder should stop calling `set_vc_count`. Any further updates via `set_vc_count` will be successfully written to persistent storage but entirely ignored by `compute_score`.
+4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement `get_active_vc_count`, the `compute_score` transaction will unconditionally fail.
 
 ---
+
+## TTL management
+
+Soroban persistent and instance storage entries have a time-to-live (TTL) measured in ledgers. If an entry's TTL expires, the entry is **archived** (removed from storage). To prevent data loss, all three contracts proactively extend TTLs on every write and provide an admin-only `maintain_storage` function for passive maintenance.
+
+### Strategy: hybrid (automatic + maintenance)
+
+1. **Automatic extension on every write** — whenever a contract writes to persistent storage (`set`), it immediately calls `extend_ttl` on that entry. This ensures actively-used data stays alive without any external coordination.
+
+2. **`maintain_storage` admin function** — extends instance storage TTL (Admin, Config, PendingWeights). Can be called periodically by a cron job or manually to protect a contract whose configuration rarely changes.
+
+### TTL constants
+
+| Constant               | Value       | Approximate real time | Scope          |
+| ---------------------- | ----------- | --------------------- | -------------- |
+| `INST_TTL_THRESHOLD`   | 120 960     | ~7 days               | Instance       |
+| `INST_TTL_EXTEND`      | 6 307 200   | ~1 year               | Instance       |
+| `PERS_TTL_THRESHOLD`   | 120 960     | ~7 days               | Persistent     |
+| `PERS_TTL_EXTEND`      | 518 400     | ~30 days              | Persistent     |
+
+> Ledger time is calculated at ≈5 s/ledger (Stellar network average).
+
+### Where TTL is extended
+
+**identity-oracle**
+
+| Operation          | Entry extended                    |
+| ------------------ | --------------------------------- |
+| `initialize`       | Instance storage (Admin)          |
+| `register_issuer`  | `TrustedIssuer(issuer)`           |
+| `anchor_did`       | `DIDDocument(subject)`            |
+| `anchor_vc`        | `VCAnchors(subject)`              |
+| `mark_vc_revoked`  | `VCAnchors(subject)`              |
+| `maintain_storage` | Instance storage                  |
+
+**credit-oracle**
+
+| Operation            | Entry extended                              |
+| -------------------- | ------------------------------------------- |
+| `initialize`         | Instance storage (Admin, Config)            |
+| `register_feeder`    | `TrustedFeeder(feeder)`                     |
+| `register_lender`    | `TrustedLender(lender)`                     |
+| `update_tx_stats`    | `TxStats(subject)`                          |
+| `record_repayment`   | `RepaymentRecord(subject)`                  |
+| `set_vc_count`       | `VcCount(subject)`                          |
+| `compute_score`      | `Score(subject)`, `TxStats(subject)`, `RepaymentRecord(subject)`, `VcCount(subject)` |
+| `maintain_storage`   | Instance storage                            |
+
+**revocation-registry**
+
+| Operation        | Entry extended                             |
+| ---------------- | ------------------------------------------ |
+| `initialize`     | Instance storage (Admin)                   |
+| `revoke`         | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `batch_revoke`   | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `maintain_storage` | Instance storage                         |
+
+### Maintenance recommendations
+
+- Deploy an off-chain cron job (or serverless function) that calls `maintain_storage` on all three contracts at least once every **6 months** (well within the 1‑year instance TTL).
+- No additional action is needed for persistent entries — their TTLs are extended automatically whenever they are written.
+- If an entry has not been touched for more than ~30 days, it may be archived. This is by design: orphaned data can be garbage-collected by the network.
+
+---
+
+## Future work
 
 ## Data flow narrative
 
@@ -170,6 +292,8 @@ An off-chain indexer (the feeder) monitors the subject's on-chain activity, quer
 
 When a lender disburses a loan and the subject repays, the lender calls `record_repayment` on credit-oracle, flagging each repayment as on-time or late.
 
+This is a deliberate v1 limitation: the contract currently accepts repayment data from any registered lender without verifying that the lender actually disbursed a loan to that subject. In other words, `record_repayment` is an attestation from a trusted lender, not proof of an existing loan relationship. A future version should add explicit loan-tracking state or signed disbursement/repayment attestations to close this gap.
+
 ### 5. Score is computed
 
 Anyone (the subject, a lender, or an application) calls `compute_score(subject)`. The contract reads the three input components, runs the weighted formula, clamps the result to 300–850, and persists a `ScoreRecord`.
@@ -177,3 +301,78 @@ Anyone (the subject, a lender, or an application) calls `compute_score(subject)`
 ### 6. Consumer reads the score
 
 A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord`. The SDK's `getScore()` method does this via a read-only simulation — no transaction fees required.
+
+---
+
+## Architecture Decision Records
+
+### ADR-001 — `compute_score` requires no authorisation
+
+**Status:** Accepted
+
+**Context**
+
+`compute_score(subject)` in `credit-oracle` writes a `ScoreRecord` to persistent
+storage but requires no `require_auth()` call. During the initial security review
+the absence of an auth check was flagged as potentially unintentional.
+
+**Decision**
+
+The open-call design is intentional. The function reads only data that has
+already been submitted by trusted parties (feeders and lenders) and writes only
+the subject's own score record. There is no way for an adversarial caller to
+inflate, deflate, or corrupt a score beyond what the on-chain inputs support.
+Keeping the function permissionless:
+
+- allows lenders and applications to refresh a score without holding a subject
+  signature,
+- lets the off-chain feeder refresh scores in the same transaction as a data
+  update, and
+- treats score computation as a public utility rather than a privileged action.
+
+**Consequences**
+
+Successful recomputations are rate-limited per subject by the configured
+`ComputeCooldownLedgers` value. The default interval is one ledger, which
+prevents same-ledger timestamp grinding while preserving the open-call design.
+The last successful computation ledger is stored as `LastComputed(Address)`, and
+admin/governance can update the interval with `update_compute_cooldown`.
+
+---
+
+### ADR-002 — Uniform `require_admin` helper across all three contracts
+
+**Status:** Accepted
+
+**Context**
+
+Prior to this change the three contracts used two different admin-auth styles:
+
+- `update_weights` / `propose_weights` called `stored_admin.require_auth()`
+  directly after loading the admin from storage (implicit lookup).
+- `register_feeder`, `register_lender`, `register_issuer` etc. required the
+  caller to pass `admin` as an explicit parameter, then compared it against
+  storage before calling `require_auth()` on the passed-in value.
+
+The mixed styles made the auth model hard to reason about and audit.
+
+**Decision**
+
+Extract a private `fn require_admin(env: &Env) -> Address` in each contract.
+The helper loads the stored admin, immediately calls `require_auth()` on it, and
+returns the address. Every admin-gated function now calls `require_admin` first,
+then (for the explicit-parameter variants) compares the returned address to the
+caller-supplied `admin` to preserve the existing API surface.
+
+**Consequences**
+
+- A single read path for the admin address — easier to audit.
+- `require_auth()` is always called on the *stored* admin, not on an
+  unvalidated caller-supplied value.
+- The public function signatures are unchanged; no SDK or script updates needed.
+
+---
+
+## Event Indexing
+
+For a detailed catalog of events emitted by the smart contracts and instructions on subscribing to them for off-chain sync, see the [Event Indexing Guide](event-indexing.md).
