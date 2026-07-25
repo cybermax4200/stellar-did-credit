@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `cargo doc --workspace` now generates complete Rust API docs with no warnings; all public items across `credit-oracle`, `identity-oracle`, `revocation-registry`, and `governance` have `///` doc comments (#266)
+- `typedoc` generates TypeScript API docs from JSDoc comments in `packages/sdk/src/index.ts`; added `typedoc` as a dev dependency and a `docs` script to the SDK package (#266)
+- Root `package.json` exposes a `docs` script that regenerates both Rust and TypeScript API docs in one command (#266)
+- `typedoc.json` workspace-level TypeDoc configuration file (#266)
+- CI `docs` job: runs `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` and `typedoc` to catch doc regressions on every PR (#266)
+
 ### Changed
 
 - `identity-oracle`: `deregister_issuer` no longer rebuilds the full `IssuersIndex` vector on every call. `TrustedIssuer(Address)` is now a tombstone flag (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `IssuersIndex` becomes an append-only record of every address ever registered. Deregistration is now a single storage write instead of an O(n) scan + rewrite. `list_issuers()` keeps its public signature and still returns only currently-registered issuers, now by filtering `IssuersIndex` against each entry's `TrustedIssuer` flag. No storage migration is required — both storage keys keep their original value types (#224)

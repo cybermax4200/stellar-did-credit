@@ -36,7 +36,6 @@ fn require_admin(env: &Env) -> Address {
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[allow(missing_docs)]
 pub enum RevocationRegistryError {
     /// Contract is already initialized.
     AlreadyInitialized = 1,
@@ -52,7 +51,6 @@ pub enum RevocationRegistryError {
 
 /// Storage keys for revocation registry contract.
 #[contracttype]
-#[allow(missing_docs)]
 pub enum RevocationKey {
     /// Contract administrator address.
     Admin,

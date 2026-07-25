@@ -1,4 +1,9 @@
 #![no_std]
+//! Credit oracle contract for the Stellar DID Credit protocol.
+//!
+//! Computes composite credit scores for Stellar addresses by combining
+//! on-chain verified credential counts, 30-day transaction statistics,
+//! and repayment history. Scores are bounded to [MIN_SCORE, MAX_SCORE].
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, Symbol, Val, Vec as SorobanVec,
@@ -332,7 +337,10 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Update transaction statistics for a user
+    /// Update transaction statistics for a subject address.
+    ///
+    /// Auth: `feeder` must be a registered trusted feeder and must sign
+    /// the transaction.
     pub fn update_tx_stats(
         env: Env,
         feeder: Address,
@@ -353,7 +361,14 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Record a repayment event for a user
+    /// Record a repayment event for a subject.
+    ///
+    /// Increments the subject's total repayment count and, when `on_time` is
+    /// `true`, also increments the on-time count. Uses saturating arithmetic
+    /// to avoid overflow on adversarial inputs.
+    ///
+    /// Auth: `lender` must be a registered trusted lender and must sign
+    /// the transaction.
     pub fn record_repayment(
         env: Env,
         lender: Address,
@@ -420,6 +435,16 @@ impl CreditOracle {
 /// without requiring a Soroban `Env`.
 ///
 /// All inputs mirror the fields read from storage in `compute_score`.
+///
+/// # Parameters
+/// - `vc_count` — number of active verified credentials.
+/// - `volume_30d` — 30-day transaction volume in stroops.
+/// - `avg_counterparties` — average distinct counterparties (bonus at ≥ 10).
+/// - `on_time_count` — number of on-time repayments.
+/// - `total_count` — total repayments recorded.
+/// - `weights` — scoring weights (must sum to 100).
+///
+/// Returns a score clamped to [`MIN_SCORE`]–[`MAX_SCORE`].
 pub fn compute_score_pure(
     vc_count: u32,
     volume_30d: i128,

@@ -1,43 +1,73 @@
 #![no_std]
+//! Governance contract for the Stellar DID Credit protocol.
+//!
+//! Provides on-chain proposal creation, voting, and execution that can
+//! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
 
+/// Error types for the governance contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum GovernanceError {
+    /// Contract is already initialized.
     AlreadyInitialized = 1,
+    /// Caller is not authorized to perform this action.
     NotAuthorized = 2,
+    /// Proposal with the given ID does not exist.
     ProposalNotFound = 3,
+    /// Proposal voting period has already expired.
     ProposalExpired = 4,
+    /// Proposal voting period has not yet expired; cannot execute.
     ProposalNotExpired = 5,
+    /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
+    /// Caller has already voted on this proposal.
     AlreadyVoted = 7,
+    /// Proposed scoring weights do not sum to 100.
     InvalidWeights = 8,
+    /// Quorum value must be positive.
     InvalidQuorum = 9,
+    /// Vote weight must be positive.
     InvalidVoteWeight = 10,
+    /// Total votes cast did not meet the required quorum.
     QuorumNotMet = 11,
 }
 
+/// Storage keys for the governance contract.
 #[contracttype]
 pub enum DataKey {
+    /// Contract administrator address.
     Admin,
+    /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
+    /// Monotonically increasing counter used to assign proposal IDs.
     NextProposalId,
+    /// Default quorum (minimum total votes) required for proposal execution.
     QuorumRequired,
+    /// Proposal data stored by proposal ID.
     Proposal(u64),
+    /// Per-voter flag recording whether `voter` has voted on `proposal_id`.
     Voted(u64, Address),
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// An on-chain governance proposal for updating credit-oracle scoring weights.
 pub struct GovernanceProposal {
+    /// Unique proposal identifier, assigned at creation.
     pub id: u64,
+    /// Scoring weights to apply to the credit-oracle if the proposal passes.
     pub proposed_weights: ScoringWeights,
+    /// Accumulated weight of votes cast in favor.
     pub votes_for: i128,
+    /// Accumulated weight of votes cast against.
     pub votes_against: i128,
+    /// Ledger sequence number after which voting ends.
     pub expiry_ledger: u32,
+    /// Whether this proposal has been executed (weights applied or vote failed).
     pub executed: bool,
     /// Minimum `votes_for + votes_against` required for `execute` to apply
     /// this proposal's weights, snapshotted from the contract-wide default
@@ -46,11 +76,18 @@ pub struct GovernanceProposal {
     pub quorum_required: i128,
 }
 
+/// On-chain governance contract.
 #[contract]
 pub struct Governance;
 
 #[contractimpl]
 impl Governance {
+    /// Initialize the governance contract.
+    ///
+    /// Sets the administrator, credit-oracle address, and default quorum required
+    /// for proposals. `quorum_required` must be greater than zero.
+    ///
+    /// Auth: `admin` must sign the transaction.
     pub fn initialize(
         env: Env,
         admin: Address,
@@ -111,6 +148,12 @@ impl Governance {
             .unwrap_or(0)
     }
 
+    /// Create a new governance proposal to update the credit-oracle's scoring weights.
+    ///
+    /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
+    /// ledgers from the current sequence. Returns the new proposal ID.
+    ///
+    /// Auth: `proposer` must sign the transaction.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -157,6 +200,12 @@ impl Governance {
         Ok(id)
     }
 
+    /// Cast a vote on an open proposal.
+    ///
+    /// `vote_weight` must be positive. Each address may vote at most once per
+    /// proposal. Returns an error if the proposal has expired or been executed.
+    ///
+    /// Auth: `voter` must sign the transaction.
     pub fn vote(
         env: Env,
         voter: Address,
@@ -207,6 +256,11 @@ impl Governance {
         Ok(())
     }
 
+    /// Execute an expired proposal.
+    ///
+    /// If `votes_for > votes_against` and the quorum is met, the proposed weights
+    /// are applied to the credit-oracle. Otherwise the proposal is marked executed
+    /// without changing the weights. Can only be called after `expiry_ledger`.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -249,6 +303,10 @@ impl Governance {
         Ok(())
     }
 
+    /// Accept the admin role of the credit-oracle on behalf of this contract.
+    ///
+    /// Must be called after the current oracle admin proposes this contract as
+    /// the new admin via `propose_new_admin`. Admin auth is required.
     pub fn accept_oracle_admin(env: Env) -> Result<(), GovernanceError> {
         let admin: Address = env
             .storage()
@@ -268,6 +326,7 @@ impl Governance {
         Ok(())
     }
 
+    /// Fetch a proposal by its ID, or `None` if it does not exist.
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<GovernanceProposal> {
         env.storage()
             .persistent()

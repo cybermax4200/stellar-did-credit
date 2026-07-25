@@ -1,4 +1,9 @@
 #![no_std]
+//! Identity oracle contract for the Stellar DID Credit protocol.
+//!
+//! Manages trusted credential issuers, DID document anchoring, and
+//! verifiable credential (VC) lifecycle — including anchoring, revocation,
+//! and active-count queries used by the credit-oracle.
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, String, Vec,
@@ -147,7 +152,12 @@ impl IdentityOracle {
         Ok(())
     }
 
-    /// Set the revocation registry ID to allow checking global revocations.
+    /// Set the revocation registry contract ID used to check global revocations.
+    ///
+    /// When set, `is_verified`, `get_active_vc_count`, and `verify_vc` will
+    /// additionally consult the registry before returning results.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn set_revocation_registry(
         env: Env,
         registry_id: Address,
