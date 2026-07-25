@@ -4,21 +4,9 @@ This guide shows how a credential issuer — a KYC provider, payroll platform, o
 
 The protocol stores only a 32-byte SHA-256 hash of the credential on-chain. The full JSON-LD document stays off-chain (on your servers or IPFS), preserving user privacy while making the credential verifiable by any third party who receives a copy.
 
-## Table of contents
-
-- [Prerequisites](#prerequisites)
-- [VC JSON-LD format](#vc-json-ld-format)
-- [Hashing the credential](#hashing-the-credential)
-- [Anchoring on-chain via the SDK](#anchoring-on-chain-via-the-sdk)
-- [Key management best practices](#key-management-best-practices)
-- [Revoking a credential](#revoking-a-credential)
-- [Full working example](#full-working-example)
-
----
-
 ## Prerequisites
 
-Before you can anchor credentials, the protocol admin must register your Stellar address as a trusted issuer by calling `register_issuer(admin, issuer_address)` on the identity-oracle contract. Until that transaction is confirmed, `anchor_vc` will reject your calls with `IssuerNotAuthorized`.
+Before you can anchor credentials, the protocol admin must register your Stellar address as a trusted issuer by calling `register_issuer(admin, issuer_address)` on the identity-oracle contract. For the admin-side setup flow, see the [admin setup](architecture.md#admin-setup) section in the architecture guide. Until that transaction is confirmed, `anchor_vc` will reject your calls with `IssuerNotAuthorized`.
 
 You will also need:
 
@@ -29,6 +17,16 @@ You will also need:
 ```bash
 npm install @stellar-did-credit/sdk @stellar/stellar-sdk
 ```
+
+## Table of contents
+
+- [Prerequisites](#prerequisites)
+- [VC JSON-LD format](#vc-json-ld-format)
+- [Hashing the credential](#hashing-the-credential)
+- [Anchoring on-chain via the SDK](#anchoring-on-chain-via-the-sdk)
+- [Key management best practices](#key-management-best-practices)
+- [Revoking a credential](#revoking-a-credential)
+- [Full working example](#full-working-example)
 
 ---
 
