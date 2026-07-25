@@ -20,6 +20,12 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 * **Emitted When:** A trusted issuer anchors a new Verifiable Credential for a subject.
 * **feeder Action:** Trigger sync for `subject` (fetch new VC count, submit `set_vc_count`).
 
+#### RevocationRegistryUpdated
+* **Topic:** `[Symbol("RegSet")]`
+* **Data:** `(previous_registry: Address, new_registry: Address)`
+* **Emitted When:** The admin updates the revocation registry contract ID on the identity oracle.
+* **feeder Action:** None (configuration tracking). Update local cache of the revocation registry address.
+
 #### IssReg / IssDeReg
 * **Topic:** `[Symbol("IssReg")]` or `[Symbol("IssDeReg")]`
 * **Data:** `issuer: Address`
@@ -43,6 +49,12 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 ---
 
 ### 3. Credit Oracle Events
+
+#### IdentityOracleUpdated
+* **Topic:** `[Symbol("OrclSet")]`
+* **Data:** `(previous_oracle: Address, new_oracle: Address)`
+* **Emitted When:** The admin updates the identity-oracle contract ID on the credit oracle.
+* **feeder Action:** None (configuration tracking). Update local cache of the identity-oracle address.
 
 #### Score
 * **Topic:** `[Symbol("Score")]`
