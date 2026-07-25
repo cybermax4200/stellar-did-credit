@@ -20,6 +20,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `identity-oracle`: `deactivate_identity(subject)` — subject-authorized opt-out that revokes all of the subject's currently active VCs and marks them deactivated, returning the number of VCs revoked. `is_verified` returns false for a deactivated subject regardless of any VC anchored before or after deactivation. Reversible via `reactivate_identity(subject)`, which clears the deactivation flag but does not restore the revoked VCs (matching this contract's existing one-way revocation semantics) — a reactivated subject needs fresh VCs anchored by issuers. New `is_deactivated(subject)` view function exposes the flag for cross-contract checks (#258)
+- `credit-oracle`: `compute_score` now floors a deactivated subject's score to `MIN_SCORE` (checked cross-contract via identity-oracle's `is_deactivated`, only when `IdentityOracleId` is configured) instead of computing normally from their real `TxStats`/`RepaymentRecord` (#258)
 - `feeder`: track per-subject sync state (last-synced RPC ledger, last observed credit score alongside the existing vc_count/stats) and log it each cycle for staleness diagnostics; purely informational, doesn't affect which submissions are skipped (#267)
 - `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
 - `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)

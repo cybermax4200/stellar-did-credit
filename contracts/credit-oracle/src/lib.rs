@@ -490,6 +490,14 @@ impl CreditOracle {
     /// Calls are rate-limited per subject by `ComputeCooldownLedgers`. The
     /// default is one ledger, preventing repeated same-ledger refreshes from
     /// gaming the persisted `last_updated` timestamp.
+    ///
+    /// # Deactivated identities
+    ///
+    /// When `IdentityOracleId` is configured, a subject who has deactivated
+    /// their identity there (opted out) always gets a floored `MIN_SCORE`
+    /// here, regardless of their real `TxStats`/`RepaymentRecord` — this
+    /// check only runs when the cross-contract link is configured, since
+    /// without it there's no way to know about the deactivation at all.
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
         let current_ledger = env.ledger().sequence();
         let cooldown: u32 = env
@@ -507,6 +515,38 @@ impl CreditOracle {
                 if current_ledger < last_ledger.saturating_add(cooldown) {
                     return Err(CreditOracleError::ComputeCooldownActive);
                 }
+            }
+        }
+
+        // A deactivated identity (opted out via identity-oracle's
+        // deactivate_identity) always floors to MIN_SCORE, bypassing the
+        // usual inputs entirely — this only applies when the cross-contract
+        // identity-oracle link is configured; without it there's no way to
+        // know a subject deactivated their identity there.
+        if let Some(identity_id) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&DataKey::IdentityOracleId)
+        {
+            let args: SorobanVec<Val> =
+                SorobanVec::from_array(&env, [subject.clone().into_val(&env)]);
+            let deactivated: bool =
+                env.invoke_contract(&identity_id, &Symbol::new(&env, "is_deactivated"), args);
+            if deactivated {
+                env.storage().persistent().set(
+                    &DataKey::Score(subject.clone()),
+                    &ScoreRecord {
+                        score: MIN_SCORE,
+                        last_updated: env.ledger().timestamp(),
+                        vc_count: 0,
+                        repayment_rate: 0,
+                        tx_volume_30d: 0,
+                    },
+                );
+                env.storage()
+                    .persistent()
+                    .set(&DataKey::LastComputed(subject), &current_ledger);
+                return Ok(MIN_SCORE);
             }
         }
 

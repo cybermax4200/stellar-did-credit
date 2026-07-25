@@ -101,6 +101,10 @@ pub enum DataKey {
     VCAnchors(Address),
     /// The ID of the revocation registry contract.
     RevocationRegistryId,
+    /// Whether the given subject has deactivated their identity. Present and
+    /// `true` while deactivated; removed on reactivation. Absent means
+    /// active (never deactivated, or reactivated since).
+    Deactivated(Address),
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -362,8 +366,93 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Deactivates a subject's identity: revokes every currently non-revoked
+    /// VC anchored for them and marks them deactivated. On-chain data can't
+    /// be deleted, so this is the opt-out mechanism — once deactivated,
+    /// `is_verified` returns false regardless of any VC anchored before or
+    /// after this call, and the credit-oracle's cross-contract scoring path
+    /// floors the subject's score.
+    ///
+    /// Auth: the subject themselves, same as `anchor_did` — this contract
+    /// treats subjects as first-class principals over their own data, not
+    /// something only an issuer or admin can act on.
+    ///
+    /// Reversible via `reactivate_identity`, but reactivation does not
+    /// restore the VCs revoked here — matching the rest of this contract,
+    /// where revocation is a one-way action; a reactivated subject needs
+    /// their issuers to anchor fresh credentials.
+    ///
+    /// Idempotent: calling this again on an already-deactivated subject
+    /// simply revokes whatever (if anything) is still unrevoked and returns
+    /// that count, which is 0 once nothing is left to revoke.
+    ///
+    /// Returns the number of VCs actually revoked by this call.
+    pub fn deactivate_identity(env: Env, subject: Address) -> Result<u32, IdentityOracleError> {
+        subject.require_auth();
+
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut revoked_count: u32 = 0;
+        let mut updated = Vec::new(&env);
+        for mut record in anchors.iter() {
+            if !record.revoked {
+                record.revoked = true;
+                revoked_count += 1;
+            }
+            updated.push_back(record);
+        }
+        env.storage().persistent().set(&key, &updated);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deactivated(subject.clone()), &true);
+
+        env.events()
+            .publish((symbol_short!("Deactiv"),), (subject, revoked_count));
+        Ok(revoked_count)
+    }
+
+    /// Reverses a prior `deactivate_identity` call: `is_verified` and the
+    /// credit-oracle's score floor no longer apply. Does not un-revoke the
+    /// VCs that were revoked at deactivation time (see `deactivate_identity`
+    /// docs) — a reactivated subject starts with zero active VCs until
+    /// issuers anchor new ones.
+    ///
+    /// Auth: the subject themselves. A no-op (not an error) if the subject
+    /// wasn't deactivated to begin with.
+    pub fn reactivate_identity(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
+        subject.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Deactivated(subject));
+        Ok(())
+    }
+
+    /// Whether `subject` has deactivated their identity via
+    /// `deactivate_identity` (and not since reactivated). Exposed so
+    /// credit-oracle can check this cross-contract before computing a score.
+    pub fn is_deactivated(env: Env, subject: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject))
+            .unwrap_or(false)
+    }
+
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
     pub fn is_verified(env: Env, subject: Address) -> bool {
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
             .storage()
