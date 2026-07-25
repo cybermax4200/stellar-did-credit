@@ -147,6 +147,73 @@ fund_deployer() {
 # an interrupted deployment safely restartable without redeploying contracts
 # that already landed on-chain.
 # ---------------------------------------------------------------------------
+read_deployment_value() {
+  local key="$1"
+  local file="$2"
+
+  if command -v jq >/dev/null 2>&1; then
+    jq -r --arg key "$key" '
+      def extract:
+        if . == null then empty
+        elif type == "string" then .
+        elif type == "object" and has("address") then .address
+        elif type == "object" and has("contract_id") then .contract_id
+        elif type == "object" and has("id") then .id
+        else empty end;
+
+      ((.contracts[$key] // .[$key]) | extract) // empty
+    ' "$file"
+  elif command -v python3 >/dev/null 2>&1; then
+    python3 - "$file" "$key" <<'PY'
+import json
+import sys
+from typing import Any
+
+file_path, key = sys.argv[1], sys.argv[2]
+
+try:
+    with open(file_path, "r", encoding="utf-8") as handle:
+        data = json.load(handle)
+except FileNotFoundError:
+    raise SystemExit(0)
+except json.JSONDecodeError as exc:
+    print(f"Error: failed to parse deployment metadata in {file_path}: {exc}", file=sys.stderr)
+    raise SystemExit(1) from exc
+
+
+def extract(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        for field in ("address", "contract_id", "id"):
+            nested = value.get(field)
+            if isinstance(nested, str) and nested:
+                return nested
+    return ""
+
+
+if isinstance(data, dict):
+    contracts = data.get("contracts")
+    if isinstance(contracts, dict):
+        if key in contracts:
+            value = extract(contracts[key])
+            if value:
+                print(value)
+                raise SystemExit(0)
+    if key in data:
+        value = extract(data[key])
+        if value:
+            print(value)
+            raise SystemExit(0)
+PY
+  else
+    echo "Error: jq or python3 is required to parse deployment metadata from $file" >&2
+    exit 1
+  fi
+}
+
 IDENTITY_ID=""
 CREDIT_ID=""
 REVOCATION_ID=""
@@ -154,13 +221,9 @@ REVOCATION_ID=""
 if $RESUME && [ -f "$DEPLOYMENTS_FILE" ]; then
   echo "Resume mode: reading existing deployments from $DEPLOYMENTS_FILE ..."
 
-  # Extract values with basic grep/sed – no jq dependency required.
-  IDENTITY_ID=$(grep -o '"identity-oracle": *"[^"]*"' "$DEPLOYMENTS_FILE" \
-    | sed 's/.*: *"\([^"]*\)"/\1/' || true)
-  CREDIT_ID=$(grep -o '"credit-oracle": *"[^"]*"' "$DEPLOYMENTS_FILE" \
-    | sed 's/.*: *"\([^"]*\)"/\1/' || true)
-  REVOCATION_ID=$(grep -o '"revocation-registry": *"[^"]*"' "$DEPLOYMENTS_FILE" \
-    | sed 's/.*: *"\([^"]*\)"/\1/' || true)
+  IDENTITY_ID=$(read_deployment_value "identity-oracle" "$DEPLOYMENTS_FILE")
+  CREDIT_ID=$(read_deployment_value "credit-oracle" "$DEPLOYMENTS_FILE")
+  REVOCATION_ID=$(read_deployment_value "revocation-registry" "$DEPLOYMENTS_FILE")
 
   echo "  identity-oracle:     ${IDENTITY_ID:-(missing)}"
   echo "  credit-oracle:       ${CREDIT_ID:-(missing)}"

@@ -386,6 +386,49 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Returns the DID document CID anchored for the given subject, if any.
+    pub fn get_did_document(env: Env, subject: Address) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DIDDocument(subject))
+    }
+
+    /// Deactivate the subject's DID.
+    ///
+    /// 1. Revokes all active verifiable credentials anchored for the subject.
+    /// 2. Removes the anchored DID Document CID.
+    /// 3. Emits a `DIDDeact` event.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
+        subject.require_auth();
+
+        // 1. Revoke all VCs
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if anchors.len() > 0 {
+            let mut updated = Vec::new(&env);
+            for mut record in anchors.iter() {
+                record.revoked = true;
+                updated.push_back(record);
+            }
+            env.storage().persistent().set(&key, &updated);
+        }
+
+        // 2. Remove DID Document
+        env.storage().persistent().remove(&DataKey::DIDDocument(subject.clone()));
+
+        // 3. Emit event
+        env.events().publish((symbol_short!("DIDDeact"),), subject);
+
+        Ok(())
+    }
+
     /// Anchor a verifiable credential (VC) for a subject issued by a trusted issuer.
     pub fn anchor_vc(
         env: Env,
@@ -403,7 +446,7 @@ impl IdentityOracle {
         issuer: Address,
         subject: Address,
         vc_hash: BytesN<32>,
-        credential_type: Symbol,
+        _credential_type: Symbol,
     ) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         issuer.require_auth();
@@ -753,7 +796,65 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Env};
+    use soroban_sdk::{symbol_short, testutils::Address as _, testutils::Events, Env, TryIntoVal};
+
+    #[test]
+    fn test_deactivate_did_removes_did_and_revokes_vcs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_some());
+
+        client.deactivate_did(&subject);
+
+        assert!(!client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_none());
+    }
+
+    #[test]
+    fn test_deactivate_did_removes_did_and_revokes_vcs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_some());
+
+        client.deactivate_did(&subject);
+
+        assert!(!client.is_verified(&subject));
+        assert!(client.get_did_document(&subject).is_none());
+    }
 
     #[test]
     fn test_anchor_vc_by_trusted_issuer() {
