@@ -111,6 +111,8 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+        env.events()
+            .publish((symbol_short!("Init"),), (admin, credit_oracle, quorum_required));
         Ok(())
     }
 
@@ -554,5 +556,41 @@ mod tests {
         }
         
         assert!(found_event, "ProposalCancelled event should be emitted");
+    }
+
+    #[test]
+    fn test_initialize_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle = Address::generate(&env);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle, &1000);
+
+        let events = env.events().all();
+        let mut found = false;
+
+        for (contract_id, event) in events.iter() {
+            if contract_id == gov_id {
+                let topics = event.topics;
+                if topics.len() == 1 {
+                    let symbol: soroban_sdk::Symbol =
+                        topics.get(0).unwrap().try_into_val(&env).unwrap();
+                    if symbol == soroban_sdk::symbol_short!("Init") {
+                        found = true;
+                        let data: (Address, Address, i128) =
+                            event.data.try_into_val(&env).unwrap();
+                        assert_eq!(data.0, admin);
+                        assert_eq!(data.1, credit_oracle);
+                        assert_eq!(data.2, 1000);
+                    }
+                }
+            }
+        }
+
+        assert!(found, "Init event should be emitted");
     }
 }

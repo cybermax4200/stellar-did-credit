@@ -85,6 +85,12 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 
 ### 4. Governance Events
 
+#### Init
+* **Topic:** `[Symbol("Init")]`
+* **Data:** `(admin: Address, credit_oracle: Address, quorum_required: i128)`
+* **Emitted When:** The governance contract is initialized.
+* **feeder Action:** None (deployment tracking).
+
 #### ProposalCreated
 * **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
 * **Data:** `(proposer: Address, expiry_ledger: u32)`
