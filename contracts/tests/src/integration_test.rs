@@ -516,4 +516,22 @@ mod tests {
         assert!(!revocation.is_revoked(&hash1));
         assert!(!revocation.is_revoked(&hash3));
     }
+
+    #[test]
+    fn test_batch_revoke_empty_vector_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let empty_hashes = soroban_sdk::Vec::new(&env);
+
+        let res = revocation.try_batch_revoke(&issuer, &empty_hashes);
+        assert!(res.is_ok());
+    }
 }

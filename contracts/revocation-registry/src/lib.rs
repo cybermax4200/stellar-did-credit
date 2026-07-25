@@ -200,6 +200,9 @@ impl RevocationRegistry {
     /// This operation is atomic (all-or-nothing). If any VC hash in the batch fails
     /// (e.g., due to an `IssuerMismatch`), the entire transaction aborts and no
     /// revocations from the batch are persisted.
+    ///
+    /// Calling `batch_revoke` with an empty `vc_hashes` vector is a valid no-op,
+    /// returning `Ok(())` without modifying state or adding revocations.
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
@@ -476,5 +479,19 @@ mod tests {
         env.mock_auths(&[]);
         let res = client.try_maintain_storage();
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_batch_revoke_empty_vector_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let empty_hashes = Vec::new(&env);
+
+        let res = client.try_batch_revoke(&issuer, &empty_hashes);
+        assert!(res.is_ok());
     }
 }
