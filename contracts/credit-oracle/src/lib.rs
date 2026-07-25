@@ -1608,6 +1608,99 @@ mod tests {
     }
 
     #[test]
+    fn test_admin_transfer_preserves_trusted_feeder_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let old_feeder = Address::generate(&env);
+        let new_feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin1);
+        client.register_feeder(&old_feeder);
+
+        client.update_tx_stats(
+            &old_feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 5_000,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+
+        client.propose_new_admin(&admin2);
+        client.accept_admin(&admin2);
+
+        let stored_admin: Address = env.as_contract(&contract_id, || {
+            env.storage().instance().get(&DataKey::Admin).unwrap()
+        });
+        assert_eq!(stored_admin, admin2);
+
+        let feeder_registered: bool = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TrustedFeeder(old_feeder.clone()))
+                .unwrap_or(false)
+        });
+        assert!(feeder_registered, "trusted feeder should survive admin transfer");
+
+        client.update_tx_stats(
+            &old_feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 6_000,
+                tx_count_30d: 11,
+                avg_counterparties: 4,
+            },
+        );
+
+        let stored_stats: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored_stats.volume_30d, 6_000);
+
+        client.deregister_feeder(&old_feeder);
+        client.register_feeder(&new_feeder);
+
+        let result = client.try_update_tx_stats(
+            &old_feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 7_000,
+                tx_count_30d: 12,
+                avg_counterparties: 5,
+            },
+        );
+        assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
+
+        client.update_tx_stats(
+            &new_feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 8_000,
+                tx_count_30d: 13,
+                avg_counterparties: 6,
+            },
+        );
+
+        let updated_stats: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject.clone()))
+                .unwrap()
+        });
+        assert_eq!(updated_stats.volume_30d, 8_000);
+    }
+
+    #[test]
     #[should_panic(expected = "not authorized")]
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
