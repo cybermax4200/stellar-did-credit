@@ -277,6 +277,7 @@ stellar-did-credit/
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
+│   ├── epoch-model.md          # TTL management, compute cooldown, weight timelock
 │   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
 │   ├── scoring-spec.md         # Scoring formula + worked examples
 │   └── zk-proof-design.md      # Phase 4 ZK selective disclosure design
@@ -482,6 +483,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Stellar Expert (Testnet Explorer)](https://stellar.expert/explorer/testnet)
 - [Project Architecture](docs/architecture.md)
 - [Scoring Specification](docs/scoring-spec.md)
+- [Epoch Model (TTL, cooldown, timelock)](docs/epoch-model.md)
 - [DID Method Specification](docs/did-spec.md)
 - [Issuer Integration Guide](docs/issuer-guide.md)
 - [ZK Proof Layer Design (Phase 4)](docs/zk-proof-design.md)

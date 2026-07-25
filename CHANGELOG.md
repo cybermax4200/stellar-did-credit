@@ -12,6 +12,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `identity-oracle`: `set_revocation_registry` now probes the target address with a dummy `is_revoked` call before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidRevocationRegistry` error instead of only failing later, opaquely, the first time a real VC check needs it (#270)
 - `credit-oracle`: `set_identity_oracle` now probes the target address with a `get_active_vc_count` call (using the admin's own address as a harmless probe subject) before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidIdentityOracle` error (#270)
 - `feeder`: skip `set_vc_count` and `update_tx_stats` submissions when the fetched value is unchanged from the last value this feeder instance submitted for the subject, avoiding wasted transaction fees every cycle for subjects with no new activity — most visibly, accounts with zero payment history, whose fetched stats are always zero. A subject's first sync still submits both regardless of value, so its initial state is recorded on-chain at least once. Skipped submissions are logged as `skipped (unchanged)` (#269)
+### Added
+
+- `cargo doc --workspace` now generates complete Rust API docs with no warnings; all public items across `credit-oracle`, `identity-oracle`, `revocation-registry`, and `governance` have `///` doc comments (#266)
+- `typedoc` generates TypeScript API docs from JSDoc comments in `packages/sdk/src/index.ts`; added `typedoc` as a dev dependency and a `docs` script to the SDK package (#266)
+- Root `package.json` exposes a `docs` script that regenerates both Rust and TypeScript API docs in one command (#266)
+- `typedoc.json` workspace-level TypeDoc configuration file (#266)
+- CI `docs` job: runs `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` and `typedoc` to catch doc regressions on every PR (#266)
 
 ### Changed
 
@@ -23,6 +30,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `identity-oracle`: `deactivate_identity(subject)` — subject-authorized opt-out that revokes all of the subject's currently active VCs and marks them deactivated, returning the number of VCs revoked. `is_verified` returns false for a deactivated subject regardless of any VC anchored before or after deactivation. Reversible via `reactivate_identity(subject)`, which clears the deactivation flag but does not restore the revoked VCs (matching this contract's existing one-way revocation semantics) — a reactivated subject needs fresh VCs anchored by issuers. New `is_deactivated(subject)` view function exposes the flag for cross-contract checks (#258)
 - `credit-oracle`: `compute_score` now floors a deactivated subject's score to `MIN_SCORE` (checked cross-contract via identity-oracle's `is_deactivated`, only when `IdentityOracleId` is configured) instead of computing normally from their real `TxStats`/`RepaymentRecord` (#258)
 - `feeder`: track per-subject sync state (last-synced RPC ledger, last observed credit score alongside the existing vc_count/stats) and log it each cycle for staleness diagnostics; purely informational, doesn't affect which submissions are skipped (#267)
+- `credit-oracle`: `compute_score` now emits a `Score` event with topic `Symbol("Score")` and data `(subject, score)` on every successful score computation (#223)
 - `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
 - `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)
 - Integration test `test_cross_contract_score_not_inflated_after_revocation` verifies that revoking VCs via identity-oracle immediately lowers the credit score when the cross-contract path is active (#176)
