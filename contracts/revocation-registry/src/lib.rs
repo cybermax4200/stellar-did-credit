@@ -627,7 +627,8 @@ mod tests {
 
         // 1. Single revocation
         let hash1 = BytesN::from_array(&env, &[10u8; 32]);
-        client.revoke(&issuer, &hash1);
+        let subject = Address::generate(&env);
+        client.revoke(&issuer, &subject, &hash1);
 
         assert_eq!(client.get_revocation_count(&issuer), 1);
         let list1 = client.list_revoked(&issuer, &0, &10);
@@ -675,11 +676,12 @@ mod tests {
         let issuer = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[50u8; 32]);
 
-        client.revoke(&issuer, &vc_hash);
+        let subject = Address::generate(&env);
+        client.revoke(&issuer, &subject, &vc_hash);
         assert_eq!(client.get_revocation_count(&issuer), 1);
 
         // Re-revoking the same hash should not increase count or duplicate entry
-        client.revoke(&issuer, &vc_hash);
+        client.revoke(&issuer, &subject, &vc_hash);
         assert_eq!(client.get_revocation_count(&issuer), 1);
         let list = client.list_revoked(&issuer, &0, &10);
         assert_eq!(list.len(), 1);

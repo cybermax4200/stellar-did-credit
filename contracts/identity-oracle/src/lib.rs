@@ -36,6 +36,14 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
+}
+
+fn ensure_not_paused(env: &Env) -> Result<(), IdentityOracleError> {
+    if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        Err(IdentityOracleError::ContractPaused)
+    } else {
+        Ok(())
+    }
 } // ── Persistent TTL constants ─────────────────────────────────────
   // Persistent entries are extended to ~30 days on every write.
   //
@@ -446,7 +454,7 @@ impl IdentityOracle {
         issuer: Address,
         subject: Address,
         vc_hash: BytesN<32>,
-        _credential_type: Symbol,
+        credential_type: Symbol,
     ) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         issuer.require_auth();
@@ -484,7 +492,6 @@ impl IdentityOracle {
         store_credential_type(&env, &subject, &vc_hash, credential_type);
 
         anchors.push_back(record);
-        store_credential_type(&env, &subject, &vc_hash, credential_type);
         env.storage().persistent().set(&key, &anchors);
         env.storage()
             .persistent()
