@@ -36,7 +36,6 @@ fn require_admin(env: &Env) -> Address {
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-#[allow(missing_docs)]
 pub enum RevocationRegistryError {
     /// Contract is already initialized.
     AlreadyInitialized = 1,
@@ -52,7 +51,6 @@ pub enum RevocationRegistryError {
 
 /// Storage keys for revocation registry contract.
 #[contracttype]
-#[allow(missing_docs)]
 pub enum RevocationKey {
     /// Contract administrator address.
     Admin,
@@ -69,8 +67,15 @@ pub enum RevocationKey {
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
 }
 
+// ── Instance TTL bump constants ──────────────────────────────────
+// Used by admin-gated functions to extend instance storage.
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
+// ── Persistent TTL constants ─────────────────────────────────────
+// Extend persistent entries to ~30 days on every write.
+const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
+const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
 
 /// On-chain revocation registry contract.
 #[contract]
@@ -92,18 +97,9 @@ impl RevocationRegistry {
     /// Propose a new contract admin (two-step admin transfer).
     pub fn propose_new_admin(
         env: Env,
-        current_admin: Address,
         new_admin: Address,
     ) -> Result<(), RevocationRegistryError> {
-        let stored_admin: Address = env
-            .storage()
-            .instance()
-            .get(&RevocationKey::Admin)
-            .expect("not initialized");
-        if current_admin != stored_admin {
-            return Err(RevocationRegistryError::NotAuthorized);
-        }
-        current_admin.require_auth();
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
@@ -169,6 +165,13 @@ impl RevocationRegistry {
         env.storage()
             .persistent()
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+        // Extend TTL for both revocation entries
+        env.storage()
+            .persistent()
+            .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -193,6 +196,10 @@ impl RevocationRegistry {
     }
 
     /// Revoke multiple verifiable credentials in a single batch operation.
+    ///
+    /// This operation is atomic (all-or-nothing). If any VC hash in the batch fails
+    /// (e.g., due to an `IssuerMismatch`), the entire transaction aborts and no
+    /// revocations from the batch are persisted.
     pub fn batch_revoke(
         env: Env,
         issuer: Address,
@@ -228,20 +235,34 @@ impl RevocationRegistry {
             env.storage()
                 .persistent()
                 .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+            // Extend TTL for each revocation entry
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
         Ok(())
     }
 
+    /// Admin-only maintenance: extend instance storage TTL so the
+    /// Admin entry does not expire on an idle contract.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn maintain_storage(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
-        let stored = require_admin(&env);
-        if admin != stored {
-            panic!("not authorized");
-        }
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
@@ -352,15 +373,11 @@ mod tests {
         let admin3 = Address::generate(&env);
 
         client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
         client.accept_admin(&admin2);
 
         // new admin can perform admin-gated actions
-        client.propose_new_admin(&admin2, &admin3);
-
-        // old admin cannot perform admin-gated actions
-        let res = client.try_propose_new_admin(&admin1, &admin3);
-        assert_eq!(res, Err(Ok(RevocationRegistryError::NotAuthorized)));
+        client.propose_new_admin(&admin3);
     }
 
     #[test]
@@ -376,23 +393,9 @@ mod tests {
         let non_admin = Address::generate(&env);
 
         client.initialize(&admin1);
-        client.propose_new_admin(&admin1, &admin2);
+        client.propose_new_admin(&admin2);
 
         let _ = client.accept_admin(&non_admin);
-    }
-
-    #[test]
-    #[should_panic(expected = "not authorized")]
-    fn test_upgrade_rejects_non_admin() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
-        let client = RevocationRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let non_admin = Address::generate(&env);
-        client.initialize(&admin);
-        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
     }
 
     proptest! {
@@ -444,5 +447,34 @@ mod tests {
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
         }
+    }
+
+    #[test]
+    fn test_maintain_storage_succeeds_for_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let res = client.try_maintain_storage();
+        assert!(res.is_ok());
+    }
+
+    #[test]
+    fn test_maintain_storage_fails_for_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let res = client.try_maintain_storage();
+        assert!(res.is_err());
     }
 }

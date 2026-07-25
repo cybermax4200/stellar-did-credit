@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
+    use credit_oracle::{CreditOracle, CreditOracleClient, ScoringWeights, TxStats};
+    use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
@@ -30,7 +31,7 @@ mod tests {
 
         // 3. Register an issuer in identity-oracle
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         // 4. Call anchor_did for a test subject
         let subject = soroban_sdk::Address::generate(&env);
@@ -47,8 +48,8 @@ mod tests {
         // 7. Register a lender and feeder in credit-oracle
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 8. Call set_vc_count(subject, 1)
         credit.set_vc_count(&feeder, &subject, &1);
@@ -95,7 +96,7 @@ mod tests {
         credit.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
@@ -105,7 +106,7 @@ mod tests {
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
         // Configure credit-oracle to call identity-oracle directly
-        credit.set_identity_oracle(&admin, &identity_id);
+        credit.set_identity_oracle(&identity_id);
 
         // Do not set cached VcCount; compute_score should read identity-oracle
         let score_live = credit.compute_score(&subject);
@@ -117,7 +118,7 @@ mod tests {
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_feeder(&feeder);
         credit.set_vc_count(&feeder, &subject, &0);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
@@ -148,7 +149,7 @@ mod tests {
         _revocation.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
@@ -159,8 +160,8 @@ mod tests {
 
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 1. Get initial score with vc_count = 1
         credit.set_vc_count(&feeder, &subject, &1);
@@ -216,10 +217,10 @@ mod tests {
         revocation.initialize(&admin);
 
         // Link identity-oracle to revocation-registry
-        identity.set_revocation_registry(&admin, &revocation_id);
+        identity.set_revocation_registry(&revocation_id);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[123u8; 32]);
@@ -301,7 +302,7 @@ mod tests {
 
         // 2. Register issuer
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         // 3. Create subject and DID
         let subject = soroban_sdk::Address::generate(&env);
@@ -375,8 +376,8 @@ mod tests {
         // 14. Setup credit-oracle to test score changes
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&admin, &lender);
-        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&lender);
+        credit.register_feeder(&feeder);
 
         // 15. Set initial VC count to 5 and compute score
         credit.set_vc_count(&feeder, &subject, &5);
@@ -425,7 +426,7 @@ mod tests {
         credit.initialize(&admin);
 
         let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
         let subject = soroban_sdk::Address::generate(&env);
 
@@ -440,7 +441,7 @@ mod tests {
         }
 
         // Configure credit-oracle to use cross-contract VC count lookup
-        credit.set_identity_oracle(&admin, &identity_id);
+        credit.set_identity_oracle(&identity_id);
 
         // Compute initial score (3 active VCs)
         let initial_score = credit.compute_score(&subject);
@@ -472,5 +473,47 @@ mod tests {
         // Also verify get_active_vc_count returns correct count
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert_eq!(identity.get_total_vc_count(&subject), 3);
+    }
+
+    #[test]
+    fn test_batch_revoke_mixed_hashes_atomicity() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
+
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
+        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
+
+        // issuer2 revokes hash2 individually to claim authority
+        revocation.revoke(&issuer2, &hash2);
+        assert!(revocation.is_revoked(&hash2));
+
+        // Create a batch with mixed hashes
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash1.clone());
+        batch.push_back(hash2.clone()); // belongs to issuer2
+        batch.push_back(hash3.clone());
+
+        // issuer1 attempts to batch revoke the hashes
+        let res = revocation.try_batch_revoke(&issuer1, &batch);
+        
+        // Assert the call failed with IssuerMismatch
+        assert_eq!(
+            res,
+            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+        );
+
+        // Verify that hash1 and hash3 were NOT revoked (atomicity check)
+        assert!(!revocation.is_revoked(&hash1));
+        assert!(!revocation.is_revoked(&hash3));
     }
 }

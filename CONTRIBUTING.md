@@ -111,7 +111,20 @@ PRs opened against your own fork instead of the upstream repo will not be seen b
 - Snapshot files must be committed if code changes them
 - Follow conventional commit format (see below)
 - Reference the issue number in your PR description
-- Any PR that changes contract behavior, SDK methods, or public APIs must add an entry under `[Unreleased]` in [CHANGELOG.md](../CHANGELOG.md)
+- Any PR that changes contract behavior, SDK methods, or public APIs must add an entry under `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
+
+## Changelog updates
+
+User-facing changes should be documented in [CHANGELOG.md](CHANGELOG.md) before opening a PR whenever a change affects behavior, public APIs, CLI output, or other visible project capabilities.
+
+- Add a bullet under the appropriate section of `[Unreleased]` in [CHANGELOG.md](CHANGELOG.md)
+- Follow the Keep a Changelog structure already used in the file: `Added`, `Changed`, `Deprecated`, `Removed`, or `Fixed`
+- Keep entries concise and user-focused, and include the issue or PR number at the end of the bullet (for example, `(#174)`)
+- Internal-only changes that are not user-visible usually do not need a changelog entry
+
+Example:
+
+- `sdk`: added a convenience helper for reading the latest score from the chain (#174)
 
 ## Auth pattern for initialize functions
 

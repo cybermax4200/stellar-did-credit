@@ -826,6 +826,7 @@ name = "integration-tests"
 version = "0.1.0"
 dependencies = [
  "credit-oracle",
+ "governance",
  "identity-oracle",
  "revocation-registry",
  "soroban-sdk",
