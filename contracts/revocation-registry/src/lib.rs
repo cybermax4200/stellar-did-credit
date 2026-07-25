@@ -3,7 +3,8 @@
 //!
 //! Maintains an on-chain list of revoked verifiable credential hashes.
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
+    IntoVal, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -33,6 +34,14 @@ fn require_admin(env: &Env) -> Address {
     admin
 }
 
+fn ensure_not_paused(env: &Env) -> Result<(), RevocationRegistryError> {
+    if env.storage().instance().get(&RevocationKey::Paused).unwrap_or(false) {
+        Err(RevocationRegistryError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -47,6 +56,8 @@ pub enum RevocationRegistryError {
     NoPendingAdmin = 4,
     /// Batch size exceeds maximum allowed.
     BatchTooLarge = 5,
+    /// The contract is currently paused and cannot accept writes.
+    ContractPaused = 6,
 }
 
 /// Storage keys for revocation registry contract.
@@ -54,8 +65,12 @@ pub enum RevocationRegistryError {
 pub enum RevocationKey {
     /// Contract administrator address.
     Admin,
+    /// Whether the contract is currently paused for writes.
+    Paused,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
+    /// Identity-oracle contract ID for callback sync.
+    IdentityOracleId,
 
     /// Registered authority (first issuer) for a VC hash.
     /// vc_hash → Address
@@ -74,8 +89,8 @@ const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
 // ── Persistent TTL constants ─────────────────────────────────────
 // Extend persistent entries to ~30 days on every write.
-const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// On-chain revocation registry contract.
 #[contract]
@@ -90,17 +105,34 @@ impl RevocationRegistry {
         }
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        Ok(())
+    }
+
+    /// Set the identity-oracle contract ID for revocation callbacks.
+    pub fn set_identity_oracle(
+        env: Env,
+        identity_oracle_id: Address,
+    ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
+        require_admin(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&RevocationKey::IdentityOracleId, &identity_oracle_id);
         Ok(())
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(
-        env: Env,
-        new_admin: Address,
-    ) -> Result<(), RevocationRegistryError> {
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), RevocationRegistryError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::PendingAdmin, &new_admin);
@@ -111,6 +143,7 @@ impl RevocationRegistry {
     ///
     /// Panics if the caller address was not proposed as the next admin.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         let pending: Option<Address> = env.storage().instance().get(&RevocationKey::PendingAdmin);
         match pending {
             Some(p) => {
@@ -122,7 +155,9 @@ impl RevocationRegistry {
         }
 
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&RevocationKey::Admin, &new_admin);
@@ -136,8 +171,10 @@ impl RevocationRegistry {
     pub fn revoke(
         env: Env,
         issuer: Address,
+        subject: Address,
         vc_hash: BytesN<32>,
     ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         issuer.require_auth();
 
         // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -165,13 +202,33 @@ impl RevocationRegistry {
         env.storage()
             .persistent()
             .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+        if let Some(identity_oracle_id) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&RevocationKey::IdentityOracleId)
+        {
+            env.invoke_contract::<()>(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "mark_vc_revoked"),
+                soroban_sdk::vec![
+                    &env,
+                    issuer.into_val(&env),
+                    subject.into_val(&env),
+                    vc_hash.clone().into_val(&env)
+                ],
+            );
+        }
         // Extend TTL for both revocation entries
-        env.storage()
-            .persistent()
-            .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        env.storage()
-            .persistent()
-            .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage().persistent().extend_ttl(
+            &RevocationKey::Status(vc_hash.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+        env.storage().persistent().extend_ttl(
+            &RevocationKey::IssuerOfVC(vc_hash.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -205,6 +262,7 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         if vc_hashes.len() > 100 {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
@@ -236,12 +294,16 @@ impl RevocationRegistry {
                 .persistent()
                 .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
             // Extend TTL for each revocation entry
-            env.storage()
-                .persistent()
-                .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-            env.storage()
-                .persistent()
-                .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            env.storage().persistent().extend_ttl(
+                &RevocationKey::Status(vc_hash.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+            env.storage().persistent().extend_ttl(
+                &RevocationKey::IssuerOfVC(vc_hash.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
         }
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
@@ -253,8 +315,11 @@ impl RevocationRegistry {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -262,8 +327,11 @@ impl RevocationRegistry {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        ensure_not_paused(&env).unwrap();
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -282,10 +350,11 @@ mod tests {
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
 
         assert!(!client.is_revoked(&vc_hash));
-        client.revoke(&issuer, &vc_hash);
+        client.revoke(&issuer, &subject, &vc_hash);
         assert!(client.is_revoked(&vc_hash));
     }
 
@@ -308,14 +377,15 @@ mod tests {
 
         let issuer_a = Address::generate(&env);
         let issuer_b = Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
 
         // First revoke registers issuer_a for this vc_hash.
-        client.revoke(&issuer_a, &vc_hash);
-        client.revoke(&issuer_a, &vc_hash);
+        client.revoke(&issuer_a, &subject, &vc_hash);
+        client.revoke(&issuer_a, &subject, &vc_hash);
 
         // issuer_b must not be able to revoke the same hash.
-        let res = client.try_revoke(&issuer_b, &vc_hash);
+        let res = client.try_revoke(&issuer_b, &subject, &vc_hash);
         assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
@@ -436,14 +506,15 @@ mod tests {
             let client = RevocationRegistryClient::new(&env, &contract_id);
 
             let issuer = Address::generate(&env);
+            let subject = Address::generate(&env);
             let vc_hash = BytesN::from_array(&env, &hash_bytes);
 
-            let result = client.try_revoke(&issuer, &vc_hash);
+            let result = client.try_revoke(&issuer, &subject, &vc_hash);
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
 
             // Revoking the same hash again should be idempotent
-            let result = client.try_revoke(&issuer, &vc_hash);
+            let result = client.try_revoke(&issuer, &subject, &vc_hash);
             assert!(result.is_ok());
             prop_assert!(client.is_revoked(&vc_hash));
         }
