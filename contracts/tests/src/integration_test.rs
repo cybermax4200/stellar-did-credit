@@ -516,4 +516,128 @@ mod tests {
         assert!(!revocation.is_revoked(&hash1));
         assert!(!revocation.is_revoked(&hash3));
     }
+
+    #[test]
+    fn test_set_revocation_registry_rejects_non_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        // A freshly-generated address is not backed by any registered
+        // contract, so it can't respond to the is_revoked probe.
+        let not_a_contract = soroban_sdk::Address::generate(&env);
+
+        let res = identity.try_set_revocation_registry(&not_a_contract);
+        assert_eq!(
+            res,
+            Err(Ok(
+                identity_oracle::IdentityOracleError::InvalidRevocationRegistry
+            ))
+        );
+    }
+
+    #[test]
+    fn test_set_revocation_registry_rejects_wrong_interface_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        // A real, valid contract — just not one that implements is_revoked.
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let res = identity.try_set_revocation_registry(&credit_id);
+        assert_eq!(
+            res,
+            Err(Ok(
+                identity_oracle::IdentityOracleError::InvalidRevocationRegistry
+            ))
+        );
+    }
+
+    #[test]
+    fn test_set_revocation_registry_accepts_valid_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Should succeed against a real revocation-registry contract.
+        identity.set_revocation_registry(&revocation_id);
+    }
+
+    #[test]
+    fn test_set_identity_oracle_rejects_non_contract_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        let not_a_contract = soroban_sdk::Address::generate(&env);
+
+        let res = credit.try_set_identity_oracle(&not_a_contract);
+        assert_eq!(
+            res,
+            Err(Ok(credit_oracle::CreditOracleError::InvalidIdentityOracle))
+        );
+    }
+
+    #[test]
+    fn test_set_identity_oracle_rejects_wrong_interface_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        // A real, valid contract — just not one that implements get_active_vc_count.
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        let res = credit.try_set_identity_oracle(&revocation_id);
+        assert_eq!(
+            res,
+            Err(Ok(credit_oracle::CreditOracleError::InvalidIdentityOracle))
+        );
+    }
+
+    #[test]
+    fn test_set_identity_oracle_accepts_valid_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        // Should succeed against a real identity-oracle contract.
+        credit.set_identity_oracle(&identity_id);
+    }
 }

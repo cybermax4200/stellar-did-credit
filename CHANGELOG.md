@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `identity-oracle`: `set_revocation_registry` now probes the target address with a dummy `is_revoked` call before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidRevocationRegistry` error instead of only failing later, opaquely, the first time a real VC check needs it (#270)
+- `credit-oracle`: `set_identity_oracle` now probes the target address with a `get_active_vc_count` call (using the admin's own address as a harmless probe subject) before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidIdentityOracle` error (#270)
+- `feeder`: skip `set_vc_count` and `update_tx_stats` submissions when the fetched value is unchanged from the last value this feeder instance submitted for the subject, avoiding wasted transaction fees every cycle for subjects with no new activity — most visibly, accounts with zero payment history, whose fetched stats are always zero. A subject's first sync still submits both regardless of value, so its initial state is recorded on-chain at least once. Skipped submissions are logged as `skipped (unchanged)` (#269)
 ### Added
 
 - `cargo doc --workspace` now generates complete Rust API docs with no warnings; all public items across `credit-oracle`, `identity-oracle`, `revocation-registry`, and `governance` have `///` doc comments (#266)
@@ -22,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `feeder`: track per-subject sync state (last-synced RPC ledger, last observed credit score alongside the existing vc_count/stats) and log it each cycle for staleness diagnostics; purely informational, doesn't affect which submissions are skipped (#267)
 - `credit-oracle`: `compute_score` now emits a `Score` event with topic `Symbol("Score")` and data `(subject, score)` on every successful score computation (#223)
 - `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
 - `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)

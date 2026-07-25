@@ -43,6 +43,27 @@ fn require_admin(env: &Env) -> Address {
 const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
 const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
 
+/// Probes `target` by calling `is_revoked` with a dummy all-zero hash.
+///
+/// Storing a revocation registry ID without checking it first means the
+/// mistake only surfaces later, opaquely, the first time `is_revoked` is
+/// actually needed to check a real VC. Calling it here instead — with a
+/// throwaway hash, since the return value doesn't matter, only whether the
+/// call succeeds against the expected interface — catches a non-contract or
+/// mismatched-interface address at configuration time instead.
+fn probe_revocation_registry(env: &Env, target: &Address) -> bool {
+    let dummy_hash = BytesN::from_array(env, &[0u8; 32]);
+    let result: Result<
+        Result<bool, soroban_sdk::ConversionError>,
+        Result<soroban_sdk::Error, soroban_sdk::InvokeError>,
+    > = env.try_invoke_contract(
+        target,
+        &soroban_sdk::Symbol::new(env, "is_revoked"),
+        soroban_sdk::vec![env, dummy_hash.into_val(env)],
+    );
+    matches!(result, Ok(Ok(_)))
+}
+
 /// Error types for the identity-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -61,6 +82,9 @@ pub enum IdentityOracleError {
     DuplicateVC = 6,
     /// No matching VC record was found for the given hash/issuer.
     VCNotFound = 7,
+    /// The provided address did not respond to a probe call matching the
+    /// revocation registry's expected interface (is_revoked).
+    InvalidRevocationRegistry = 8,
 }
 
 /// Storage key variants for the identity-oracle contract.
@@ -202,6 +226,9 @@ impl IdentityOracle {
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
         require_admin(&env);
+        if !probe_revocation_registry(&env, &registry_id) {
+            return Err(IdentityOracleError::InvalidRevocationRegistry);
+        }
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
