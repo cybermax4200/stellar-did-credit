@@ -35,6 +35,14 @@ fn require_admin(env: &Env) -> Address {
     admin
 }
 
+fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
+    if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+        Err(CreditOracleError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
 /// Load the stored admin address and call `require_auth()` on it, or check
 /// that `caller` is a registered governor.
 ///
@@ -85,6 +93,8 @@ pub enum CreditOracleError {
     NoPendingAdmin = 6,
     /// Score was computed too recently for this subject.
     ComputeCooldownActive = 7,
+    /// The contract is currently paused and cannot accept writes.
+    ContractPaused = 8,
 }
 
 /// Storage keys for the credit oracle contract
@@ -92,6 +102,8 @@ pub enum CreditOracleError {
 pub enum DataKey {
     /// Contract administrator address
     Admin,
+    /// Whether the contract is currently paused for writes.
+    Paused,
     /// Pending contract admin address for two-step transfer
     PendingAdmin,
 
@@ -328,10 +340,31 @@ impl CreditOracle {
     /// Register a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
+    pub fn pause(env: Env) -> Result<(), CreditOracleError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    pub fn unpause(env: Env) -> Result<(), CreditOracleError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Register a trusted feeder address.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn register_feeder(
         env: Env,
         feeder: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -348,6 +381,7 @@ impl CreditOracle {
         env: Env,
         feeder: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -364,6 +398,7 @@ impl CreditOracle {
         env: Env,
         lender: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -380,6 +415,7 @@ impl CreditOracle {
         env: Env,
         lender: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -397,6 +433,7 @@ impl CreditOracle {
         admin: Address,
         governor: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
@@ -416,6 +453,7 @@ impl CreditOracle {
         admin: Address,
         governor: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
@@ -437,6 +475,7 @@ impl CreditOracle {
         subject: Address,
         stats: TxStats,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -466,6 +505,7 @@ impl CreditOracle {
         _amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         lender.require_auth();
         if !env
             .storage()
@@ -506,6 +546,7 @@ impl CreditOracle {
         subject: Address,
         count: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -586,6 +627,7 @@ impl CreditOracle {
     /// default is one ledger, preventing repeated same-ledger refreshes from
     /// gaming the persisted `last_updated` timestamp.
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        ensure_not_paused(&env)?;
         let current_ledger = env.ledger().sequence();
         let cooldown: u32 = env
             .storage()
@@ -706,6 +748,7 @@ impl CreditOracle {
         caller: Address,
         weights: ScoringWeights,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
@@ -775,6 +818,7 @@ impl CreditOracle {
     /// overwrite this direct update once the original proposal's timelock
     /// elapses.
     pub fn update_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
@@ -802,6 +846,7 @@ impl CreditOracle {
         env: Env,
         cooldown_ledgers: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage()
             .instance()
@@ -826,6 +871,7 @@ impl CreditOracle {
         env: Env,
         identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage()
             .instance()
@@ -842,6 +888,7 @@ impl CreditOracle {
         credential_type: Symbol,
         weight_bps: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         let stored = require_admin(&env);
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
@@ -891,6 +938,7 @@ impl CreditOracle {
         env: Env,
         new_admin: Address,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -901,6 +949,7 @@ impl CreditOracle {
 
     /// Accept a proposed admin role (two-step admin transfer).
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
         match pending {
             Some(p) => {
@@ -923,6 +972,7 @@ impl CreditOracle {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
@@ -932,6 +982,7 @@ impl CreditOracle {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        ensure_not_paused(&env).unwrap();
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);

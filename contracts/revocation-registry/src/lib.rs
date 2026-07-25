@@ -33,6 +33,14 @@ fn require_admin(env: &Env) -> Address {
     admin
 }
 
+fn ensure_not_paused(env: &Env) -> Result<(), RevocationRegistryError> {
+    if env.storage().instance().get(&RevocationKey::Paused).unwrap_or(false) {
+        Err(RevocationRegistryError::ContractPaused)
+    } else {
+        Ok(())
+    }
+}
+
 /// Error types for the revocation registry contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -47,6 +55,8 @@ pub enum RevocationRegistryError {
     NoPendingAdmin = 4,
     /// Batch size exceeds maximum allowed.
     BatchTooLarge = 5,
+    /// The contract is currently paused and cannot accept writes.
+    ContractPaused = 6,
 }
 
 /// Storage keys for revocation registry contract.
@@ -54,6 +64,8 @@ pub enum RevocationRegistryError {
 pub enum RevocationKey {
     /// Contract administrator address.
     Admin,
+    /// Whether the contract is currently paused for writes.
+    Paused,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
 
@@ -95,10 +107,29 @@ impl RevocationRegistry {
     }
 
     /// Propose a new contract admin (two-step admin transfer).
+    pub fn pause(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&RevocationKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    pub fn unpause(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&RevocationKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Propose a new contract admin (two-step admin transfer).
     pub fn propose_new_admin(
         env: Env,
         new_admin: Address,
     ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
@@ -111,6 +142,7 @@ impl RevocationRegistry {
     ///
     /// Panics if the caller address was not proposed as the next admin.
     pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         let pending: Option<Address> = env.storage().instance().get(&RevocationKey::PendingAdmin);
         match pending {
             Some(p) => {
@@ -138,6 +170,7 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hash: BytesN<32>,
     ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         issuer.require_auth();
 
         // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
@@ -205,6 +238,7 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         if vc_hashes.len() > 100 {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
@@ -253,6 +287,7 @@ impl RevocationRegistry {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
@@ -262,6 +297,7 @@ impl RevocationRegistry {
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
+        ensure_not_paused(&env).unwrap();
         require_admin(&env);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
