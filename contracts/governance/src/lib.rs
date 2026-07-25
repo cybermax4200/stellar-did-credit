@@ -289,7 +289,7 @@ impl Governance {
                 .expect("no credit oracle");
 
             let client = CreditOracleClient::new(&env, &credit_oracle_addr);
-            client.update_weights(&proposal.proposed_weights);
+            client.propose_weights(&proposal.proposed_weights);
         }
 
         proposal.executed = true;
@@ -358,8 +358,8 @@ mod tests {
     use super::*;
     use credit_oracle::{CreditOracle, CreditOracleClient};
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
+        testutils::{Address as _, Ledger, Events},
+        Env, TryIntoVal
     };
 
     #[test]
@@ -421,6 +421,18 @@ mod tests {
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
+
+        // Advance ledger to pass the timelock
+        let jump = 3_000_000;
+        env.as_contract(&credit_oracle_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // Apply proposed weights in credit-oracle
+        credit_oracle_client.apply_weights();
 
         // Verify credit oracle weights updated
         let active_weights = credit_oracle_client.get_scoring_weights();
@@ -534,18 +546,16 @@ mod tests {
         let events = env.events().all();
         let mut found_event = false;
         
-        for (contract_id, event) in events.iter() {
+        for (contract_id, topics, data) in events.iter() {
             if contract_id == gov_id {
-                let topics = event.topics;
                 if topics.len() == 2 {
                     let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
                     if symbol == soroban_sdk::symbol_short!("PropCanc") {
                         found_event = true;
                         let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
                         assert_eq!(id, proposal_id);
-                        
-                        let data: (Address, Option<soroban_sdk::String>) = event.data.try_into_val(&env).unwrap();
-                        assert_eq!(data.0, canceller);
+                        let parsed_data: (Address, Option<soroban_sdk::String>) = data.try_into_val(&env).unwrap();
+                        assert_eq!(parsed_data.0, canceller);
                         // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
                         // We will skip strict String value checking for now.
                     }

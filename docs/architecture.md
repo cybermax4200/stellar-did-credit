@@ -132,6 +132,28 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 
 ---
 
+## Admin Transfer Two-Step Flow
+
+All three contracts (`identity-oracle`, `credit-oracle`, and `revocation-registry`) use a two-step process to transfer the `Admin` role to a new address. This design ensures that the contract never ends up in an unrecoverable state if an incorrect admin address is accidentally proposed (e.g., a typo in the address, or an address the user doesn't possess the private key for).
+
+### Flow Mechanics
+
+1. **`propose_new_admin(env, new_admin)`**
+   - **Caller**: The current `Admin`.
+   - **Action**: Stores the `new_admin` address in the contract's instance storage under `DataKey::PendingAdmin`.
+   - **Note**: The current admin retains full authority until the transfer is accepted.
+
+2. **`accept_admin(env, new_admin)`**
+   - **Caller**: The `new_admin` (the proposed pending admin).
+   - **Action**: Reads the `PendingAdmin` from storage. If it matches the caller, the contract overwrites the main `Admin` key with the new address and clears the `PendingAdmin` key. The caller now holds full admin authority.
+
+### Governance Edge Case
+
+The `governance` contract acts as an automated admin for the `credit-oracle`. During deployment/setup, the deployer (acting as the initial `credit-oracle` admin) calls `propose_new_admin(gov_contract_address)`. 
+
+Subsequently, the `governance` contract calls its own `accept_oracle_admin()` function, which dynamically invokes `accept_admin` on the `credit-oracle`. Thus, the `governance` contract does not itself call `propose_new_admin` during its own adoption phase; it simply accepts the admin role that was already proposed to it by the deployer.
+
+---
 ## Instance storage TTL management
 
 Soroban entries have a limited time-to-live (TTL) measured in ledgers. If the TTL of a contract's **instance storage** entry reaches zero, the contract becomes archived — all its data is lost and it can never be called again. To prevent this, every function that reads or writes instance storage must periodically call `extend_ttl`.

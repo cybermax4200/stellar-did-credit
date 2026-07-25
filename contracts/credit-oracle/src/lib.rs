@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal};
 
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
@@ -18,6 +18,8 @@ pub enum CreditOracleError {
     LenderNotRegistered = 4,
     /// Proposed weights do not sum to 100.
     InvalidWeights = 5,
+    /// No pending admin proposal exists.
+    NoPendingAdmin = 6,
 }
 
 /// Storage keys for the credit oracle contract
@@ -25,6 +27,8 @@ pub enum CreditOracleError {
 pub enum DataKey {
     /// Contract administrator address
     Admin,
+    /// Pending contract admin address for two-step transfer
+    PendingAdmin,
     /// Global configuration
     Config,
     /// Trusted feeder address authorized to update transaction stats
@@ -43,6 +47,8 @@ pub enum DataKey {
     PendingWeights,
     /// Ledger number when pending weights become effective
     PendingWeightsEffectiveLedger,
+    /// Identity oracle contract ID for cross-contract lookups
+    IdentityOracleId,
 }
 
 /// Credit score record with metadata
@@ -223,9 +229,18 @@ impl CreditOracle {
             .get(&DataKey::RepaymentRecord(subject.clone()))
             .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
 
-        let vc_count: u32 = env.storage().persistent()
+        let mut vc_count: u32 = env.storage().persistent()
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
+
+        // Cross-contract lookup takes precedence if configured
+        if let Some(identity_oracle_id) = env.storage().instance().get::<_, Address>(&DataKey::IdentityOracleId) {
+            vc_count = env.invoke_contract::<u32>(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
+                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+            );
+        }
 
         let vc_score = (vc_count * 20).min(100);
 
@@ -333,6 +348,43 @@ impl CreditOracle {
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
         env.storage().instance().get(&DataKey::PendingWeights)
+    }
+
+    /// Propose a new contract admin (two-step admin transfer).
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
+        Ok(())
+    }
+
+    /// Accept a proposed admin role (two-step admin transfer).
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
+        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
+        match pending {
+            Some(p) => {
+                if p != new_admin {
+                    panic!("not authorized");
+                }
+            }
+            None => return Err(CreditOracleError::NoPendingAdmin),
+        }
+        new_admin.require_auth();
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        Ok(())
+    }
+
+    /// Set the identity-oracle contract ID for cross-contract VC count lookup.
+    ///
+    /// Auth: admin only — verified via stored_admin.require_auth()
+    pub fn set_identity_oracle(env: Env, identity_oracle_id: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle_id);
+        
+        env.events().publish((soroban_sdk::symbol_short!("OrclSet"),), identity_oracle_id);
+        Ok(())
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
@@ -656,7 +708,6 @@ mod tests {
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
 
         // Propose and apply weights with tx_weight = 0
         client.propose_weights(&ScoringWeights { vc_weight: 60, tx_weight: 0, repayment_weight: 40 });
@@ -666,6 +717,8 @@ mod tests {
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
 
         let subject_with_counterparties = Address::generate(&env);
         let subject_without_counterparties = Address::generate(&env);
@@ -703,7 +756,6 @@ mod tests {
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&admin, &feeder);
 
         // Propose and apply weights with tx_weight = 100
         client.propose_weights(&ScoringWeights { vc_weight: 0, tx_weight: 100, repayment_weight: 0 });
@@ -713,6 +765,8 @@ mod tests {
         });
         env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
 
         let subject_with = Address::generate(&env);
         let subject_without = Address::generate(&env);
@@ -734,6 +788,49 @@ mod tests {
 
         assert!(score_with > score_without,
             "subject with 100 counterparties should score higher when tx_weight=100");
+    }
+
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin1);
+
+        client.propose_new_admin(&admin2);
+        client.accept_admin(&admin2);
+
+        // new admin can register feeder
+        client.register_feeder(&admin2, &feeder);
+
+        // old admin cannot register feeder
+        let feeder2 = Address::generate(&env);
+        let res = client.try_register_feeder(&admin1, &feeder2);
+        assert_eq!(res, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_non_pending_admin_cannot_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin2);
+
+        let _ = client.accept_admin(&non_admin);
     }
 }
 

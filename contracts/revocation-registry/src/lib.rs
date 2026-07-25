@@ -233,6 +233,22 @@ impl RevocationRegistry {
             PERS_TTL_THRESHOLD,
             PERS_TTL_EXTEND,
         );
+
+        let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or(Vec::new(&env));
+        if !list.contains(vc_hash.clone()) {
+            list.push_back(vc_hash.clone());
+            env.storage().persistent().set(&list_key, &list);
+            env.storage().persistent().extend_ttl(
+                &list_key,
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        }
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -365,6 +381,20 @@ impl RevocationRegistry {
             );
             env.storage().persistent().extend_ttl(
                 &RevocationKey::IssuerOfVC(vc_hash.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+            
+            if !list.contains(vc_hash.clone()) {
+                list.push_back(vc_hash.clone());
+                list_modified = true;
+            }
+        }
+
+        if list_modified {
+            env.storage().persistent().set(&list_key, &list);
+            env.storage().persistent().extend_ttl(
+                &list_key,
                 PERS_TTL_THRESHOLD,
                 PERS_TTL_EXTEND,
             );
@@ -530,7 +560,7 @@ mod tests {
         client.initialize(&admin1);
         client.propose_new_admin(&admin2);
 
-        let _ = client.accept_admin(&non_admin);
+        client.accept_admin(&non_admin);
     }
 
     proptest! {

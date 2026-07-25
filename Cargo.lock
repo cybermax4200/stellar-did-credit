@@ -292,6 +292,7 @@ dependencies = [
 name = "credit-oracle"
 version = "0.1.0"
 dependencies = [
+ "identity-oracle",
  "proptest",
  "soroban-sdk",
 ]
