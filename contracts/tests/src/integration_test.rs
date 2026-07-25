@@ -516,4 +516,57 @@ mod tests {
         assert!(!revocation.is_revoked(&hash1));
         assert!(!revocation.is_revoked(&hash3));
     }
+
+    #[test]
+    fn test_revocation_registry_count_and_list_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        revocation.initialize(&admin);
+
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 0);
+        assert_eq!(revocation.get_revocation_count(&issuer2), 0);
+        assert_eq!(revocation.list_revoked(&issuer1, &0, &10).len(), 0);
+
+        // 1. Single revocation by issuer1
+        let hash_a = BytesN::from_array(&env, &[101u8; 32]);
+        revocation.revoke(&issuer1, &hash_a);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 1);
+        let list1 = revocation.list_revoked(&issuer1, &0, &10);
+        assert_eq!(list1.len(), 1);
+        assert_eq!(list1.get(0).unwrap(), hash_a);
+
+        // 2. Batch revocation by issuer1
+        let hash_b = BytesN::from_array(&env, &[102u8; 32]);
+        let hash_c = BytesN::from_array(&env, &[103u8; 32]);
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash_b.clone());
+        batch.push_back(hash_c.clone());
+        revocation.batch_revoke(&issuer1, &batch);
+
+        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
+        let list1_all = revocation.list_revoked(&issuer1, &0, &10);
+        assert_eq!(list1_all.len(), 3);
+        assert_eq!(list1_all.get(0).unwrap(), hash_a);
+        assert_eq!(list1_all.get(1).unwrap(), hash_b);
+        assert_eq!(list1_all.get(2).unwrap(), hash_c);
+
+        // 3. Single revocation by issuer2
+        let hash_d = BytesN::from_array(&env, &[104u8; 32]);
+        revocation.revoke(&issuer2, &hash_d);
+
+        assert_eq!(revocation.get_revocation_count(&issuer2), 1);
+        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
+        let list2 = revocation.list_revoked(&issuer2, &0, &10);
+        assert_eq!(list2.len(), 1);
+        assert_eq!(list2.get(0).unwrap(), hash_d);
+    }
 }

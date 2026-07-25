@@ -65,6 +65,10 @@ pub enum RevocationKey {
     Status(BytesN<32>), // vc_hash → bool
     /// Address of issuer who revoked the VC (latest issuer call).
     IssuerOfVC(BytesN<32>), // vc_hash → Address (who revoked)
+
+    /// List of revoked VC hashes per issuer.
+    /// issuer → Vec<BytesN<32>>
+    IssuerRevokedList(Address),
 }
 
 // ── Instance TTL bump constants ──────────────────────────────────
@@ -159,19 +163,38 @@ impl RevocationRegistry {
             }
         }
 
-        env.storage()
+        let already_revoked: bool = env
+            .storage()
             .persistent()
-            .set(&RevocationKey::Status(vc_hash.clone()), &true);
-        env.storage()
-            .persistent()
-            .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
-        // Extend TTL for both revocation entries
-        env.storage()
-            .persistent()
-            .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        env.storage()
-            .persistent()
-            .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            .get(&RevocationKey::Status(vc_hash.clone()))
+            .unwrap_or(false);
+
+        if !already_revoked {
+            env.storage()
+                .persistent()
+                .set(&RevocationKey::Status(vc_hash.clone()), &true);
+            env.storage()
+                .persistent()
+                .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+            // Extend TTL for both revocation entries
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            env.storage()
+                .persistent()
+                .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+            let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
+            let mut list: Vec<BytesN<32>> = env
+                .storage()
+                .persistent()
+                .get(&list_key)
+                .unwrap_or(Vec::new(&env));
+            list.push_back(vc_hash.clone());
+            env.storage().persistent().set(&list_key, &list);
+            env.storage().persistent().extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
         Ok(())
@@ -195,6 +218,54 @@ impl RevocationRegistry {
             .get(&RevocationKey::IssuerOfVC(vc_hash))
     }
 
+    /// Returns the number of revoked VCs for an issuer.
+    ///
+    /// Read-only function requiring no authorization.
+    pub fn get_revocation_count(env: Env, issuer: Address) -> u32 {
+        let list_key = RevocationKey::IssuerRevokedList(issuer);
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or(Vec::new(&env));
+        list.len()
+    }
+
+    /// Returns a paginated list of revoked VC hashes for an issuer.
+    ///
+    /// Read-only function requiring no authorization.
+    ///
+    /// Parameters:
+    /// - `issuer`: Address of the issuer whose revocations are queried.
+    /// - `cursor`: Starting index (0-based).
+    /// - `limit`: Maximum number of items to return.
+    pub fn list_revoked(
+        env: Env,
+        issuer: Address,
+        cursor: u32,
+        limit: u32,
+    ) -> Vec<BytesN<32>> {
+        let list_key = RevocationKey::IssuerRevokedList(issuer);
+        let list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or(Vec::new(&env));
+
+        let total = list.len();
+        let mut result = Vec::new(&env);
+
+        if cursor >= total || limit == 0 {
+            return result;
+        }
+
+        let end = (cursor + limit).min(total);
+        for i in cursor..end {
+            result.push_back(list.get(i).unwrap());
+        }
+        result
+    }
+
     /// Revoke multiple verifiable credentials in a single batch operation.
     ///
     /// This operation is atomic (all-or-nothing). If any VC hash in the batch fails
@@ -209,6 +280,15 @@ impl RevocationRegistry {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
         issuer.require_auth();
+
+        let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
+        let mut list: Vec<BytesN<32>> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or(Vec::new(&env));
+        let mut list_modified = false;
+
         for vc_hash in vc_hashes.iter() {
             // Enforce authority per vc_hash: the first issuer that revokes a hash becomes the registered authority.
             let registered: Option<Address> = env
@@ -229,20 +309,37 @@ impl RevocationRegistry {
                 }
             }
 
-            env.storage()
+            let already_revoked: bool = env
+                .storage()
                 .persistent()
-                .set(&RevocationKey::Status(vc_hash.clone()), &true);
-            env.storage()
-                .persistent()
-                .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
-            // Extend TTL for each revocation entry
-            env.storage()
-                .persistent()
-                .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-            env.storage()
-                .persistent()
-                .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                .get(&RevocationKey::Status(vc_hash.clone()))
+                .unwrap_or(false);
+
+            if !already_revoked {
+                env.storage()
+                    .persistent()
+                    .set(&RevocationKey::Status(vc_hash.clone()), &true);
+                env.storage()
+                    .persistent()
+                    .set(&RevocationKey::IssuerOfVC(vc_hash.clone()), &issuer);
+                // Extend TTL for each revocation entry
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&RevocationKey::Status(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&RevocationKey::IssuerOfVC(vc_hash.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+                list.push_back(vc_hash.clone());
+                list_modified = true;
+            }
         }
+
+        if list_modified {
+            env.storage().persistent().set(&list_key, &list);
+            env.storage().persistent().extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
         env.events()
             .publish((symbol_short!("BatchRev"),), (issuer, vc_hashes.len()));
         Ok(())
@@ -476,5 +573,77 @@ mod tests {
         env.mock_auths(&[]);
         let res = client.try_maintain_storage();
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_get_revocation_count_and_list_revoked_single_and_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        assert_eq!(client.get_revocation_count(&issuer), 0);
+        assert_eq!(client.list_revoked(&issuer, &0, &10), Vec::new(&env));
+
+        // 1. Single revocation
+        let hash1 = BytesN::from_array(&env, &[10u8; 32]);
+        client.revoke(&issuer, &hash1);
+
+        assert_eq!(client.get_revocation_count(&issuer), 1);
+        let list1 = client.list_revoked(&issuer, &0, &10);
+        assert_eq!(list1.len(), 1);
+        assert_eq!(list1.get(0).unwrap(), hash1);
+
+        // 2. Batch revocation of 3 hashes
+        let mut batch = Vec::new(&env);
+        let hash2 = BytesN::from_array(&env, &[20u8; 32]);
+        let hash3 = BytesN::from_array(&env, &[30u8; 32]);
+        let hash4 = BytesN::from_array(&env, &[40u8; 32]);
+        batch.push_back(hash2.clone());
+        batch.push_back(hash3.clone());
+        batch.push_back(hash4.clone());
+
+        client.batch_revoke(&issuer, &batch);
+
+        assert_eq!(client.get_revocation_count(&issuer), 4);
+
+        // Test pagination
+        let page1 = client.list_revoked(&issuer, &0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), hash1);
+        assert_eq!(page1.get(1).unwrap(), hash2);
+
+        let page2 = client.list_revoked(&issuer, &2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), hash3);
+        assert_eq!(page2.get(1).unwrap(), hash4);
+
+        let page3 = client.list_revoked(&issuer, &4, &2);
+        assert_eq!(page3.len(), 0);
+
+        let zero_limit = client.list_revoked(&issuer, &0, &0);
+        assert_eq!(zero_limit.len(), 0);
+    }
+
+    #[test]
+    fn test_get_revocation_count_and_list_revoked_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[50u8; 32]);
+
+        client.revoke(&issuer, &vc_hash);
+        assert_eq!(client.get_revocation_count(&issuer), 1);
+
+        // Re-revoking the same hash should not increase count or duplicate entry
+        client.revoke(&issuer, &vc_hash);
+        assert_eq!(client.get_revocation_count(&issuer), 1);
+        let list = client.list_revoked(&issuer, &0, &10);
+        assert_eq!(list.len(), 1);
+        assert_eq!(list.get(0).unwrap(), vc_hash);
     }
 }
