@@ -27,7 +27,8 @@ graph TD
     OFF_FEEDER  -->|set_vc_count\nupdate_tx_stats| SC_CR
     CON_APP     -->|record_repayment| SC_CR
     CON_APP     -->|compute_score| SC_CR
-    SC_CR       -->|get_active_vc_count| SC_ID
+    SC_CR       -->|get_active_vc_count\n(if IdentityOracleId set)| SC_ID
+    SC_CR       -.->|read VcCount\n(if IdentityOracleId NOT set)| SC_CR
 
     CON_SDK     -->|getScore\nisVerified\nanchorDID\nissueVC| SC_ID
     CON_SDK     -->|getScore| SC_CR
@@ -41,6 +42,10 @@ graph TD
 ### identity-oracle
 
 Stores decentralised identifiers (DIDs) and verifiable credential (VC) anchors for subjects. It is the source of truth for whether a wallet address has been verified by a trusted issuer.
+
+#### Admin setup
+
+The protocol admin must register each trusted issuer before that address can call `anchor_vc`. This is done through `register_issuer(admin, issuer)` on the identity-oracle contract; the admin can later revoke trust with `deregister_issuer`.
 
 **Key functions**
 
@@ -80,7 +85,7 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `register_lender(admin, lender)`                     | admin    | Whitelists a lender                                |
 | `set_vc_count(feeder, subject, count)`               | feeder   | Caches the subject's VC count from identity-oracle |
 | `update_tx_stats(feeder, subject, stats)`            | feeder   | Updates 30-day transaction volume and count        |
-| `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event                          |
+| `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event; current v1 behavior does not verify a real loan relationship and should be treated as a lender attestation rather than proof of disbursement |
 | `compute_score(subject)`                             | anyone   | Runs the scoring formula and persists the result   |
 | `get_score(subject)`                                 | anyone   | Returns the last computed ScoreRecord              |
 | `update_weights(weights)`                            | admin    | Changes scoring weights (must sum to 100)          |
@@ -160,13 +165,17 @@ All three contracts apply this pattern in `initialize` and every admin-gated fun
 
 Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`, etc. touch only persistent storage and do not need to extend the instance TTL. If the contract is not called by an admin for an extended period, anyone can call any of the covered admin-gated functions (with admin authentication) to refresh the TTL.
 
+> **Full treatment:** The [Epoch Model](epoch-model.md) document covers TTL management in depth — what each function bumps, what gets invalidated on expiry, and how to maintain liveness. It also explains related ledger-based mechanisms (compute cooldown, weight timelock, score staleness) that are not covered here.
+
 ---
 
 ## Cross-contract interaction
 
-Currently, the VC count fed into credit-oracle is supplied off-chain by a trusted feeder that reads identity-oracle and calls `set_vc_count`. This is a deliberate design choice for the v1 protocol: it avoids cross-contract call overhead and keeps the scoring gas cost predictable.
+The `credit-oracle` supports a dual-path mechanism for resolving a subject's VC count during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
 
-In a future version, credit-oracle will call identity-oracle directly:
+### Cross-Contract Path (Live)
+
+If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract:
 
 ```mermaid
 sequenceDiagram
@@ -182,9 +191,90 @@ sequenceDiagram
     CreditOracle-->>Caller: score: u32
 ```
 
-Credit-oracle now stores the `identity-oracle` contract ID and uses `env.invoke_contract` to obtain live VC counts. The feeder role for VC count is deprecated when this cross-contract path is configured.
+In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+
+### Fallback Path (Cached)
+
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`. 
+
+While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+
+### Migration to Cross-Contract VC Count
+
+To migrate a deployment from the cached fallback path to the live cross-contract path:
+
+1. **Configure the Oracle ID**: The admin calls `set_identity_oracle(identity_oracle_id)` on `credit-oracle`.
+2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls will automatically use the cross-contract lookup.
+3. **Deprecate Feeder Input**: The trusted feeder should stop calling `set_vc_count`. Any further updates via `set_vc_count` will be successfully written to persistent storage but entirely ignored by `compute_score`.
+4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement `get_active_vc_count`, the `compute_score` transaction will unconditionally fail.
 
 ---
+
+## TTL management
+
+Soroban persistent and instance storage entries have a time-to-live (TTL) measured in ledgers. If an entry's TTL expires, the entry is **archived** (removed from storage). To prevent data loss, all three contracts proactively extend TTLs on every write and provide an admin-only `maintain_storage` function for passive maintenance.
+
+### Strategy: hybrid (automatic + maintenance)
+
+1. **Automatic extension on every write** — whenever a contract writes to persistent storage (`set`), it immediately calls `extend_ttl` on that entry. This ensures actively-used data stays alive without any external coordination.
+
+2. **`maintain_storage` admin function** — extends instance storage TTL (Admin, Config, PendingWeights). Can be called periodically by a cron job or manually to protect a contract whose configuration rarely changes.
+
+### TTL constants
+
+| Constant               | Value       | Approximate real time | Scope          |
+| ---------------------- | ----------- | --------------------- | -------------- |
+| `INST_TTL_THRESHOLD`   | 120 960     | ~7 days               | Instance       |
+| `INST_TTL_EXTEND`      | 6 307 200   | ~1 year               | Instance       |
+| `PERS_TTL_THRESHOLD`   | 120 960     | ~7 days               | Persistent     |
+| `PERS_TTL_EXTEND`      | 518 400     | ~30 days              | Persistent     |
+
+> Ledger time is calculated at ≈5 s/ledger (Stellar network average).
+
+### Where TTL is extended
+
+**identity-oracle**
+
+| Operation          | Entry extended                    |
+| ------------------ | --------------------------------- |
+| `initialize`       | Instance storage (Admin)          |
+| `register_issuer`  | `TrustedIssuer(issuer)`           |
+| `anchor_did`       | `DIDDocument(subject)`            |
+| `anchor_vc`        | `VCAnchors(subject)`              |
+| `mark_vc_revoked`  | `VCAnchors(subject)`              |
+| `maintain_storage` | Instance storage                  |
+
+**credit-oracle**
+
+| Operation            | Entry extended                              |
+| -------------------- | ------------------------------------------- |
+| `initialize`         | Instance storage (Admin, Config)            |
+| `register_feeder`    | `TrustedFeeder(feeder)`                     |
+| `register_lender`    | `TrustedLender(lender)`                     |
+| `update_tx_stats`    | `TxStats(subject)`                          |
+| `record_repayment`   | `RepaymentRecord(subject)`                  |
+| `set_vc_count`       | `VcCount(subject)`                          |
+| `compute_score`      | `Score(subject)`, `TxStats(subject)`, `RepaymentRecord(subject)`, `VcCount(subject)` |
+| `maintain_storage`   | Instance storage                            |
+
+**revocation-registry**
+
+| Operation        | Entry extended                             |
+| ---------------- | ------------------------------------------ |
+| `initialize`     | Instance storage (Admin)                   |
+| `revoke`         | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `batch_revoke`   | `Status(vc_hash)`, `IssuerOfVC(vc_hash)`   |
+| `maintain_storage` | Instance storage                         |
+
+### Maintenance recommendations
+
+- Deploy an off-chain cron job (or serverless function) that calls `maintain_storage` on all three contracts at least once every **6 months** (well within the 1‑year instance TTL).
+- No additional action is needed for persistent entries — their TTLs are extended automatically whenever they are written.
+- If an entry has not been touched for more than ~30 days, it may be archived. This is by design: orphaned data can be garbage-collected by the network.
+
+---
+
+## Future work
 
 ## Data flow narrative
 
@@ -203,6 +293,8 @@ An off-chain indexer (the feeder) monitors the subject's on-chain activity, quer
 ### 4. Lender records repayments
 
 When a lender disburses a loan and the subject repays, the lender calls `record_repayment` on credit-oracle, flagging each repayment as on-time or late.
+
+This is a deliberate v1 limitation: the contract currently accepts repayment data from any registered lender without verifying that the lender actually disbursed a loan to that subject. In other words, `record_repayment` is an attestation from a trusted lender, not proof of an existing loan relationship. A future version should add explicit loan-tracking state or signed disbursement/repayment attestations to close this gap.
 
 ### 5. Score is computed
 

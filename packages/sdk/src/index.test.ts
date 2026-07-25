@@ -199,6 +199,66 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("anchorDID", () => {
+    it("throws when simulation returns an explicit error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "anchor_did rejected" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectAddress as never, "QmExampleCid"),
+      ).rejects.toThrow("Simulation failed: anchor_did rejected");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws when transaction submission returns FAILED status", async () => {
+      mockSendTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "tx_bad_auth",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectAddress as never, "QmExampleCid"),
+      ).rejects.toThrow("Transaction submission failed: tx_bad_auth");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+    });
+  });
+
+  describe("issueVC", () => {
+    it("throws when simulation returns an explicit error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "anchor_vc rejected" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 5);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
+      ).rejects.toThrow("Simulation failed: anchor_vc rejected");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws when transaction submission returns FAILED status", async () => {
+      mockSendTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "tx_bad_auth",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 6);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
+      ).rejects.toThrow("Transaction submission failed: tx_bad_auth");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).toHaveBeenCalled();
+    });
+  });
+
   describe("verifyVC", () => {
     it("test_verifyVC_true_for_valid_hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
@@ -382,6 +442,21 @@ describe("StellarDIDCreditSDK", () => {
         'computeScore transaction failed for tx-hash-3: {"status":"FAILED","errorResult":"tx_bad_auth"}',
       );
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("throws when computeScore simulation returns an explicit error", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "123" });
+      mockSimulateTransaction.mockResolvedValue({ error: "compute_score rejected" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.computeScore(
+          { publicKey: () => subjectAddress } as unknown as Keypair,
+          subjectAddress,
+        ),
+      ).rejects.toThrow("Simulation failed: compute_score rejected");
+      expect(mockSendTransaction).not.toHaveBeenCalled();
     });
   });
 

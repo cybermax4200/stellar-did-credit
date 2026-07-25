@@ -89,18 +89,18 @@ The protocol is composed of three Soroban smart contracts deployed on the Stella
 
 Manages decentralized identifiers and verifiable credential anchoring.
 
-| Function                                    | Description                                    |
-| ------------------------------------------- | ---------------------------------------------- |
-| `initialize(admin)`                         | Sets the contract admin                        |
-| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                       |
+| Function                                    | Description                                     |
+| ------------------------------------------- | ----------------------------------------------- |
+| `initialize(admin)`                         | Sets the contract admin                         |
+| `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                        |
 | `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
-| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document          |
-| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer        |
-| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC |
-| `get_vc_count(subject)`                     | Returns the number of anchored VCs             |
-| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid          |
-| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                          |
-| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place            |
+| `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
+| `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
+| `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
+| `get_vc_count(subject)`                     | Returns the number of anchored VCs              |
+| `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
+| `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
+| `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
 
 ### credit-oracle
 
@@ -277,6 +277,7 @@ stellar-did-credit/
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
+│   ├── epoch-model.md          # TTL management, compute cooldown, weight timelock
 │   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
 │   ├── scoring-spec.md         # Scoring formula + worked examples
 │   └── zk-proof-design.md      # Phase 4 ZK selective disclosure design
@@ -294,7 +295,7 @@ stellar-did-credit/
 
 The `@stellar-did-credit/sdk` package provides a typed client for interacting with all three contracts from a TypeScript application.
 
-```typescript
+````typescript
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
 
 const sdk = new StellarDIDCreditSDK({
@@ -308,8 +309,14 @@ const sdk = new StellarDIDCreditSDK({
 
 // Read a credit score (read-only, no fees)
 const score = await sdk.getScore("G...");
-console.log(score.score); // e.g. 612
-```
+
+if (score) {
+  console.log(score.score); // e.g. 612
+} else {
+  console.log("No credit score has been computed for this subject yet.");
+}
+
+> **Note:** `sdk.getScore()` returns `null` if a score has not yet been computed for the subject. Always check for `null` before accessing properties on the returned value.
 
 ### SDK status
 
@@ -347,7 +354,7 @@ cd packages/feeder
 cp .env.example .env
 # Edit .env: set FEEDER_SECRET, SUBJECTS, CREDIT_ORACLE_ID, IDENTITY_ORACLE_ID
 pnpm install
-```
+````
 
 ### Run
 
@@ -378,7 +385,10 @@ const config: FeederConfig = {
   pollIntervalMs: 3_600_000,
 };
 
-const feeder = new Feeder(config, Keypair.fromSecret("YOUR_STELLAR_SECRET_KEY"));
+const feeder = new Feeder(
+  config,
+  Keypair.fromSecret("YOUR_STELLAR_SECRET_KEY"),
+);
 const stop = feeder.start(); // begins polling; call stop() to halt
 ```
 
@@ -473,6 +483,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Stellar Expert (Testnet Explorer)](https://stellar.expert/explorer/testnet)
 - [Project Architecture](docs/architecture.md)
 - [Scoring Specification](docs/scoring-spec.md)
+- [Epoch Model (TTL, cooldown, timelock)](docs/epoch-model.md)
 - [DID Method Specification](docs/did-spec.md)
 - [Issuer Integration Guide](docs/issuer-guide.md)
 - [ZK Proof Layer Design (Phase 4)](docs/zk-proof-design.md)

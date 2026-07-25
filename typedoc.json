@@ -1,0 +1,13 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["packages/sdk/src/index.ts"],
+  "out": "docs/api/sdk",
+  "name": "Stellar DID Credit SDK",
+  "readme": "packages/sdk/README.md",
+  "includeVersion": true,
+  "searchInComments": true,
+  "categorizeByGroup": true,
+  "tsconfig": "packages/sdk/tsconfig.json",
+  "skipErrorChecking": true,
+  "exclude": ["**/*.test.ts", "**/__tests__/**/*"]
+}

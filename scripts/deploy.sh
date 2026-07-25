@@ -6,34 +6,60 @@
 set -euo pipefail
 
 NETWORK=${NETWORK:-testnet}
-SOURCE="deployer"
-DEPLOYMENTS_FILE="deployments.testnet.json"
+SOURCE=${SOURCE:-deployer}
+DEPLOYMENTS_FILE=${DEPLOYMENTS_FILE:-}
 RESUME=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
 # ---------------------------------------------------------------------------
-for arg in "$@"; do
-  case "$arg" in
+while [[ $# -gt 0 ]]; do
+  case "$1" in
     --resume)
       RESUME=true
+      shift
+      ;;
+    --network)
+      if [[ $# -lt 2 ]]; then
+        echo "Error: --network requires a value" >&2
+        exit 1
+      fi
+      NETWORK="$2"
+      shift 2
+      ;;
+    --help|-h)
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>]" >&2
+      exit 0
       ;;
     *)
-      echo "Unknown argument: $arg" >&2
-      echo "Usage: $0 [--resume]" >&2
+      echo "Unknown argument: $1" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>]" >&2
       exit 1
       ;;
   esac
 done
 
+if [[ "$NETWORK" != "testnet" && "$NETWORK" != "mainnet" ]]; then
+  echo "Error: network must be 'testnet' or 'mainnet'" >&2
+  exit 1
+fi
+
+if [ -z "$DEPLOYMENTS_FILE" ]; then
+  DEPLOYMENTS_FILE="deployments.${NETWORK}.json"
+fi
+
+if [[ "$NETWORK" == "mainnet" ]]; then
+  echo "Mainnet deployment detected. Ensure the deployer account is funded and the admin key is held in secure offline storage." >&2
+fi
+
 # ---------------------------------------------------------------------------
 # Resume support
 #
-# When --resume is passed and a deployments.testnet.json already exists, we
-# read the previously recorded contract addresses.  Any contract whose address
-# is already present and non-empty is skipped; only missing ones are deployed.
-# This makes an interrupted deployment safely restartable without redeploying
-# contracts that already landed on-chain.
+# When --resume is passed and a deployment file already exists, we read the
+# previously recorded contract addresses. Any contract whose address is already
+# present and non-empty is skipped; only missing ones are deployed. This makes
+# an interrupted deployment safely restartable without redeploying contracts
+# that already landed on-chain.
 # ---------------------------------------------------------------------------
 IDENTITY_ID=""
 CREDIT_ID=""
@@ -116,8 +142,8 @@ fi
 # ---------------------------------------------------------------------------
 # Atomic JSON output
 #
-# deployments.testnet.json is written exactly once, only after every contract
-# address has been collected successfully.  Writing the file at the very end
+# deployments.<network>.json is written exactly once, only after every contract
+# address has been collected successfully. Writing the file at the very end
 # (never incrementally) means an interrupted deployment can never leave behind
 # a partially written or malformed JSON file.
 # ---------------------------------------------------------------------------
