@@ -360,8 +360,8 @@ mod tests {
     use super::*;
     use credit_oracle::{CreditOracle, CreditOracleClient};
     use soroban_sdk::{
-        testutils::{Address as _, Ledger},
-        Env,
+        testutils::{Address as _, Events, Ledger},
+        Env, TryIntoVal,
     };
 
     #[test]
@@ -536,21 +536,16 @@ mod tests {
         let events = env.events().all();
         let mut found_event = false;
         
-        for (contract_id, event) in events.iter() {
-            if contract_id == gov_id {
-                let topics = event.topics;
-                if topics.len() == 2 {
-                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
-                    if symbol == soroban_sdk::symbol_short!("PropCanc") {
-                        found_event = true;
-                        let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
-                        assert_eq!(id, proposal_id);
-                        
-                        let data: (Address, Option<soroban_sdk::String>) = event.data.try_into_val(&env).unwrap();
-                        assert_eq!(data.0, canceller);
-                        // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
-                        // We will skip strict String value checking for now.
-                    }
+        for (contract_id, topics, data_val) in events.iter() {
+            if contract_id == gov_id && topics.len() == 2 {
+                let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
+                if symbol == soroban_sdk::symbol_short!("PropCanc") {
+                    found_event = true;
+                    let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(id, proposal_id);
+                    
+                    let data: (Address, Option<soroban_sdk::String>) = data_val.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, canceller);
                 }
             }
         }
@@ -573,20 +568,17 @@ mod tests {
         let events = env.events().all();
         let mut found = false;
 
-        for (contract_id, event) in events.iter() {
-            if contract_id == gov_id {
-                let topics = event.topics;
-                if topics.len() == 1 {
-                    let symbol: soroban_sdk::Symbol =
-                        topics.get(0).unwrap().try_into_val(&env).unwrap();
-                    if symbol == soroban_sdk::symbol_short!("Init") {
-                        found = true;
-                        let data: (Address, Address, i128) =
-                            event.data.try_into_val(&env).unwrap();
-                        assert_eq!(data.0, admin);
-                        assert_eq!(data.1, credit_oracle);
-                        assert_eq!(data.2, 1000);
-                    }
+        for (contract_id, topics, data_val) in events.iter() {
+            if contract_id == gov_id && topics.len() == 1 {
+                let symbol: soroban_sdk::Symbol =
+                    topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if symbol == soroban_sdk::symbol_short!("Init") {
+                    found = true;
+                    let data: (Address, Address, i128) =
+                        data_val.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, admin);
+                    assert_eq!(data.1, credit_oracle);
+                    assert_eq!(data.2, 1000);
                 }
             }
         }
