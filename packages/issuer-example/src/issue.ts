@@ -41,14 +41,27 @@ function parseArgs(argv: string[]): Record<string, string> {
 
 const args = parseArgs(process.argv.slice(2));
 
-const subjectAddress = args["subject"];
+let subjectAddress = args["subject"];
 const kycLevel = args["kyc-level"] ?? "basic";
 const country = args["country"] ?? "XX";
 
 if (!subjectAddress) {
-  console.error("Error: --subject <G...> is required");
+  console.error("Error: --subject <G... or C...> is required");
   process.exit(1);
 }
+
+// Validate Stellar address format and normalize to uppercase.
+// Accept both G- (account) and C- (contract) addresses: 56 base32 chars.
+const subjectAddressUpper = subjectAddress.toUpperCase();
+const stellarAddressRegex = /^[GC][A-Z2-7]{55}$/;
+if (!stellarAddressRegex.test(subjectAddressUpper)) {
+  console.error(
+    "Error: --subject must be a valid Stellar address (G... or C..., 56 base32 characters)"
+  );
+  process.exit(1);
+}
+
+subjectAddress = subjectAddressUpper;
 
 // ---------------------------------------------------------------------------
 // Environment configuration
