@@ -180,10 +180,9 @@ export class StellarDIDCreditSDK {
    * Uses a read-only simulation (no signing required) against the configured RPC endpoint.
    *
    * @param subjectAddress - Stellar G... address of the subject
-   * @returns Parsed ScoreRecord
-   * @throws {ScoreNotComputedError} If the score has not been computed for this address
+   * @returns Parsed ScoreRecord or null if not computed
    */
-  async getScore(subjectAddress: string): Promise<ScoreRecord> {
+  async getScore(subjectAddress: string): Promise<ScoreRecord | null> {
     // 1. Create RPC server
     const server = new SorobanRpc.Server(this.config.rpcUrl);
 
@@ -208,7 +207,7 @@ export class StellarDIDCreditSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.includes("score not computed")) {
-        throw new ScoreNotComputedError();
+        return null;
       }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
@@ -362,13 +361,13 @@ export class ScoreNotComputedError extends Error {
 
 /**
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
- * Returns the ScoreRecord if Some, throws ScoreNotComputedError if None.
+ * Returns the ScoreRecord if Some, or null if None.
  */
-function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord {
+function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord | null {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
-    throw new ScoreNotComputedError(subjectAddress);
+    return null;
   }
   const raw = native as Record<string, unknown>;
   return {

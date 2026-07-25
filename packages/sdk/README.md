@@ -22,14 +22,18 @@ const sdk = new StellarDIDCreditSDK({
 });
 
 const score = await sdk.getScore("G...");
-console.log(score.score); // e.g. 612
+if (score) {
+  console.log(score.score); // e.g. 612
+} else {
+  console.log("No score computed yet");
+}
 ```
 
 ## API
 
-### `getScore(subjectAddress: string): Promise<ScoreRecord>`
+### `getScore(subjectAddress: string): Promise<ScoreRecord | null>`
 
-Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required.
+Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required. Returns `null` if no score has been computed for this address.
 
 ```typescript
 interface ScoreRecord {
