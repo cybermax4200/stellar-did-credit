@@ -34,14 +34,14 @@ fn require_admin(env: &Env) -> Address {
         .expect("not initialized");
     admin.require_auth();
     admin
-}// ── Persistent TTL constants ─────────────────────────────────────
-// Persistent entries are extended to ~30 days on every write.
-//
-// Threshold: if remaining TTL drops below this, extend.
-// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
-//
-const PERS_TTL_THRESHOLD: u32 = 120_960;   // ~7 days
-const PERS_TTL_EXTEND: u32   = 518_400;    // ~30 days
+} // ── Persistent TTL constants ─────────────────────────────────────
+  // Persistent entries are extended to ~30 days on every write.
+  //
+  // Threshold: if remaining TTL drops below this, extend.
+  // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+  //
+const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Error types for the identity-oracle contract.
 #[contracterror]
@@ -187,7 +187,9 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -202,22 +204,28 @@ impl IdentityOracle {
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        let previous: Option<Address> =
+            env.storage().instance().get(&DataKey::RevocationRegistryId);
         env.storage()
             .instance()
             .set(&DataKey::RevocationRegistryId, &registry_id);
+        let prev = previous.unwrap_or_else(|| registry_id.clone());
+        env.events()
+            .publish((symbol_short!("RegSet"),), (prev, registry_id));
         Ok(())
     }
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_issuer(
-        env: Env,
-        issuer: Address,
-    ) -> Result<(), IdentityOracleError> {
+    pub fn register_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let issuer_key = DataKey::TrustedIssuer(issuer.clone());
         if !env.storage().persistent().has(&issuer_key) {
@@ -247,12 +255,11 @@ impl IdentityOracle {
     /// deregistered issuers from the returned set.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_issuer(
-        env: Env,
-        issuer: Address,
-    ) -> Result<(), IdentityOracleError> {
+    pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         env.storage()
             .persistent()
@@ -300,9 +307,11 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::DIDDocument(subject.clone()), &did_doc_cid);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::DIDDocument(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage().persistent().extend_ttl(
+            &DataKey::DIDDocument(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
         Ok(())
@@ -365,7 +374,9 @@ impl IdentityOracle {
 
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
-        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events()
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
@@ -402,7 +413,9 @@ impl IdentityOracle {
         }
 
         env.storage().persistent().set(&key, &updated);
-        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         Ok(())
     }
 
@@ -555,7 +568,9 @@ impl IdentityOracle {
     /// Auth: current admin only — verified via `require_admin`.
     pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -580,7 +595,9 @@ impl IdentityOracle {
             None => return Err(IdentityOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -591,7 +608,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
     }
@@ -603,7 +622,9 @@ impl IdentityOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -637,7 +658,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{symbol_short, testutils::Address as _, Env};
+    use soroban_sdk::{symbol_short, testutils::Address as _, testutils::Events, Env, TryIntoVal};
 
     #[test]
     fn test_anchor_vc_by_trusted_issuer() {
@@ -1120,5 +1141,72 @@ mod tests {
         env.mock_auths(&[]);
         let res = client.try_maintain_storage();
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_set_revocation_registry_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let registry = Address::generate(&env);
+        client.set_revocation_registry(&registry);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (contract_addr, topics, data) = events.get(0).unwrap();
+        assert_eq!(*contract_addr, contract_id);
+        assert_eq!(topics.len(), 1);
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic, symbol_short!("RegSet"));
+        let data_tuple: (Address, Address) = data.try_into_val(&env).unwrap();
+        assert_eq!(data_tuple, (registry.clone(), registry.clone()));
+    }
+
+    #[test]
+    fn test_set_revocation_registry_emits_previous_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let first = Address::generate(&env);
+        client.set_revocation_registry(&first);
+
+        let second = Address::generate(&env);
+        client.set_revocation_registry(&second);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 2);
+        let (_, _, data2) = events.get(1).unwrap();
+        let prev_new: (Address, Address) = data2.try_into_val(&env).unwrap();
+        assert_eq!(prev_new.0, first);
+        assert_eq!(prev_new.1, second);
+    }
+
+    #[test]
+    fn test_set_revocation_registry_fails_without_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let registry = Address::generate(&env);
+        let res = client.try_set_revocation_registry(&registry);
+        assert!(res.is_err());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 0);
     }
 }

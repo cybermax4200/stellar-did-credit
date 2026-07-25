@@ -308,7 +308,9 @@ impl CreditOracle {
         admin.require_auth();
 
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let default_weights = ScoringWeights {
             vc_weight: 40,
@@ -328,12 +330,11 @@ impl CreditOracle {
     /// Register a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_feeder(
-        env: Env,
-        feeder: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn register_feeder(env: Env, feeder: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
@@ -344,12 +345,11 @@ impl CreditOracle {
     /// Deregister a trusted feeder address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_feeder(
-        env: Env,
-        feeder: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn deregister_feeder(env: Env, feeder: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
@@ -360,12 +360,11 @@ impl CreditOracle {
     /// Register a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn register_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn register_lender(env: Env, lender: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .set(&DataKey::TrustedLender(lender.clone()), &true);
@@ -376,12 +375,11 @@ impl CreditOracle {
     /// Deregister a trusted lender address.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn deregister_lender(env: Env, lender: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
@@ -710,7 +708,9 @@ impl CreditOracle {
             return Err(CreditOracleError::InvalidWeights);
         }
         require_admin_or_governor(&env, &caller)?;
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
@@ -827,9 +827,13 @@ impl CreditOracle {
         identity_oracle_id: Address,
     ) -> Result<(), CreditOracleError> {
         require_admin(&env);
+        let previous: Option<Address> = env.storage().instance().get(&DataKey::IdentityOracleId);
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
+        let prev = previous.unwrap_or_else(|| identity_oracle_id.clone());
+        env.events()
+            .publish((symbol_short!("OrclSet"),), (prev, identity_oracle_id));
         Ok(())
     }
 
@@ -887,12 +891,11 @@ impl CreditOracle {
     }
 
     /// Propose a new contract admin (two-step admin transfer).
-    pub fn propose_new_admin(
-        env: Env,
-        new_admin: Address,
-    ) -> Result<(), CreditOracleError> {
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage()
             .instance()
             .set(&DataKey::PendingAdmin, &new_admin);
@@ -911,7 +914,9 @@ impl CreditOracle {
             None => return Err(CreditOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
@@ -924,7 +929,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), CreditOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         Ok(())
     }
 
@@ -933,7 +940,9 @@ impl CreditOracle {
     /// Auth: admin only — verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -943,7 +952,7 @@ impl CreditOracle {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger as _, TryIntoVal};
 
     #[test]
     fn test_default_weights_sum_to_100() {
@@ -2105,5 +2114,79 @@ mod tests {
         env.mock_auths(&[]);
         let res = client.try_maintain_storage();
         assert!(res.is_err());
+    }
+
+    // -----------------------------------------------------------------------
+    // set_identity_oracle event tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_set_identity_oracle_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let identity_oracle = Address::generate(&env);
+        client.set_identity_oracle(&identity_oracle);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (contract_addr, topics, data) = events.get(0).unwrap();
+        assert_eq!(*contract_addr, contract_id);
+        assert_eq!(topics.len(), 1);
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic, symbol_short!("OrclSet"));
+        let data_tuple: (Address, Address) = data.try_into_val(&env).unwrap();
+        assert_eq!(
+            data_tuple,
+            (identity_oracle.clone(), identity_oracle.clone())
+        );
+    }
+
+    #[test]
+    fn test_set_identity_oracle_emits_previous_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let first = Address::generate(&env);
+        client.set_identity_oracle(&first);
+
+        let second = Address::generate(&env);
+        client.set_identity_oracle(&second);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 2);
+        let (_, _, data2) = events.get(1).unwrap();
+        let prev_new: (Address, Address) = data2.try_into_val(&env).unwrap();
+        assert_eq!(prev_new.0, first);
+        assert_eq!(prev_new.1, second);
+    }
+
+    #[test]
+    fn test_set_identity_oracle_fails_without_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let identity_oracle = Address::generate(&env);
+        let res = client.try_set_identity_oracle(&identity_oracle);
+        assert!(res.is_err());
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 0);
     }
 }
