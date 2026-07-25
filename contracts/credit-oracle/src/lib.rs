@@ -295,6 +295,16 @@ fn compute_vc_score_from_identity(env: &Env, identity_id: &Address, subject: &Ad
     (total.min(100), vc_count)
 }
 
+fn validate_weights(weights: &ScoringWeights) {
+    let sum = weights.vc_weight.saturating_add(weights.tx_weight).saturating_add(weights.repayment_weight);
+    if sum != 100 {
+        panic!(
+            "weights must sum to 100, got {} (vc: {}, tx: {}, repayment: {})",
+            sum, weights.vc_weight, weights.tx_weight, weights.repayment_weight
+        );
+    }
+}
+
 #[contract]
 pub struct CreditOracle;
 
@@ -315,6 +325,7 @@ impl CreditOracle {
             tx_weight: 30,
             repayment_weight: 30,
         };
+        validate_weights(&default_weights);
         env.storage()
             .instance()
             .set(&DataKey::Config, &default_weights);
@@ -706,9 +717,7 @@ impl CreditOracle {
         caller: Address,
         weights: ScoringWeights,
     ) -> Result<(), CreditOracleError> {
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
-            return Err(CreditOracleError::InvalidWeights);
-        }
+        validate_weights(&weights);
         require_admin_or_governor(&env, &caller)?;
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
@@ -775,9 +784,7 @@ impl CreditOracle {
     /// overwrite this direct update once the original proposal's timelock
     /// elapses.
     pub fn update_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
-            return Err(CreditOracleError::InvalidWeights);
-        }
+        validate_weights(&weights);
         require_admin(&env);
         env.storage().instance().set(&DataKey::Config, &weights);
         env.storage().instance().remove(&DataKey::PendingWeights);
@@ -957,6 +964,44 @@ mod tests {
 
         let w = client.get_scoring_weights();
         assert_eq!(w.vc_weight + w.tx_weight + w.repayment_weight, 100);
+    }
+
+    #[test]
+    #[should_panic(expected = "weights must sum to 100, got 150 (vc: 50, tx: 50, repayment: 50)")]
+    fn test_propose_invalid_weights_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let invalid_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 50,
+            repayment_weight: 50,
+        };
+        client.propose_weights(&admin, &invalid_weights);
+    }
+
+    #[test]
+    #[should_panic(expected = "weights must sum to 100, got 90 (vc: 30, tx: 30, repayment: 30)")]
+    fn test_update_invalid_weights_panics() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let invalid_weights = ScoringWeights {
+            vc_weight: 30,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        client.update_weights(&invalid_weights);
     }
 
     #[test]
