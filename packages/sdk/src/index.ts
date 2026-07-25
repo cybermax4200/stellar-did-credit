@@ -228,19 +228,36 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * Verify that a specific VC hash is valid and not revoked for the given subject.
+   * Revoke a verifiable credential by its hash.
    *
-   * Uses a read-only simulation against the identity-oracle contract.
+   * Submits a signed transaction that calls both the revocation-registry contract
+   * to mark the hash as revoked, and the identity-oracle contract to update the
+   * VC record status.
    *
-   * @param subjectAddress - Stellar G... address of the subject
-   * @param vcHash - SHA-256 hash of the credential
-   * @returns true if the credential is valid and not revoked
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param subjectAddress - Stellar G... address of the credential subject
+   * @param vcHash - SHA-256 hash of the verifiable credential
+   * @returns Transaction hash on successful submission
    */
-  async verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean> {
+  async revokeVC(
+    issuerKeypair: any,
+    subjectAddress: string,
+    vcHash: Buffer,
+  ): Promise<string> {
     const server = new SorobanRpc.Server(this.config.rpcUrl);
-    const contract = new Contract(this.config.identityOracleId);
+    const registryContract = new Contract(this.config.revocationRegistryId);
+    const identityContract = new Contract(this.config.identityOracleId);
 
-    const sourceAccount = new Account(this.config.simAccount, "0");
+    const publicKey =
+      issuerKeypair.publicKey instanceof Function
+        ? issuerKeypair.publicKey()
+        : issuerKeypair.publicKey;
+
+    // Get the current account sequence number
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
+
+    // Convert vcHash Buffer to ScVal
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
     const tx = new TransactionBuilder(sourceAccount, {
@@ -248,8 +265,16 @@ export class StellarDIDCreditSDK {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        contract.call(
-          "verify_vc",
+        registryContract.call(
+          "revoke",
+          new Address(publicKey).toScVal(),
+          hashScVal,
+        ),
+      )
+      .addOperation(
+        identityContract.call(
+          "mark_vc_revoked",
+          new Address(publicKey).toScVal(),
           new Address(subjectAddress).toScVal(),
           hashScVal,
         ),
@@ -257,6 +282,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(30)
       .build();
 
+    // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
@@ -267,12 +293,21 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const resultScVal = sim.result?.retval;
-    if (!resultScVal) {
-      throw new Error("No return value in simulation result");
+    // Apply simulation result and prepare the transaction
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
+      tx,
+      sim,
+    ).build();
+    preparedTx.sign(issuerKeypair);
+
+    // Submit to the network
+    const response = await server.sendTransaction(preparedTx);
+
+    if (response.status !== "PENDING") {
+      throw new Error(`Transaction submission failed: ${response.errorResult}`);
     }
 
-    return scValToNative(resultScVal) as boolean;
+    return response.hash;
   }
 
   /**

@@ -227,33 +227,25 @@ Your issuer keypair is a signing key that directly controls which credential has
 
 ## Revoking a credential
 
-If a credential is no longer valid (the user's KYC has lapsed, a document expired, or there was a data error), you must revoke it. Two paths exist:
+If a credential is no longer valid (the user's KYC has lapsed, a document expired, or there was a data error), you must revoke it.
 
-**Via the identity-oracle** (marks the hash as revoked in the VC record):
-
-```typescript
-// Not yet in the SDK — call via Soroban directly, or wait for revokeVC in SDK v0.2
-```
-
-**Via the revocation-registry** (independent on-chain registry that any verifier can check):
+You can revoke a credential using the SDK's `revokeVC` method, which atomically marks the credential hash as revoked in both the `revocation-registry` and the `identity-oracle`:
 
 ```typescript
-// anchor_vc does not automatically consult the revocation-registry;
-// the registry is intended for verifiers and lenders to query independently.
+try {
+  const txHash = await sdk.revokeVC(
+    issuerKeypair,
+    subjectAddress,
+    vcHash
+  );
+  console.log(`Credential revoked successfully. TX: ${txHash}`);
+} catch (error) {
+  console.error("Failed to revoke credential:", error);
+  // Handle specific errors, e.g., signature failure, authorization failure, or invalid VC hash
+}
 ```
 
-Until `revokeVC` is added to the SDK, you can invoke `mark_vc_revoked(issuer, subject, vc_hash)` on the identity-oracle contract directly using `stellar-cli`:
-
-```bash
-stellar contract invoke \
-  --id CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
-  --source-account ISSUER_KEY_NAME \
-  --network testnet \
-  -- mark_vc_revoked \
-  --issuer YOUR_G_ADDRESS \
-  --subject SUBJECT_G_ADDRESS \
-  --vc_hash HEX_ENCODED_HASH
-```
+The `revokeVC` method handles the two-contract flow automatically. If the transaction fails, the entire operation is reverted.
 
 ---
 
