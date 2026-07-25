@@ -1,5 +1,5 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Feeder } from "./index";
+import { Feeder, parsePollIntervalMs, MIN_POLL_INTERVAL_MS } from "./index";
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
@@ -640,5 +640,97 @@ describe("Error classification helpers", () => {
     await expect(
       fetchHorizonStats("https://horizon.example", "GADDR"),
     ).rejects.toThrow("Network timeout");
+  });
+});
+
+describe("parsePollIntervalMs", () => {
+  let exitSpy: jest.SpyInstance;
+  let errorSpy: jest.SpyInstance;
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    // Make process.exit throw so we can assert on it without killing the process.
+    exitSpy = jest
+      .spyOn(process, "exit")
+      .mockImplementation((code?: string | number | null | undefined) => {
+        throw new Error(`process.exit(${code})`);
+      });
+    errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    exitSpy.mockRestore();
+    errorSpy.mockRestore();
+    warnSpy.mockRestore();
+  });
+
+  it("returns the value when given a valid interval at the minimum boundary", () => {
+    expect(parsePollIntervalMs(String(MIN_POLL_INTERVAL_MS))).toBe(
+      MIN_POLL_INTERVAL_MS,
+    );
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns the value when given a valid interval well above the minimum", () => {
+    expect(parsePollIntervalMs("3600000")).toBe(3_600_000);
+    expect(exitSpy).not.toHaveBeenCalled();
+  });
+
+  it("exits with error for a non-numeric string", () => {
+    expect(() => parsePollIntervalMs("abc")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Non-numeric values are not accepted"),
+    );
+  });
+
+  it("exits with error for an empty string", () => {
+    expect(() => parsePollIntervalMs("")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Non-numeric values are not accepted"),
+    );
+  });
+
+  it("exits with error for a float string", () => {
+    expect(() => parsePollIntervalMs("3600000.5")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Non-numeric values are not accepted"),
+    );
+  });
+
+  it("exits with error for a mixed alphanumeric string", () => {
+    expect(() => parsePollIntervalMs("100abc")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Non-numeric values are not accepted"),
+    );
+  });
+
+  it("exits with error for a negative value", () => {
+    expect(() => parsePollIntervalMs("-1000")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("must be a positive integer greater than zero"),
+    );
+  });
+
+  it("exits with error for zero", () => {
+    expect(() => parsePollIntervalMs("0")).toThrow("process.exit(1)");
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("must be a positive integer greater than zero"),
+    );
+  });
+
+  it("logs a warning and exits with error for a value below the minimum", () => {
+    expect(() => parsePollIntervalMs("1000")).toThrow("process.exit(1)");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("below the recommended minimum"),
+    );
+    expect(errorSpy).toHaveBeenCalledWith(
+      expect.stringContaining(`must be at least ${MIN_POLL_INTERVAL_MS}ms`),
+    );
+  });
+
+  it("handles whitespace-padded valid values", () => {
+    expect(parsePollIntervalMs("  3600000  ")).toBe(3_600_000);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 });

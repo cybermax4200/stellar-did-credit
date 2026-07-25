@@ -881,6 +881,60 @@ function requireEnv(name: string): string {
   return value;
 }
 
+/** Minimum acceptable polling interval in milliseconds (1 minute). */
+export const MIN_POLL_INTERVAL_MS = 60_000;
+
+/**
+ * Parses and validates a raw POLL_INTERVAL_MS string value.
+ *
+ * Rules:
+ *   - Must be a plain integer string — floats, mixed strings, and empty
+ *     values are all rejected with a descriptive error.
+ *   - Must be a positive integer (zero or negative cause an error exit).
+ *   - Must be >= MIN_POLL_INTERVAL_MS. Values below this threshold emit a
+ *     warning and then exit with an error to prevent accidentally hammering
+ *     the RPC endpoint.
+ *
+ * @param raw - The raw string from the environment variable (or a default).
+ * @returns The validated poll interval in milliseconds.
+ */
+export function parsePollIntervalMs(raw: string): number {
+  const trimmed = raw.trim();
+
+  // Reject anything that is not a plain integer string (no floats, no mixed).
+  if (!/^-?\d+$/.test(trimmed)) {
+    console.error(
+      `Error: POLL_INTERVAL_MS must be a positive integer (got "${raw}"). ` +
+        `Non-numeric values are not accepted.`,
+    );
+    process.exit(1);
+  }
+
+  const value = parseInt(trimmed, 10);
+
+  if (value <= 0) {
+    console.error(
+      `Error: POLL_INTERVAL_MS must be a positive integer greater than zero (got ${value}).`,
+    );
+    process.exit(1);
+  }
+
+  if (value < MIN_POLL_INTERVAL_MS) {
+    console.warn(
+      `Warning: POLL_INTERVAL_MS is set to ${value}ms, which is below the recommended ` +
+        `minimum of ${MIN_POLL_INTERVAL_MS}ms (1 minute). ` +
+        `Values this low may hammer the RPC endpoint. ` +
+        `Set POLL_INTERVAL_MS to at least ${MIN_POLL_INTERVAL_MS}.`,
+    );
+    console.error(
+      `Error: POLL_INTERVAL_MS must be at least ${MIN_POLL_INTERVAL_MS}ms (got ${value}).`,
+    );
+    process.exit(1);
+  }
+
+  return value;
+}
+
 if (require.main === module) {
   const feederSecret = requireEnv("FEEDER_SECRET");
   const subjectsRaw = requireEnv("SUBJECTS");
@@ -896,9 +950,8 @@ if (require.main === module) {
   const simAccount =
     process.env["SIM_ACCOUNT"] ??
     "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-  const pollIntervalMs = parseInt(
+  const pollIntervalMs = parsePollIntervalMs(
     process.env["POLL_INTERVAL_MS"] ?? "3600000",
-    10,
   );
   const maxRetries = parseInt(process.env["MAX_RETRIES"] ?? "3", 10);
   const retryBaseDelayMs = parseInt(
