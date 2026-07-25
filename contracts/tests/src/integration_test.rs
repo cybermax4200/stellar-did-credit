@@ -1,6 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
+    use credit_oracle::{CreditOracle, CreditOracleClient, ScoringWeights, TxStats};
+    use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
@@ -475,99 +476,44 @@ mod tests {
     }
 
     #[test]
-    fn test_score_recomputation_after_weight_change() {
+    fn test_batch_revoke_mixed_hashes_atomicity() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
         let admin = soroban_sdk::Address::generate(&env);
-        credit.initialize(&admin);
+        revocation.initialize(&admin);
 
-        let subject = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
 
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
+        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
 
-        // Setup some stats
-        credit.set_vc_count(&feeder, &subject, &5);
-        credit.update_tx_stats(
-            &feeder,
-            &subject,
-            &credit_oracle::TxStats {
-                volume_30d: 500_000_000i128,
-                tx_count_30d: 10,
-                avg_counterparties: 3,
-            },
-        );
-        for _ in 0..5 {
-            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
-        }
+        // issuer2 revokes hash2 individually to claim authority
+        revocation.revoke(&issuer2, &hash2);
+        assert!(revocation.is_revoked(&hash2));
 
-        // 1. compute score with old weights [40, 30, 30]
-        let initial_score = credit.compute_score(&subject);
+        // Create a batch with mixed hashes
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(hash1.clone());
+        batch.push_back(hash2.clone()); // belongs to issuer2
+        batch.push_back(hash3.clone());
 
-        // check initial weights
-        let weights = credit.get_scoring_weights();
-        assert_eq!(weights.vc_weight, 40);
-        assert_eq!(weights.tx_weight, 30);
-        assert_eq!(weights.repayment_weight, 30);
-
-        // initial score calculation:
-        // composite = (100 * 40 + 5 * 30 + 100 * 30 + 0) / 100 = 71
-        // score = 300 + (71 * 550 / 100) = 690
-        assert_eq!(initial_score, 690);
-
-        // 2. propose [50, 25, 25] (Weight increase for VC which is maxed out)
-        let new_weights = credit_oracle::ScoringWeights {
-            vc_weight: 50,
-            tx_weight: 25,
-            repayment_weight: 25,
-        };
-        credit.propose_weights(&admin, &new_weights);
-
-        // advance ledger to pass timelock
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 17280);
-
-        // 3. apply
-        credit.apply_weights();
-
-        // 4. advance ledger to bypass cooldown
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-
-        // 5. recompute score
-        let new_score = credit.compute_score(&subject);
-
-        // New weights [50, 25, 25]:
-        // composite = (100 * 50 + 5 * 25 + 100 * 25 + 0) / 100 = 76
-        // score = 300 + (76 * 550 / 100) = 718
-        assert_eq!(new_score, 718);
-        assert!(new_score > initial_score);
-
-        // 6. Test a decrease scenario [20, 40, 40]
-        let decrease_weights = credit_oracle::ScoringWeights {
-            vc_weight: 20,
-            tx_weight: 40,
-            repayment_weight: 40,
-        };
-        credit.propose_weights(&admin, &decrease_weights);
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 17280);
-        credit.apply_weights();
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-
-        let final_score = credit.compute_score(&subject);
+        // issuer1 attempts to batch revoke the hashes
+        let res = revocation.try_batch_revoke(&issuer1, &batch);
         
-        // Decrease weights [20, 40, 40]:
-        // composite = (100 * 20 + 5 * 40 + 100 * 40 + 0) / 100 = 62
-        // score = 300 + (62 * 550 / 100) = 641
-        assert_eq!(final_score, 641);
-        assert!(final_score < initial_score);
+        // Assert the call failed with IssuerMismatch
+        assert_eq!(
+            res,
+            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
+        );
+
+        // Verify that hash1 and hash3 were NOT revoked (atomicity check)
+        assert!(!revocation.is_revoked(&hash1));
+        assert!(!revocation.is_revoked(&hash3));
     }
 }

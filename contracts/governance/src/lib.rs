@@ -1,54 +1,104 @@
 #![no_std]
+//! Governance contract for the Stellar DID Credit protocol.
+//!
+//! Provides on-chain proposal creation, voting, and execution that can
+//! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
 
+/// Error types for the governance contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 pub enum GovernanceError {
+    /// Contract is already initialized.
     AlreadyInitialized = 1,
+    /// Caller is not authorized to perform this action.
     NotAuthorized = 2,
+    /// Proposal with the given ID does not exist.
     ProposalNotFound = 3,
+    /// Proposal voting period has already expired.
     ProposalExpired = 4,
+    /// Proposal voting period has not yet expired; cannot execute.
     ProposalNotExpired = 5,
+    /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
+    /// Caller has already voted on this proposal.
     AlreadyVoted = 7,
+    /// Proposed scoring weights do not sum to 100.
     InvalidWeights = 8,
+    /// Quorum value must be positive.
+    InvalidQuorum = 9,
+    /// Vote weight must be positive.
+    InvalidVoteWeight = 10,
+    /// Total votes cast did not meet the required quorum.
+    QuorumNotMet = 11,
 }
 
+/// Storage keys for the governance contract.
 #[contracttype]
 pub enum DataKey {
+    /// Contract administrator address.
     Admin,
+    /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
+    /// Monotonically increasing counter used to assign proposal IDs.
     NextProposalId,
+    /// Default quorum (minimum total votes) required for proposal execution.
+    QuorumRequired,
+    /// Proposal data stored by proposal ID.
     Proposal(u64),
+    /// Per-voter flag recording whether `voter` has voted on `proposal_id`.
     Voted(u64, Address),
 }
 
 #[contracttype]
 #[derive(Clone)]
+/// An on-chain governance proposal for updating credit-oracle scoring weights.
 pub struct GovernanceProposal {
+    /// Unique proposal identifier, assigned at creation.
     pub id: u64,
+    /// Scoring weights to apply to the credit-oracle if the proposal passes.
     pub proposed_weights: ScoringWeights,
+    /// Accumulated weight of votes cast in favor.
     pub votes_for: i128,
+    /// Accumulated weight of votes cast against.
     pub votes_against: i128,
+    /// Ledger sequence number after which voting ends.
     pub expiry_ledger: u32,
+    /// Whether this proposal has been executed (weights applied or vote failed).
     pub executed: bool,
+    /// Minimum `votes_for + votes_against` required for `execute` to apply
+    /// this proposal's weights, snapshotted from the contract-wide default
+    /// at proposal-creation time so later `set_quorum` calls never change
+    /// the rules for a proposal already up for a vote.
+    pub quorum_required: i128,
 }
 
+/// On-chain governance contract.
 #[contract]
 pub struct Governance;
 
 #[contractimpl]
 impl Governance {
+    /// Initialize the governance contract.
+    ///
+    /// Sets the administrator, credit-oracle address, and default quorum required
+    /// for proposals. `quorum_required` must be greater than zero.
+    ///
+    /// Auth: `admin` must sign the transaction.
     pub fn initialize(
         env: Env,
         admin: Address,
         credit_oracle: Address,
+        quorum_required: i128,
     ) -> Result<(), GovernanceError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(GovernanceError::AlreadyInitialized);
+        }
+        if quorum_required <= 0 {
+            return Err(GovernanceError::InvalidQuorum);
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
@@ -58,9 +108,52 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &1u64);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumRequired, &quorum_required);
         Ok(())
     }
 
+    /// Updates the contract-wide default quorum applied to proposals created
+    /// from this point on. Admin only. Does not affect proposals that
+    /// already exist — each snapshots its own `quorum_required` at creation.
+    pub fn set_quorum(
+        env: Env,
+        admin: Address,
+        quorum_required: i128,
+    ) -> Result<(), GovernanceError> {
+        if quorum_required <= 0 {
+            return Err(GovernanceError::InvalidQuorum);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumRequired, &quorum_required);
+        Ok(())
+    }
+
+    /// Returns the contract-wide default quorum applied to newly created proposals.
+    pub fn get_quorum(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::QuorumRequired)
+            .unwrap_or(0)
+    }
+
+    /// Create a new governance proposal to update the credit-oracle's scoring weights.
+    ///
+    /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
+    /// ledgers from the current sequence. Returns the new proposal ID.
+    ///
+    /// Auth: `proposer` must sign the transaction.
     pub fn create_proposal(
         env: Env,
         proposer: Address,
@@ -78,6 +171,11 @@ impl Governance {
             .get(&DataKey::NextProposalId)
             .unwrap_or(1);
         let expiry_ledger = env.ledger().sequence() + voting_period_ledgers;
+        let quorum_required: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::QuorumRequired)
+            .unwrap_or(0);
 
         let proposal = GovernanceProposal {
             id,
@@ -86,6 +184,7 @@ impl Governance {
             votes_against: 0,
             expiry_ledger,
             executed: false,
+            quorum_required,
         };
 
         env.storage()
@@ -101,6 +200,12 @@ impl Governance {
         Ok(id)
     }
 
+    /// Cast a vote on an open proposal.
+    ///
+    /// `vote_weight` must be positive. Each address may vote at most once per
+    /// proposal. Returns an error if the proposal has expired or been executed.
+    ///
+    /// Auth: `voter` must sign the transaction.
     pub fn vote(
         env: Env,
         voter: Address,
@@ -109,6 +214,10 @@ impl Governance {
         vote_weight: i128,
     ) -> Result<(), GovernanceError> {
         voter.require_auth();
+
+        if vote_weight <= 0 {
+            return Err(GovernanceError::InvalidVoteWeight);
+        }
 
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -147,6 +256,11 @@ impl Governance {
         Ok(())
     }
 
+    /// Execute an expired proposal.
+    ///
+    /// If `votes_for > votes_against` and the quorum is met, the proposed weights
+    /// are applied to the credit-oracle. Otherwise the proposal is marked executed
+    /// without changing the weights. Can only be called after `expiry_ledger`.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -161,6 +275,10 @@ impl Governance {
 
         if proposal.executed {
             return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.votes_for + proposal.votes_against < proposal.quorum_required {
+            return Err(GovernanceError::QuorumNotMet);
         }
 
         if proposal.votes_for > proposal.votes_against {
@@ -185,6 +303,10 @@ impl Governance {
         Ok(())
     }
 
+    /// Accept the admin role of the credit-oracle on behalf of this contract.
+    ///
+    /// Must be called after the current oracle admin proposes this contract as
+    /// the new admin via `propose_new_admin`. Admin auth is required.
     pub fn accept_oracle_admin(env: Env) -> Result<(), GovernanceError> {
         let admin: Address = env
             .storage()
@@ -204,6 +326,7 @@ impl Governance {
         Ok(())
     }
 
+    /// Fetch a proposal by its ID, or `None` if it does not exist.
     pub fn get_proposal(env: Env, proposal_id: u64) -> Option<GovernanceProposal> {
         env.storage()
             .persistent()
@@ -232,7 +355,7 @@ mod tests {
 
         let gov_id = env.register_contract(None, Governance);
         let gov_client = GovernanceClient::new(&env, &gov_id);
-        gov_client.initialize(&admin, &credit_oracle_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &1000);
 
         // Propose governance contract as new admin of credit oracle
         credit_oracle_client.propose_new_admin(&gov_id);
@@ -285,5 +408,81 @@ mod tests {
         assert_eq!(active_weights.vc_weight, 50);
         assert_eq!(active_weights.tx_weight, 20);
         assert_eq!(active_weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_proposal_with_exactly_quorum_votes_succeeds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.quorum_required, 500);
+
+        // votes_for + votes_against == quorum_required exactly, and for > against.
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        gov_client.vote(&voter1, &proposal_id, &true, &300);
+        gov_client.vote(&voter2, &proposal_id, &false, &200);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        gov_client.execute(&proposal_id);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.executed);
+
+        let active_weights = credit_oracle_client.get_scoring_weights();
+        assert_eq!(active_weights.vc_weight, 40);
+    }
+
+    #[test]
+    fn test_vote_rejects_non_positive_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+
+        let voter = Address::generate(&env);
+        let res = gov_client.try_vote(&voter, &proposal_id, &true, &0);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+
+        let res = gov_client.try_vote(&voter, &proposal_id, &true, &-10);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
     }
 }

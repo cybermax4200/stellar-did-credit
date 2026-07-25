@@ -95,12 +95,24 @@ export interface VCRecord {
   revoked: boolean;
 }
 
+/**
+ * Configuration required to instantiate {@link StellarDIDCreditSDK}.
+ *
+ * All contract IDs and network settings are captured here so individual
+ * method calls do not need to repeat them.
+ */
 export interface ProtocolConfig {
+  /** Contract ID (C… address) of the deployed identity-oracle contract. */
   identityOracleId: string;
+  /** Contract ID (C… address) of the deployed credit-oracle contract. */
   creditOracleId: string;
+  /** Contract ID (C… address) of the deployed revocation-registry contract. */
   revocationRegistryId: string;
+  /** Stellar network passphrase (e.g. `Networks.TESTNET`). */
   networkPassphrase: string;
+  /** Soroban RPC endpoint URL. */
   rpcUrl: string;
+  /** Stellar G… address used as the simulation source account for read-only calls. */
   simAccount: string;
   /**
    * Request timeout in seconds applied to all transaction builders via `setTimeout`.

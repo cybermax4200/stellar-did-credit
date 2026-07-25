@@ -347,8 +347,12 @@ export class Feeder {
   /**
    * Syncs a single subject: fetches stats, then submits set_vc_count followed
    * by update_tx_stats, waiting for each transaction to be confirmed.
+   *
+   * If `signal` is aborted between steps, the in-flight step is allowed to
+   * complete (transaction submission cannot be cancelled mid-flight) but no
+   * further steps are started — the subject may end up partially synced.
    */
-  async feedSubject(subjectAddress: string): Promise<void> {
+  async feedSubject(subjectAddress: string, signal?: AbortSignal): Promise<void> {
     console.log(`[feeder] syncing ${subjectAddress}`);
 
     const maxRetries = this.config.maxRetries ?? 3;
@@ -362,6 +366,10 @@ export class Feeder {
       () => getActiveVcCount(this.server, this.config, subjectAddress),
     );
     console.log(`  vc_count          = ${vcCount}`);
+    if (signal?.aborted) {
+      console.log(`[feeder] ${subjectAddress} — aborted after vc_count read`);
+      return;
+    }
 
     // Step 2: fetch 30-day payment stats from Horizon
     const stats = await withExponentialBackoff(
@@ -376,6 +384,10 @@ export class Feeder {
     );
     console.log(`  tx_count_30d      = ${stats.txCount30d}`);
     console.log(`  avg_counterparties = ${stats.avgCounterparties}`);
+    if (signal?.aborted) {
+      console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
+      return;
+    }
 
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
@@ -406,6 +418,12 @@ export class Feeder {
       retryBaseDelayMs,
       () => waitForConfirmation(this.server, vcCountTxHash),
     );
+    if (signal?.aborted) {
+      console.log(
+        `[feeder] ${subjectAddress} — aborted after set_vc_count confirmation`,
+      );
+      return;
+    }
 
     // Step 4: submit update_tx_stats
     const statsTxHash = await withExponentialBackoff(
@@ -437,11 +455,24 @@ export class Feeder {
     console.log(`  done`);
   }
 
-  /** Runs one complete feed cycle across all configured subjects. */
-  async runCycle(): Promise<void> {
+  /**
+   * Runs one complete feed cycle across all configured subjects.
+   *
+   * Checks `signal` before starting each subject. If it's already aborted,
+   * the loop stops and no further subjects are started — subjects already
+   * in progress when the signal was raised are left to `feedSubject` to wind
+   * down gracefully.
+   */
+  async runCycle(signal?: AbortSignal): Promise<void> {
     for (const subject of this.config.subjects) {
+      if (signal?.aborted) {
+        console.log(
+          `[feeder] cycle aborted — not starting remaining subjects`,
+        );
+        break;
+      }
       try {
-        await this.feedSubject(subject);
+        await this.feedSubject(subject, signal);
       } catch (err) {
         console.error(
           `[feeder] error syncing ${subject}:`,
@@ -453,22 +484,38 @@ export class Feeder {
 
   /**
    * Starts the polling loop. The first cycle runs immediately; subsequent
-   * cycles start after pollIntervalMs elapses. Returns a stop function.
+   * cycles start after pollIntervalMs elapses. Returns a stop function that
+   * triggers graceful shutdown: the in-progress cycle (and whichever subject
+   * is currently mid-sync) is allowed to wind down, but no new subject or
+   * cycle is started afterward.
+   *
+   * An external `AbortSignal` may be supplied to tie the feeder's shutdown
+   * to another source (e.g. a process-level controller); calling the
+   * returned `stop()` function aborts the feeder regardless.
    */
-  start(): () => void {
-    let stopped = false;
+  start(signal?: AbortSignal): () => void {
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+    }
 
     const tick = async (): Promise<void> => {
-      if (stopped) return;
-      await this.runCycle();
-      if (!stopped) {
+      if (controller.signal.aborted) return;
+      await this.runCycle(controller.signal);
+      if (!controller.signal.aborted) {
         setTimeout(() => void tick(), this.config.pollIntervalMs);
       }
     };
 
     void tick();
     return () => {
-      stopped = true;
+      controller.abort();
     };
   }
 }
