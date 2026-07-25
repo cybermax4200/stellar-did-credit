@@ -460,6 +460,367 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("anchorDID", () => {
+    it("test_anchorDID_submits_transaction_and_returns_hash", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "tx-anchor-did-hash",
+      });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+
+      const subjectKeypair = {
+        publicKey: () => subjectAddress,
+      } as unknown as Keypair;
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.anchorDID(subjectKeypair, "QmXYZ123abc...");
+
+      expect(result).toBe("tx-anchor-did-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockLastContractCall).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "anchor_did",
+      });
+      expect(mockLastContractCall?.args).toHaveLength(2);
+    });
+
+    it("throws a descriptive error when simulation fails", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSimulateTransaction.mockResolvedValue({
+        error: "some simulation error",
+      });
+
+      const subjectKeypair = {
+        publicKey: () => subjectAddress,
+      } as unknown as Keypair;
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair, "QmXYZ123abc..."),
+      ).rejects.toThrow("Simulation failed: some simulation error");
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws a descriptive error when the submitted transaction is rejected", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+      mockSendTransaction.mockResolvedValue({
+        status: "ERROR",
+        errorResult: "tx_bad_seq",
+      });
+
+      const subjectKeypair = {
+        publicKey: () => subjectAddress,
+      } as unknown as Keypair;
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair, "QmXYZ123abc..."),
+      ).rejects.toThrow("Transaction submission failed: tx_bad_seq");
+    });
+
+    it("throws when simulation returns neither an error nor a success result", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "42" });
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const subjectKeypair = {
+        publicKey: () => subjectAddress,
+      } as unknown as Keypair;
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair, "QmXYZ123abc..."),
+      ).rejects.toThrow("Simulation returned unexpected response");
+    });
+  });
+
+  describe("issueVC", () => {
+    it("test_issueVC_submits_anchor_vc_and_returns_hash", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "7" });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "tx-issue-vc-hash",
+      });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 5);
+
+      const result = await sdk.issueVC(
+        issuerKeypair as never,
+        subjectAddress,
+        vcHash,
+      );
+
+      expect(result).toBe("tx-issue-vc-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockLastContractCall).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "anchor_vc",
+      });
+      expect(mockLastContractCall?.args).toHaveLength(3);
+    });
+
+    it("throws a descriptive error when simulation fails (e.g. untrusted issuer)", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "7" });
+      mockSimulateTransaction.mockResolvedValue({
+        error: "issuer not registered",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(32, 5)),
+      ).rejects.toThrow("Simulation failed: issuer not registered");
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws a descriptive error when the submitted transaction fails", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "7" });
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+      mockSendTransaction.mockResolvedValue({
+        status: "ERROR",
+        errorResult: "tx_failed",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(32, 5)),
+      ).rejects.toThrow("Transaction submission failed: tx_failed");
+    });
+
+    it("throws when simulation returns neither an error nor a success result", async () => {
+      mockGetAccount.mockResolvedValue({ sequence: "7" });
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(32, 5)),
+      ).rejects.toThrow("Simulation returned unexpected response");
+    });
+  });
+
+  describe("getWeights", () => {
+    it("test_getWeights_returns_parsed_weights", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              vc_weight: 40,
+              tx_weight: 30,
+              repayment_weight: 30,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getWeights();
+
+      expect(result).toEqual({
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      });
+      expect(mockLastContractCall?.method).toBe("get_scoring_weights");
+      expect(mockLastContractCall?.args).toHaveLength(0);
+    });
+
+    it("throws a descriptive error when simulation fails", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "contract not initialized",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getWeights()).rejects.toThrow(
+        "Simulation failed: contract not initialized",
+      );
+    });
+
+    it("throws when get_scoring_weights returns a non-object result", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: null } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getWeights()).rejects.toThrow(
+        "get_scoring_weights returned an invalid result",
+      );
+    });
+
+    it("throws when simulation returns neither an error nor a success result", async () => {
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getWeights()).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+    });
+
+    it("throws when simulation succeeds but has no return value", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getWeights()).rejects.toThrow(
+        "No return value in simulation result",
+      );
+    });
+  });
+
+  describe("isVerified", () => {
+    it("test_isVerified_true_for_subject_with_active_vc", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: true } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(true);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_isVerified_false_for_subject_with_no_vcs", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: false } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+    });
+
+    it("throws a descriptive error when simulation fails", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "rpc unavailable",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
+        "Simulation failed: rpc unavailable",
+      );
+    });
+
+    it("throws when simulation returns neither an error nor a success result", async () => {
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+    });
+
+    it("throws when simulation succeeds but has no return value", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
+        "No return value in simulation result",
+      );
+    });
+  });
+
+  describe("getRegisteredIssuers", () => {
+    it("test_getRegisteredIssuers_returns_list_of_addresses", async () => {
+      const issuers = [
+        "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+        "GISSUERBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB",
+      ];
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: issuers } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getRegisteredIssuers();
+
+      expect(result).toEqual(issuers);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
+      expect(mockLastContractCall?.args).toHaveLength(0);
+    });
+
+    it("test_getRegisteredIssuers_returns_empty_array_when_none_registered", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: [] } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getRegisteredIssuers();
+
+      expect(result).toEqual([]);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
+    });
+
+    it("throws a descriptive error when simulation fails", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "rpc timeout",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "Simulation failed: rpc timeout",
+      );
+    });
+
+    it("throws when list_issuers returns a non-array result", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: "not-an-array" } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "list_issuers returned a non-array result",
+      );
+    });
+
+    it("throws when simulation returns neither an error nor a success result", async () => {
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+    });
+
+    it("throws when simulation succeeds but has no return value", async () => {
+      mockSimulateTransaction.mockResolvedValue({ result: {} });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "No return value in simulation result",
+      );
+    });
+  });
+
   describe("getVCCount", () => {
     it("test_getVCCount_returns_active_count", async () => {
       mockSimulateTransaction.mockResolvedValue({
