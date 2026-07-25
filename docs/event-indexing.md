@@ -83,6 +83,25 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 
 ---
 
+### 4. Governance Events
+
+#### ProposalCreated
+* **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
+* **Data:** `(proposer: Address, expiry_ledger: u32)`
+* **Emitted When:** A new governance proposal is created.
+
+#### ProposalExecuted
+* **Topic:** `[Symbol("PropExec"), proposal_id: u64]`
+* **Data:** `(votes_for: i128, votes_against: i128)`
+* **Emitted When:** An expired governance proposal is executed.
+
+#### ProposalCancelled
+* **Topic:** `[Symbol("PropCanc"), proposal_id: u64]`
+* **Data:** `(canceller: Address, reason: Option<String>)`
+* **Emitted When:** A governance proposal is cancelled.
+
+---
+
 ## Subscribing to Events (Node.js Example)
 
 Here is a Node.js example using the `@stellar/stellar-sdk` to subscribe to `VCAnch` events on the Identity Oracle contract.
