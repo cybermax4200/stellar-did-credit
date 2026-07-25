@@ -8,10 +8,12 @@
     "lint:fix": "eslint packages --ext .ts --fix && cargo clippy --fix --allow-dirty --workspace -- -D warnings",
     "test": "cargo test --workspace && pnpm --filter './packages/*' --if-present test",
     "build": "pnpm --filter './packages/*' --if-present build && cargo build --workspace",
-    "docs": "cargo doc --workspace --no-deps && pnpm --filter './packages/*' --if-present run docs"
+    "docs": "cargo doc --workspace --no-deps && pnpm --filter './packages/*' --if-present run docs",
+    "license-check": "npx license-checker-rseidelsohn --onlyAllow \"MIT;Apache-2.0\" --summary"
   },
   "devDependencies": {
     "@types/node": "^26.0.0",
+    "license-checker-rseidelsohn": "^4.4.1",
     "lefthook": "1.11.13"
   }
 }
