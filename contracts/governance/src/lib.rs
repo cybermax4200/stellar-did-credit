@@ -411,6 +411,91 @@ mod tests {
     }
 
     #[test]
+    fn test_governance_execution_verifies_oracle_admin_and_subsequent_ops() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &1000);
+
+        // Transfer credit-oracle admin to the governance contract.
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        // The credit-oracle's admin storage must now be the governance
+        // contract's own address, not just "some address that happens to
+        // work" — read the oracle's storage directly rather than relying on
+        // a successful `update_weights` call alone, since that would also
+        // succeed if `require_auth` were accidentally satisfied some other
+        // way (e.g. `mock_all_auths` in tests).
+        let oracle_admin: Address = env.as_contract(&credit_oracle_id, || {
+            env.storage()
+                .instance()
+                .get(&credit_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(oracle_admin, gov_id);
+
+        // First governance-driven weight update.
+        let weights_v1 = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer1 = Address::generate(&env);
+        let proposal_id_1 = gov_client.create_proposal(&proposer1, &weights_v1, &100);
+        let voter1 = Address::generate(&env);
+        gov_client.vote(&voter1, &proposal_id_1, &true, &1000);
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        gov_client.execute(&proposal_id_1);
+
+        let weights_after_first = credit_oracle_client.get_scoring_weights();
+        assert_eq!(weights_after_first.vc_weight, 50);
+        assert_eq!(weights_after_first.tx_weight, 20);
+        assert_eq!(weights_after_first.repayment_weight, 30);
+
+        // Subsequent admin operation: propose and execute a second round of
+        // weights through governance, confirming the credit-oracle keeps
+        // accepting governance as its admin across multiple operations
+        // rather than only for the single admin-transfer call.
+        let weights_v2 = ScoringWeights {
+            vc_weight: 10,
+            tx_weight: 60,
+            repayment_weight: 30,
+        };
+        let proposer2 = Address::generate(&env);
+        let proposal_id_2 = gov_client.create_proposal(&proposer2, &weights_v2, &100);
+        let voter2 = Address::generate(&env);
+        gov_client.vote(&voter2, &proposal_id_2, &true, &1000);
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        gov_client.execute(&proposal_id_2);
+
+        let weights_after_second = credit_oracle_client.get_scoring_weights();
+        assert_eq!(weights_after_second.vc_weight, 10);
+        assert_eq!(weights_after_second.tx_weight, 60);
+        assert_eq!(weights_after_second.repayment_weight, 30);
+
+        // Admin is still the governance contract after the second lifecycle round.
+        let oracle_admin_after: Address = env.as_contract(&credit_oracle_id, || {
+            env.storage()
+                .instance()
+                .get(&credit_oracle::DataKey::Admin)
+                .unwrap()
+        });
+        assert_eq!(oracle_admin_after, gov_id);
+    }
+
+    #[test]
     fn test_proposal_with_exactly_quorum_votes_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
