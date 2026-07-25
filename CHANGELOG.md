@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `identity-oracle`: `set_revocation_registry` now probes the target address with a dummy `is_revoked` call before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidRevocationRegistry` error instead of only failing later, opaquely, the first time a real VC check needs it (#270)
+- `credit-oracle`: `set_identity_oracle` now probes the target address with a `get_active_vc_count` call (using the admin's own address as a harmless probe subject) before storing it, rejecting non-contract or wrong-interface addresses at configuration time with a new `InvalidIdentityOracle` error (#270)
 - `feeder`: skip `set_vc_count` and `update_tx_stats` submissions when the fetched value is unchanged from the last value this feeder instance submitted for the subject, avoiding wasted transaction fees every cycle for subjects with no new activity — most visibly, accounts with zero payment history, whose fetched stats are always zero. A subject's first sync still submits both regardless of value, so its initial state is recorded on-chain at least once. Skipped submissions are logged as `skipped (unchanged)` (#269)
 
 ### Changed
