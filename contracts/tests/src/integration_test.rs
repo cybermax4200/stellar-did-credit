@@ -10,6 +10,36 @@ mod tests {
     };
 
     #[test]
+    fn test_deactivate_did_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(identity.is_verified(&subject));
+        assert!(identity.get_did_document(&subject).is_some());
+
+        identity.deactivate_did(&subject);
+
+        assert!(!identity.is_verified(&subject));
+        assert!(identity.get_did_document(&subject).is_none());
+    }
+
+    #[test]
     fn test_full_protocol_flow() {
         // 1. Create Env with mock_all_auths
         let env = Env::default();
