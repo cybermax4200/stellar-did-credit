@@ -943,7 +943,8 @@ impl CreditOracle {
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use soroban_sdk::testutils::{Address as _, Ledger as _, Events as _};
+    use soroban_sdk::IntoVal;
 
     #[test]
     fn test_default_weights_sum_to_100() {
@@ -1092,14 +1093,15 @@ mod tests {
             "expected 1 topic element"
         );
         let topic = topics.get(0).unwrap();
+        let topic_symbol: soroban_sdk::Symbol = topic.clone().into_val(&env);
         assert_eq!(
-            topic,
-            soroban_sdk::Val::from(symbol_short!("Score")),
+            topic_symbol,
+            symbol_short!("Score"),
             "expected Score topic"
         );
 
         // Verify the data payload is (subject, score)
-        let (event_subject, event_score): (Address, u32) = data.clone().unwrap();
+        let (event_subject, event_score): (Address, u32) = data.clone().into_val(&env);
         assert_eq!(event_subject, subject, "event subject mismatch");
         assert_eq!(event_score, score, "event score mismatch");
     }

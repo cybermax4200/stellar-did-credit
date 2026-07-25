@@ -38,6 +38,9 @@ mod tests {
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
+        let retrieved_cid = identity.get_did_document(&subject).expect("DID doc should exist");
+        assert_eq!(retrieved_cid, cid);
+
         // 5. Call anchor_vc for the subject with a test hash
         let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);

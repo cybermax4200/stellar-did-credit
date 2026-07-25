@@ -34,9 +34,6 @@
               "function_name": "propose_new_admin",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
               ]
@@ -75,9 +72,6 @@
               "function_name": "propose_new_admin",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                },
-                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 }
               ]
@@ -86,8 +80,7 @@
           "sub_invocations": []
         }
       ]
-    ],
-    []
+    ]
   ],
   "ledger": {
     "protocol_version": 22,
@@ -153,7 +146,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -306,7 +299,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ]
     ]

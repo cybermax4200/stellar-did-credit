@@ -308,6 +308,13 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Retrieve the anchored DID document CID for a given subject.
+    /// Returns None if no DID document has been anchored.
+    pub fn get_did_document(env: Env, subject: Address) -> Option<String> {
+        let key = DataKey::DIDDocument(subject.clone());
+        env.storage().persistent().get(&key)
+    }
+
     /// Anchor a verifiable credential (VC) for a subject issued by a trusted issuer.
     pub fn anchor_vc(
         env: Env,
@@ -315,12 +322,13 @@ impl IdentityOracle {
         subject: Address,
         vc_hash: BytesN<32>,
     ) -> Result<(), IdentityOracleError> {
+        let cred_type = generic_credential_type(&env);
         Self::anchor_vc_typed(
             env,
             issuer,
             subject,
             vc_hash,
-            generic_credential_type(&env),
+            cred_type,
         )
     }
 
