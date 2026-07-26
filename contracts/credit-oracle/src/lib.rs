@@ -271,15 +271,30 @@ impl CreditOracle {
 
         let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
 
-        env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
-            score,
-            last_updated: env.ledger().timestamp(),
-            vc_count,
-            repayment_rate: (repayment.on_time_count * 10000)
+        let repayment_rate = (repayment.on_time_count * 10000)
                                 .checked_div(repayment.total_count)
-                                .unwrap_or(0),
-            tx_volume_30d: tx_stats.volume_30d,
-        });
+                                .unwrap_or(0);
+
+        let mut needs_write = true;
+        if let Some(prev) = env.storage().persistent().get::<_, ScoreRecord>(&DataKey::Score(subject.clone())) {
+            if prev.score == score 
+                && prev.vc_count == vc_count 
+                && prev.repayment_rate == repayment_rate 
+                && prev.tx_volume_30d == tx_stats.volume_30d 
+            {
+                needs_write = false;
+            }
+        }
+
+        if needs_write {
+            env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
+                score,
+                last_updated: env.ledger().timestamp(),
+                vc_count,
+                repayment_rate,
+                tx_volume_30d: tx_stats.volume_30d,
+            });
+        }
 
         score
     }
@@ -855,5 +870,46 @@ mod tests {
 
         let _ = client.accept_admin(&non_admin);
     }
-}
 
+    #[test]
+    fn test_compute_score_skips_write_when_inputs_unchanged() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // First computation sets initial values
+        client.compute_score(&subject);
+        let record1 = client.get_score(&subject).unwrap();
+
+        // Advance ledger time by 100 seconds
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+        // Second computation with identical inputs
+        client.compute_score(&subject);
+        let record2 = client.get_score(&subject).unwrap();
+
+        // Timestamp shouldn't change because write was skipped
+        assert_eq!(record1.last_updated, record2.last_updated);
+
+        // Change an input (VC count)
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.set_vc_count(&feeder, &subject, &2);
+
+        // Advance ledger time again
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+        // Third computation with changed input
+        client.compute_score(&subject);
+        let record3 = client.get_score(&subject).unwrap();
+
+        // Write occurred, so timestamp is updated
+        assert!(record3.last_updated > record2.last_updated);
+        assert_eq!(record3.vc_count, 2);
+    }
+}
