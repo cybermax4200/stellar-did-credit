@@ -311,6 +311,7 @@ impl Governance {
                 .expect("no credit oracle");
 
             let client = CreditOracleClient::new(&env, &credit_oracle_addr);
+            // Use propose_weights to start the timelock, not update_weights which bypasses it
             client.propose_weights(&proposal.proposed_weights);
         }
 
@@ -320,6 +321,29 @@ impl Governance {
         env.events().publish(
             (symbol_short!("PropExec"), proposal_id),
             (proposal.votes_for, proposal.votes_against),
+        );
+
+        Ok(())
+    }
+
+    /// Apply pending weights to the credit-oracle after the timelock expires.
+    ///
+    /// This function should be called after `execute` has successfully queued
+    /// new weights and the credit-oracle's timelock (17,280 ledgers / ~24 hours)
+    /// has elapsed. Anyone can call this function.
+    pub fn apply_weights(env: Env) -> Result<(), GovernanceError> {
+        let credit_oracle_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreditOracle)
+            .ok_or(GovernanceError::NotAuthorized)?;
+
+        let client = CreditOracleClient::new(&env, &credit_oracle_addr);
+        client.apply_weights();
+
+        env.events().publish(
+            (symbol_short!("WtApplied"),),
+            env.ledger().sequence(),
         );
 
         Ok(())
@@ -433,20 +457,37 @@ mod tests {
         let res = gov_client.try_execute(&proposal_id);
         assert_eq!(res, Err(Ok(GovernanceError::ProposalNotExpired)));
 
-        // Advance ledger
+        // Advance ledger past voting period
         env.ledger().with_mut(|l| {
             l.sequence_number += 101;
         });
 
-        // Execute proposal
+        // Execute proposal - this now calls propose_weights (starts timelock)
         gov_client.execute(&proposal_id);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
 
-        // Advance ledger to pass the timelock
-        let jump = 3_000_000;
+        // Verify weights are NOT changed immediately (timelock in effect)
+        let weights_after_execute = credit_oracle_client.get_scoring_weights();
+        assert_eq!(weights_after_execute.vc_weight, 40); // Still default
+        assert_eq!(weights_after_execute.tx_weight, 30);
+        assert_eq!(weights_after_execute.repayment_weight, 30);
+
+        // Verify pending weights exist
+        let pending = credit_oracle_client.get_pending_weights();
+        assert!(pending.is_some());
+        let pending_record = pending.unwrap();
+        assert_eq!(pending_record.weights.vc_weight, 50);
+        assert_eq!(pending_record.weights.tx_weight, 20);
+        assert_eq!(pending_record.weights.repayment_weight, 30);
+
+        // Advance ledger past timelock (~24 hours = 17,280 ledgers)
+        let jump = 17_280 + 2;
         env.as_contract(&credit_oracle_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
             env.storage().instance().extend_ttl(jump, jump);
         });
         env.ledger().with_mut(|l| {
@@ -501,10 +542,29 @@ mod tests {
             l.sequence_number += 101;
         });
 
+        // Execute queues weights (starts timelock)
         gov_client.execute(&proposal_id);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
+
+        // Weights NOT changed immediately
+        let weights_after_execute = credit_oracle_client.get_scoring_weights();
+        assert_eq!(weights_after_execute.vc_weight, 40); // Default values match proposal, so no change visible
+
+        // Advance past timelock and apply
+        let jump = 17_280 + 2;
+        env.as_contract(&credit_oracle_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        gov_client.apply_weights();
 
         let active_weights = credit_oracle_client.get_scoring_weights();
         assert_eq!(active_weights.vc_weight, 40);
@@ -571,20 +631,21 @@ mod tests {
         for (contract_id, topics, data) in events.iter() {
             if contract_id == gov_id {
                 if topics.len() == 2 {
-                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
+                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::symbol_short!("invalid"));
                     if symbol == soroban_sdk::symbol_short!("PropCanc") {
                         found_event = true;
                         let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
                         assert_eq!(id, proposal_id);
-                        let parsed_data: (Address, Option<soroban_sdk::String>) = data.try_into_val(&env).unwrap();
-                        assert_eq!(parsed_data.0, canceller);
+
+                        let event_data: (Address, Option<soroban_sdk::String>) = data.try_into_val(&env).unwrap();
+                        assert_eq!(event_data.0, canceller);
                         // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
                         // We will skip strict String value checking for now.
                     }
                 }
             }
         }
-        
+
         assert!(found_event, "ProposalCancelled event should be emitted");
     }
 

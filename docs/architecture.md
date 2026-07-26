@@ -402,6 +402,34 @@ caller-supplied `admin` to preserve the existing API surface.
 
 ---
 
+### ADR-003 — Governance weight changes respect credit-oracle timelock
+
+**Status:** Accepted
+
+**Context**
+
+The governance contract can update credit-oracle scoring weights through a community vote. Initially, `Governance::execute` called `CreditOracleClient::update_weights()` directly, which immediately applied the new weights without any waiting period. This bypassed the credit-oracle's built-in timelock mechanism (`propose_weights` + `apply_weights`) designed to give the community time to react to weight changes.
+
+**Decision**
+
+Governance `execute` now calls `propose_weights` instead of `update_weights`. This queues the weight change in the credit-oracle's pending state with a 24-hour timelock (17,280 ledgers). A separate `apply_weights` function must be called after the timelock expires to finalize the change.
+
+**Flow:**
+
+1. **Proposal creation**: A proposer creates a governance proposal with new weights and a voting period.
+2. **Voting**: Voters cast votes for or against during the voting period.
+3. **Execution**: After the voting period ends and if quorum is met and votes_for > votes_against, `execute` calls `propose_weights` on credit-oracle, starting the timelock.
+4. **Timelock period**: ~24 hours (17,280 ledgers) during which the community can review the pending weights.
+5. **Application**: Anyone calls `apply_weights` to finalize the change after the timelock expires.
+
+**Consequences**
+
+- Weight changes require both voting period + timelock, providing ample time for community reaction.
+- The `get_scoring_weights` function returns active weights; pending weights are available via `get_pending_weights`.
+- Anyone can call `apply_weights` after the timelock expires, making the finalization permissionless.
+
+---
+
 ## Event Indexing
 
 For a detailed catalog of events emitted by the smart contracts and instructions on subscribing to them for off-chain sync, see the [Event Indexing Guide](event-indexing.md).
