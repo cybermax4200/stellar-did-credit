@@ -1,4 +1,4 @@
-import { Feeder } from "./index";
+import { Feeder, parsePositiveInt } from "./index";
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 
@@ -84,5 +84,65 @@ describe("Feeder graceful shutdown", () => {
     expect(setTimeoutSpy).not.toHaveBeenCalled();
 
     setTimeoutSpy.mockRestore();
+  });
+});
+
+describe("parsePositiveInt", () => {
+  let warnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    warnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warnSpy.mockRestore();
+  });
+
+  it("returns the default when input is undefined", () => {
+    expect(parsePositiveInt(undefined, 3600000, "POLL_INTERVAL_MS")).toBe(3600000);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns the parsed value for a valid positive integer string", () => {
+    expect(parsePositiveInt("5000", 3600000, "POLL_INTERVAL_MS")).toBe(5000);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("returns the parsed value for a leading-zero string", () => {
+    expect(parsePositiveInt("0720000", 3600000, "POLL_INTERVAL_MS")).toBe(720000);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("defaults and warns for zero", () => {
+    expect(parsePositiveInt("0", 3600000, "POLL_INTERVAL_MS")).toBe(3600000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain("POLL_INTERVAL_MS");
+  });
+
+  it("defaults and warns for negative value", () => {
+    expect(parsePositiveInt("-500", 3600000, "POLL_INTERVAL_MS")).toBe(3600000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain("POLL_INTERVAL_MS");
+  });
+
+  it("defaults and warns for non-numeric string", () => {
+    expect(parsePositiveInt("not-a-number", 3600000, "POLL_INTERVAL_MS")).toBe(3600000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("truncates float to integer (parseInt behaviour) but still accepts positive", () => {
+    expect(parsePositiveInt("3.14", 3600000, "POLL_INTERVAL_MS")).toBe(3);
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it("defaults and warns for empty string", () => {
+    expect(parsePositiveInt("", 3600000, "POLL_INTERVAL_MS")).toBe(3600000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("uses a different default when provided", () => {
+    expect(parsePositiveInt("-1", 1000, "MAX_RETRIES")).toBe(1000);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0][0]).toContain("MAX_RETRIES");
   });
 });
