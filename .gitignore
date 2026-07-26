@@ -25,3 +25,4 @@ Thumbs.db
 # Generated API documentation (produced by cargo doc / typedoc)
 target/doc/
 docs/api/
+.opencode

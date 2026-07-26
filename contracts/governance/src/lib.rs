@@ -117,6 +117,8 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+        env.events()
+            .publish((symbol_short!("Init"),), (admin, credit_oracle, quorum_required));
         Ok(())
     }
 
@@ -380,6 +382,8 @@ mod tests {
     use super::*;
     use credit_oracle::{CreditOracle, CreditOracleClient};
     use soroban_sdk::{
+        testutils::{Address as _, Events, Ledger},
+        Env, TryIntoVal,
         testutils::{Address as _, Ledger, Events},
         Env, TryIntoVal
     };
@@ -568,6 +572,16 @@ mod tests {
         let events = env.events().all();
         let mut found_event = false;
         
+        for (contract_id, topics, data_val) in events.iter() {
+            if contract_id == gov_id && topics.len() == 2 {
+                let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
+                if symbol == soroban_sdk::symbol_short!("PropCanc") {
+                    found_event = true;
+                    let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                    assert_eq!(id, proposal_id);
+                    
+                    let data: (Address, Option<soroban_sdk::String>) = data_val.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, canceller);
         for (contract_id, topics, data) in events.iter() {
             if contract_id == gov_id {
                 if topics.len() == 2 {
@@ -588,6 +602,8 @@ mod tests {
         assert!(found_event, "ProposalCancelled event should be emitted");
     }
 
+    #[test]
+    fn test_initialize_emits_event() {
     /// Verifies the full execution timelock flow:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
@@ -597,6 +613,31 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
+        let credit_oracle = Address::generate(&env);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle, &1000);
+
+        let events = env.events().all();
+        let mut found = false;
+
+        for (contract_id, topics, data_val) in events.iter() {
+            if contract_id == gov_id && topics.len() == 1 {
+                let symbol: soroban_sdk::Symbol =
+                    topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if symbol == soroban_sdk::symbol_short!("Init") {
+                    found = true;
+                    let data: (Address, Address, i128) =
+                        data_val.try_into_val(&env).unwrap();
+                    assert_eq!(data.0, admin);
+                    assert_eq!(data.1, credit_oracle);
+                    assert_eq!(data.2, 1000);
+                }
+            }
+        }
+
+        assert!(found, "Init event should be emitted");
         let credit_oracle_id = env.register_contract(None, CreditOracle);
         let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
         credit_oracle_client.initialize(&admin);
