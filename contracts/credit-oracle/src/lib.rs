@@ -49,6 +49,8 @@ pub enum DataKey {
     PendingWeightsEffectiveLedger,
     /// Identity oracle contract ID for cross-contract lookups
     IdentityOracleId,
+    /// Number of ledgers to wait before recomputing score
+    ComputeCooldownLedgers,
 }
 
 /// Credit score record with metadata
@@ -385,6 +387,27 @@ impl CreditOracle {
         
         env.events().publish((soroban_sdk::symbol_short!("OrclSet"),), identity_oracle_id);
         Ok(())
+    }
+
+    /// Update the compute cooldown ledgers
+    pub fn update_compute_cooldown(env: Env, ledgers: u32) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
+        
+        env.events().publish(
+            (symbol_short!("CdSet"),),
+            (ledgers, stored_admin),
+        );
+        Ok(())
+    }
+
+    /// Get current compute cooldown in ledgers
+    pub fn get_compute_cooldown(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(1) // Default to 1 ledger as described in docs
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.

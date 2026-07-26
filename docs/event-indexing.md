@@ -81,6 +81,11 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 * **Data:** `(vc_weight: u32, tx_weight: u32, repayment_weight: u32)`
 * **Emitted When:** Pending or direct weights are applied.
 
+#### CdSet
+* **Topic:** `[Symbol("CdSet")]`
+* **Data:** `(ledgers: u32, admin: Address)`
+* **Emitted When:** The compute cooldown ledgers value is updated by the admin.
+
 ---
 
 ### 4. Governance Events
