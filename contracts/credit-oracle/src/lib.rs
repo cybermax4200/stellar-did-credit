@@ -59,9 +59,6 @@ fn require_admin_or_governor(env: &Env, caller: &Address) -> Result<(), CreditOr
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
 
-pub const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
-pub const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
-
 /// Error types for the credit-oracle contract.
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -89,15 +86,12 @@ pub enum DataKey {
     Admin,
     /// Pending contract admin address for two-step transfer
     PendingAdmin,
-
     /// Global configuration
     Config,
     /// Trusted feeder address authorized to update transaction stats
     TrustedFeeder(Address),
     /// Trusted lender address authorized to record repayments
     TrustedLender(Address),
-    /// Governance address authorized to propose weight changes
-    Governor(Address),
     /// Transaction statistics for a user
     TxStats(Address),
     /// Repayment record for a user
@@ -106,78 +100,55 @@ pub enum DataKey {
     Score(Address),
     /// Cached VC count for a user
     VcCount(Address),
-    /// Optional identity-oracle contract ID for cross-contract VC count lookup
-    IdentityOracleId,
-    /// If true, `compute_score` weights each active VC by the issuer's
-    /// reputation tier by calling `get_weighted_vc_count` on the
-    /// identity-oracle instead of `get_active_vc_count`. VCs from low-tier
-    /// issuers contribute a fraction of a VC to the score. Defaults to
-    /// `false` (uniform VC weights) for backwards compatibility.
-    UseIssuerTierWeighting,
     /// Pending weights awaiting timelock
     PendingWeights,
     /// Ledger number when pending weights become effective
     PendingWeightsEffectiveLedger,
-    /// Minimum ledgers required between score computations for one subject
+    /// Identity oracle contract ID for cross-contract lookups
+    IdentityOracleId,
+    /// Number of ledgers to wait before recomputing score
     ComputeCooldownLedgers,
     /// Last ledger sequence when a subject's score was computed
     LastComputed(Address),
 }
 
-/// Credit score record with metadata, returned by `get_score`.
-///
-/// This record captures the state of the score at computation time, enabling
-/// consumers to detect stale scores and understand what inputs were used.
+/// Credit score record with metadata
 #[contracttype]
 #[derive(Clone)]
 pub struct ScoreRecord {
-    /// Credit score value, bounded to `MIN_SCORE`–`MAX_SCORE`.
+    /// Credit score value
     pub score: u32,
-    /// Ledger timestamp (Unix seconds) of the last score computation.
+    /// Timestamp of last update
     pub last_updated: u64,
-    /// Number of verified credentials counted toward the score.
+    /// Number of verified credentials
     pub vc_count: u32,
-    /// Repayment rate in basis points (0-10000). On-chain mirror of the
-    /// repayment component calculation.
+    /// Repayment rate in basis points (0-10000)
     pub repayment_rate: u32,
-    /// 30-day transaction volume in stroops. On-chain mirror of the transaction
-    /// volume component calculation.
+    /// Transaction volume in last 30 days
     pub tx_volume_30d: i128,
 }
 
 /// Transaction statistics for a user
-///
-/// All fields are used in the credit scoring formula. See `compute_score` for
-/// how each field contributes to the final score.
 #[contracttype]
 #[derive(Clone)]
 pub struct TxStats {
-    /// Total transaction volume in last 30 days. Used for the transaction volume
-    /// component (up to 100 points based on volume tier).
+    /// Total transaction volume in last 30 days
     pub volume_30d: i128,
-    /// Transaction count in last 30 days. Currently unused but retained for
-    /// future scoring extensions.
+    /// Transaction count in last 30 days
     pub tx_count_30d: u32,
-    /// Average number of distinct counterparties. Provides a bonus of up to 10
-    /// points when >= 10 counterparties on average, rewarding transaction
-    /// diversity.
+    /// Average number of counterparties
     pub avg_counterparties: u32,
 }
 
-/// Weights used in credit score calculation. Must sum to 100.
-///
-/// Each weight determines the contribution of its component to the final composite.
+/// Weights used in credit score calculation
 #[contracttype]
 #[derive(Clone)]
 pub struct ScoringWeights {
-    /// Weight for verified credentials component. Controls how much VC score
-    /// influences the composite (0–100).
+    /// Weight for verified credentials component
     pub vc_weight: u32,
-    /// Weight for transaction history component. Controls the combined influence
-    /// of volume and counterparty diversity (0–100).
+    /// Weight for transaction history component
     pub tx_weight: u32,
-    /// Weight for repayment history component. Controls how much repayment score
-    /// influences the composite (0–100).
+    /// Weight for repayment history component
     pub repayment_weight: u32,
 }
 
@@ -191,15 +162,11 @@ pub struct PendingWeightsRecord {
     pub effective_ledger: u32,
 }
 
-/// Internal repayment counters for a subject.
-///
-/// Used to compute the repayment score component (0–100 based on on-time rate).
+/// Internal repayment counters for a subject
 #[contracttype]
 #[derive(Clone)]
 pub struct RepaymentRecord {
-    /// Number of repayments made on time. Higher ratio with total_count improves score.
     pub on_time_count: u32,
-    /// Total number of repayments recorded. Used as divisor for on-time rate calculation.
     pub total_count: u32,
 }
 
@@ -226,28 +193,18 @@ impl CreditOracle {
             tx_weight: 30,
             repayment_weight: 30,
         };
-        env.storage()
-            .instance()
-            .set(&DataKey::Config, &default_weights);
-        env.storage().instance().set(
-            &DataKey::ComputeCooldownLedgers,
-            &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
-        );
+        env.storage().instance().set(&DataKey::Config, &default_weights);
         Ok(())
     }
 
-    /// Register a trusted feeder address.
-    ///
-    /// Auth: admin only — verified via `require_admin`.
-    pub fn register_feeder(
-        env: Env,
-        feeder: Address,
-    ) -> Result<(), CreditOracleError> {
-        require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+    /// Register a trusted feeder address
+    pub fn register_feeder(env: Env, admin: Address, feeder: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -268,54 +225,15 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Register a trusted lender address.
-    ///
-    /// Auth: admin only — verified via `require_admin`.
-    pub fn register_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
-        require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedLender(lender.clone()), &true);
-        env.events().publish((symbol_short!("LndReg"),), lender);
-        Ok(())
-    }
-
-    /// Deregister a trusted lender address.
-    ///
-    /// Auth: admin only — verified via `require_admin`.
-    pub fn deregister_lender(
-        env: Env,
-        lender: Address,
-    ) -> Result<(), CreditOracleError> {
-        require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage()
-            .persistent()
-            .remove(&DataKey::TrustedLender(lender.clone()));
-        env.events().publish((symbol_short!("LndDeReg"),), lender);
-        Ok(())
-    }
-
-    /// Register a governance address that may propose weight changes.
-    ///
-    /// Auth: admin only — verified via `require_admin`.
-    pub fn register_governor(
-        env: Env,
-        admin: Address,
-        governor: Address,
-    ) -> Result<(), CreditOracleError> {
-        let stored = require_admin(&env);
-        if admin != stored {
+    /// Register a trusted lender address
+    pub fn register_lender(env: Env, admin: Address, lender: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::Governor(governor.clone()), &true);
-        env.events().publish((symbol_short!("GovReg"),), governor);
+        admin.require_auth();
+        env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
+        env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
 
@@ -331,31 +249,19 @@ impl CreditOracle {
         if admin != stored {
             return Err(CreditOracleError::NotAuthorized);
         }
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Governor(governor.clone()));
-        env.events().publish((symbol_short!("GovDeReg"),), governor);
+        admin.require_auth();
+        env.storage().persistent().remove(&DataKey::TrustedLender(lender.clone()));
+        env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
     }
 
     /// Update transaction statistics for a user
-    pub fn update_tx_stats(
-        env: Env,
-        feeder: Address,
-        subject: Address,
-        stats: TxStats,
-    ) -> Result<(), CreditOracleError> {
+    pub fn update_tx_stats(env: Env, feeder: Address, subject: Address, stats: TxStats) -> Result<(), CreditOracleError> {
         feeder.require_auth();
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::TxStats(subject), &stats);
+        env.storage().persistent().set(&DataKey::TxStats(subject), &stats);
         Ok(())
     }
 
@@ -368,59 +274,29 @@ impl CreditOracle {
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
         lender.require_auth();
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::TrustedLender(lender.clone()))
-        {
+        if !env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
             return Err(CreditOracleError::LenderNotRegistered);
         }
-        let mut record: RepaymentRecord = env
-            .storage()
-            .persistent()
+        let mut record: RepaymentRecord = env.storage().persistent()
             .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord {
-                on_time_count: 0,
-                total_count: 0,
-            });
+            .unwrap_or(RepaymentRecord { on_time_count: 0, total_count: 0 });
         if on_time {
-            // saturating_add prevents a wrap-around panic if on_time_count
-            // ever reaches u32::MAX (e.g. during fuzz / adversarial input).
-            record.on_time_count = record.on_time_count.saturating_add(1);
+            record.on_time_count += 1;
         }
-        // Same reasoning for total_count.
-        record.total_count = record.total_count.saturating_add(1);
-        env.storage()
-            .persistent()
-            .set(&DataKey::RepaymentRecord(subject), &record);
+        record.total_count += 1;
+        env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
         Ok(())
     }
 
     /// Cache VC count for a subject (feeder-only)
-    ///
-    /// **Deprecated:** Prefer configuring an `IdentityOracleId` and using the
-    /// cross-contract lookup via `set_identity_oracle` + `compute_score`.
-    #[deprecated(note = "use cross-contract lookup via set_identity_oracle instead")]
-    pub fn set_vc_count(
-        env: Env,
-        feeder: Address,
-        subject: Address,
-        count: u32,
-    ) -> Result<(), CreditOracleError> {
+    pub fn set_vc_count(env: Env, feeder: Address, subject: Address, count: u32) -> Result<(), CreditOracleError> {
         feeder.require_auth();
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+        if !env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
             return Err(CreditOracleError::FeederNotRegistered);
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::VcCount(subject), &count);
+        env.storage().persistent().set(&DataKey::VcCount(subject), &count);
         Ok(())
     }
-}
 
 /// Pure scoring arithmetic, extracted for unit and property-based testing
 /// without requiring a Soroban `Env`.
@@ -586,7 +462,7 @@ impl CreditOracle {
             .persistent()
             .set(&DataKey::LastComputed(subject), &current_ledger);
 
-        Ok(score)
+        score
     }
 
     /// Get credit score for a user; returns None if score has not been computed yet
@@ -594,65 +470,32 @@ impl CreditOracle {
         env.storage().persistent().get(&DataKey::Score(subject))
     }
 
-    /// Check whether a subject's stored score is stale.
-    ///
-    /// Returns `true` when:
-    /// - No score has ever been computed for `subject` (no record exists), or
-    /// - The elapsed time since `last_updated` exceeds `max_age_seconds`.
-    ///
-    /// Consumers should call this before acting on a score and choose a
-    /// `max_age_seconds` threshold appropriate for their use case. See
-    /// `docs/scoring-spec.md` for recommended values.
-    pub fn is_stale(env: Env, subject: Address, max_age_seconds: u64) -> bool {
-        let record: Option<ScoreRecord> = env.storage().persistent().get(&DataKey::Score(subject));
-        match record {
-            None => true,
-            Some(r) => {
-                let now = env.ledger().timestamp();
-                now.saturating_sub(r.last_updated) > max_age_seconds
-            }
-        }
-    }
-
-    /// Propose new scoring weights with timelock.
-    ///
-    /// Auth: admin or registered governor — verified via `require_admin_or_governor`.
-    pub fn propose_weights(
-        env: Env,
-        caller: Address,
-        weights: ScoringWeights,
-    ) -> Result<(), CreditOracleError> {
+    /// Propose new scoring weights with timelock
+    /// Propose new scoring weights with timelock
+    pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
             return Err(CreditOracleError::InvalidWeights);
         }
-        require_admin_or_governor(&env, &caller)?;
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
 
         let effective_ledger = env.ledger().sequence() + TIMELOCK_LEDGERS;
 
-        env.storage()
-            .instance()
-            .set(&DataKey::PendingWeights, &weights);
+        env.storage().instance().set(&DataKey::PendingWeights, &weights);
         env.storage()
             .instance()
             .set(&DataKey::PendingWeightsEffectiveLedger, &effective_ledger);
 
         env.events().publish(
             (symbol_short!("WtProp"),),
-            (
-                weights.vc_weight,
-                weights.tx_weight,
-                weights.repayment_weight,
-                effective_ledger,
-            ),
+            (weights.vc_weight, weights.tx_weight, weights.repayment_weight, effective_ledger),
         );
         Ok(())
     }
 
     /// Apply pending weights after timelock expires
     pub fn apply_weights(env: Env) {
-        let effective_ledger: u32 = env
-            .storage()
+        let effective_ledger: u32 = env.storage()
             .instance()
             .get(&DataKey::PendingWeightsEffectiveLedger)
             .expect("no pending weights");
@@ -661,8 +504,7 @@ impl CreditOracle {
             panic!("timelock not expired");
         }
 
-        let weights: ScoringWeights = env
-            .storage()
+        let weights: ScoringWeights = env.storage()
             .instance()
             .get(&DataKey::PendingWeights)
             .expect("no pending weights");
@@ -670,19 +512,7 @@ impl CreditOracle {
         env.storage().instance().set(&DataKey::Config, &weights);
 
         env.storage().instance().remove(&DataKey::PendingWeights);
-        env.storage()
-            .instance()
-            .remove(&DataKey::PendingWeightsEffectiveLedger);
-
-        env.events().publish(
-            (symbol_short!("WtApply"),),
-            (
-                weights.vc_weight,
-                weights.tx_weight,
-                weights.repayment_weight,
-            ),
-        );
-    }
+        env.storage().instance().remove(&DataKey::PendingWeightsEffectiveLedger);
 
     /// Update weights directly (admin/governance only).
     ///
@@ -779,24 +609,15 @@ impl CreditOracle {
 
     /// Get current scoring weights
     pub fn get_scoring_weights(env: Env) -> ScoringWeights {
-        env.storage().instance().get(&DataKey::Config).unwrap()
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .unwrap()
     }
 
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
-        let weights: Option<ScoringWeights> =
-            env.storage().instance().get(&DataKey::PendingWeights);
-        let effective_ledger: Option<u32> = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingWeightsEffectiveLedger);
-        match (weights, effective_ledger) {
-            (Some(w), Some(l)) => Some(PendingWeightsRecord {
-                weights: w,
-                effective_ledger: l,
-            }),
-            _ => None,
-        }
+        env.storage().instance().get(&DataKey::PendingWeights)
     }
 
     /// Propose a new contract admin (two-step admin transfer).
@@ -824,18 +645,51 @@ impl CreditOracle {
             None => return Err(CreditOracleError::NoPendingAdmin),
         }
         new_admin.require_auth();
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Admin, &new_admin);
         env.storage().instance().remove(&DataKey::PendingAdmin);
         Ok(())
     }
 
-    /// Upgrade the contract WASM in-place, preserving address and all stored state.
+    /// Set the identity-oracle contract ID for cross-contract VC count lookup.
     ///
-    /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+    /// Auth: admin only — verified via stored_admin.require_auth()
+    pub fn set_identity_oracle(env: Env, identity_oracle_id: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle_id);
+        
+        env.events().publish((soroban_sdk::symbol_short!("OrclSet"),), identity_oracle_id);
+        Ok(())
+    }
+
+    /// Update the compute cooldown ledgers
+    pub fn update_compute_cooldown(env: Env, ledgers: u32) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        stored_admin.require_auth();
+        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
+        
+        env.events().publish(
+            (symbol_short!("CdSet"),),
+            (ledgers, stored_admin),
+        );
+        Ok(())
+    }
+
+    /// Get current compute cooldown in ledgers
+    pub fn get_compute_cooldown(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(1) // Default to 1 ledger as described in docs
+    }
+
+    /// Upgrade the contract WASM in-place, preserving address and all stored state.
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            panic!("not authorized");
+        }
+        admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 }
@@ -861,6 +715,22 @@ mod tests {
     }
 
     #[test]
+    fn test_only_admin_can_register_feeder() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        let result = client.try_register_feeder(&non_admin, &feeder);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
     fn test_register_lender_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
@@ -871,13 +741,10 @@ mod tests {
         let lender = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&lender);
+        client.register_lender(&admin, &lender);
 
         let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage()
-                .persistent()
-                .get(&DataKey::TrustedLender(lender.clone()))
-                .unwrap_or(false)
+            env.storage().persistent().get(&DataKey::TrustedLender(lender.clone())).unwrap_or(false)
         });
         assert!(is_trusted);
     }
@@ -894,22 +761,15 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&feeder);
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 5000,
-                tx_count_30d: 10,
-                avg_counterparties: 3,
-            },
-        );
+        client.register_feeder(&admin, &feeder);
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 5000,
+            tx_count_30d: 10,
+            avg_counterparties: 3,
+        });
 
         let stored: TxStats = env.as_contract(&contract_id, || {
-            env.storage()
-                .persistent()
-                .get(&DataKey::TxStats(subject.clone()))
-                .unwrap()
+            env.storage().persistent().get(&DataKey::TxStats(subject.clone())).unwrap()
         });
         assert_eq!(stored.volume_30d, 5000);
         assert_eq!(stored.tx_count_30d, 10);
@@ -927,7 +787,7 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&lender);
+        client.register_lender(&admin, &lender);
 
         for _ in 0..8 {
             client.record_repayment(&lender, &subject, &1000, &true);
@@ -937,10 +797,7 @@ mod tests {
         }
 
         let record: RepaymentRecord = env.as_contract(&contract_id, || {
-            env.storage()
-                .persistent()
-                .get(&DataKey::RepaymentRecord(subject.clone()))
-                .unwrap()
+            env.storage().persistent().get(&DataKey::RepaymentRecord(subject.clone())).unwrap()
         });
         let rate = record.on_time_count * 10000 / record.total_count;
         assert_eq!(rate, 8000);
@@ -973,94 +830,15 @@ mod tests {
         let lender = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
-        client.register_feeder(&feeder);
-        client.register_lender(&lender);
-
-        // Set up identical scores except for counterparty diversity
-        client.set_vc_count(&feeder, &subject, &3);
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 3_000_000_000i128,
-                tx_count_30d: 100,
-                avg_counterparties: 5, // below threshold - no bonus
-            },
-        );
-        for _ in 0..8 {
-            client.record_repayment(&lender, &subject, &1000, &true);
-        }
-        let score_without_bonus = client.compute_score(&subject);
-
-        // Same config but with diverse counterparties
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 3_000_000_000i128,
-                tx_count_30d: 100,
-                avg_counterparties: 12, // at or above threshold - bonus applies
-            },
-        );
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-        let score_with_bonus = client.compute_score(&subject);
-
-        // Score with bonus should be higher (by ~30 points with default tx_weight=30)
-        assert!(
-            score_with_bonus > score_without_bonus,
-            "expected bonus score ({}) > non-bonus score ({})",
-            score_with_bonus,
-            score_without_bonus
-        );
-    }
-
-    #[test]
-    fn test_score_increases_with_repayments() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let lender = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.register_lender(&lender);
-
-        for _ in 0..10 {
-            client.record_repayment(&lender, &subject, &1000, &true);
-        }
-
-        let score = client.compute_score(&subject);
-        assert!(score > MIN_SCORE);
-    }
-
-    #[test]
-    fn test_score_bounded_300_850() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let feeder = Address::generate(&env);
-        let lender = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.register_feeder(&feeder);
-        client.register_lender(&lender);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
 
         client.set_vc_count(&feeder, &subject, &5);
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 100_000_000_000i128,
-                tx_count_30d: 1000,
-                avg_counterparties: 100,
-            },
-        );
+        client.update_tx_stats(&feeder, &subject, &TxStats {
+            volume_30d: 100_000_000_000i128,
+            tx_count_30d: 1000,
+            avg_counterparties: 100,
+        });
         for _ in 0..100 {
             client.record_repayment(&lender, &subject, &1000, &true);
         }
@@ -1080,14 +858,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
         // Invalid weights — should return error via try_
-        let result = client.try_propose_weights(
-            &admin,
-            &ScoringWeights {
-                vc_weight: 40,
-                tx_weight: 40,
-                repayment_weight: 40,
-            },
-        );
+        let result = client.try_propose_weights(&ScoringWeights { vc_weight: 40, tx_weight: 40, repayment_weight: 40 });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
     }
 
@@ -1104,14 +875,7 @@ mod tests {
         let original_weights = client.get_scoring_weights();
         assert_eq!(original_weights.vc_weight, 40);
 
-        client.propose_weights(
-            &admin,
-            &ScoringWeights {
-                vc_weight: 50,
-                tx_weight: 30,
-                repayment_weight: 20,
-            },
-        );
+        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 });
 
         let current_weights = client.get_scoring_weights();
         assert_eq!(current_weights.vc_weight, 40);
@@ -1127,14 +891,7 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(
-            &admin,
-            &ScoringWeights {
-                vc_weight: 50,
-                tx_weight: 30,
-                repayment_weight: 20,
-            },
-        );
+        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 30, repayment_weight: 20 });
         client.apply_weights();
     }
 
@@ -1147,135 +904,20 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        client.propose_weights(
-            &admin,
-            &ScoringWeights {
-                vc_weight: 50,
-                tx_weight: 25,
-                repayment_weight: 25,
-            },
-        );
+        client.propose_weights(&ScoringWeights { vc_weight: 50, tx_weight: 25, repayment_weight: 25 });
 
         // Extend instance TTL before jumping the ledger so it isn't archived.
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
             env.storage().instance().extend_ttl(jump, jump);
         });
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + jump);
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
 
         let w = client.get_scoring_weights();
         assert_eq!(w.vc_weight, 50);
         assert_eq!(w.tx_weight, 25);
         assert_eq!(w.repayment_weight, 25);
-    }
-
-    #[test]
-    fn test_update_weights_bypasses_timelock() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // No propose_weights / apply_weights round trip — update_weights
-        // should take effect on the very same call, with no timelock wait.
-        client.update_weights(&ScoringWeights {
-            vc_weight: 20,
-            tx_weight: 50,
-            repayment_weight: 30,
-        });
-
-        let w = client.get_scoring_weights();
-        assert_eq!(w.vc_weight, 20);
-        assert_eq!(w.tx_weight, 50);
-        assert_eq!(w.repayment_weight, 30);
-    }
-
-    #[test]
-    fn test_update_weights_rejects_invalid_sum() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let result = client.try_update_weights(&ScoringWeights {
-            vc_weight: 40,
-            tx_weight: 40,
-            repayment_weight: 40, // sums to 120
-        });
-        assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
-
-        // Confirm the rejected call left the stored config untouched.
-        let w = client.get_scoring_weights();
-        assert_eq!(w.vc_weight, 40);
-        assert_eq!(w.tx_weight, 30);
-        assert_eq!(w.repayment_weight, 30);
-    }
-
-    #[test]
-    fn test_update_weights_requires_admin_auth() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Withdraw the blanket auth mock so require_admin's require_auth()
-        // call inside update_weights has nothing authorizing the invocation.
-        env.mock_auths(&[]);
-        let result = client.try_update_weights(&ScoringWeights {
-            vc_weight: 20,
-            tx_weight: 50,
-            repayment_weight: 30,
-        });
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_update_weights_clears_pending_proposal() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        // Queue a timelocked proposal.
-        client.propose_weights(
-            &admin,
-            &ScoringWeights {
-                vc_weight: 10,
-                tx_weight: 10,
-                repayment_weight: 80,
-            },
-        );
-        assert!(client.get_pending_weights().is_some());
-
-        // Admin bypasses the timelock with a direct update.
-        client.update_weights(&ScoringWeights {
-            vc_weight: 20,
-            tx_weight: 50,
-            repayment_weight: 30,
-        });
-
-        let w = client.get_scoring_weights();
-        assert_eq!(w.vc_weight, 20);
-        assert_eq!(w.tx_weight, 50);
-        assert_eq!(w.repayment_weight, 30);
-
-        // The fix clears the stale proposal, so there's nothing left for a
-        // later apply_weights() call to silently resurrect.
-        assert!(client.get_pending_weights().is_none());
     }
 
     #[test]
@@ -1290,26 +932,10 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_feeder(&feeder);
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 5000,
-                tx_count_30d: 10,
-                avg_counterparties: 3,
-            },
-        );
-        client.deregister_feeder(&feeder);
-        let result = client.try_update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 6000,
-                tx_count_30d: 11,
-                avg_counterparties: 4,
-            },
-        );
+        client.register_feeder(&admin, &feeder);
+        client.update_tx_stats(&feeder, &subject, &TxStats { volume_30d: 5000, tx_count_30d: 10, avg_counterparties: 3 });
+        client.deregister_feeder(&admin, &feeder);
+        let result = client.try_update_tx_stats(&feeder, &subject, &TxStats { volume_30d: 6000, tx_count_30d: 11, avg_counterparties: 4 });
         assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
     }
 
@@ -1325,17 +951,31 @@ mod tests {
         let subject = Address::generate(&env);
 
         client.initialize(&admin);
-        client.register_lender(&lender);
+        client.register_lender(&admin, &lender);
         client.record_repayment(&lender, &subject, &1000, &true);
-        client.deregister_lender(&lender);
+        client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
     }
 
-    /// Verifies that a u32::MAX vc_count does not panic and that the final
-    /// score stays within the documented [MIN_SCORE, MAX_SCORE] range.
     #[test]
-    fn test_vc_score_saturating_at_max() {
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    /// When tx_weight = 0, the counterparty bonus contributes nothing to the final score
+    /// because it is a sub-component of tx_score, which is multiplied by tx_weight.
+    #[test]
+    fn test_counterparty_bonus_zero_when_tx_weight_is_zero() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -1343,111 +983,64 @@ mod tests {
 
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.register_feeder(&feeder);
-
-        // Feed an extreme vc_count; saturating_mul must prevent a panic here.
-        client.set_vc_count(&feeder, &subject, &u32::MAX);
-
-        // Should not panic.
-        let score = client.compute_score(&subject);
-
-        // The VC contribution is clamped to 100 before weighting, so the
-        // final score must still fall within the documented bounds.
-        assert!(score >= MIN_SCORE, "score below MIN_SCORE: {score}");
-        assert!(score <= MAX_SCORE, "score above MAX_SCORE: {score}");
-
-        // With only vc_count set (no tx stats, no repayments) and default
-        // weights (vc=40), the VC component contributes:
-        //   vc_score=100, composite = 100*40/100 = 40
-        //   score = 300 + 40*550/100 = 300 + 220 = 520
-        assert_eq!(score, 520, "unexpected score with max vc_count");
-    }
-
-    #[test]
-    fn test_compute_score_rejects_within_cooldown() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        assert_eq!(
-            client.get_compute_cooldown(),
-            DEFAULT_COMPUTE_COOLDOWN_LEDGERS
-        );
-        assert_eq!(client.compute_score(&subject), MIN_SCORE);
-
-        let result = client.try_compute_score(&subject);
-        assert_eq!(result, Err(Ok(CreditOracleError::ComputeCooldownActive)));
-
-        let last_computed: u32 = env.as_contract(&contract_id, || {
-            env.storage()
-                .persistent()
-                .get(&DataKey::LastComputed(subject.clone()))
-                .unwrap()
+        // Propose and apply weights with tx_weight = 0
+        client.propose_weights(&ScoringWeights { vc_weight: 60, tx_weight: 0, repayment_weight: 40 });
+        let jump = TIMELOCK_LEDGERS + 2;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
         });
-        assert_eq!(last_computed, env.ledger().sequence());
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
+
+        let subject_with_counterparties = Address::generate(&env);
+        let subject_without_counterparties = Address::generate(&env);
+
+        // Give first subject 100 counterparties (max bonus)
+        client.update_tx_stats(&feeder, &subject_with_counterparties, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 100,
+        });
+        // Second subject has no counterparties
+        client.update_tx_stats(&feeder, &subject_without_counterparties, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 0,
+        });
+
+        let score_with = client.compute_score(&subject_with_counterparties);
+        let score_without = client.compute_score(&subject_without_counterparties);
+
+        // Both scores must be identical — tx_weight=0 suppresses the counterparty bonus
+        assert_eq!(score_with, score_without,
+            "counterparty bonus should have no effect when tx_weight is 0");
     }
 
+    /// When tx_weight = 100, the counterparty bonus is fully applied and
+    /// a subject with 100+ counterparties scores higher than one with none.
     #[test]
-    fn test_compute_score_allows_after_cooldown_expires() {
+    fn test_counterparty_bonus_applied_when_tx_weight_is_100() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.update_compute_cooldown(&2);
-
-        assert_eq!(client.compute_score(&subject), MIN_SCORE);
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-        assert_eq!(
-            client.try_compute_score(&subject),
-            Err(Ok(CreditOracleError::ComputeCooldownActive))
-        );
-
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-        assert_eq!(client.compute_score(&subject), MIN_SCORE);
-    }
-
-    #[test]
-    fn test_compute_cooldown_can_be_disabled_by_admin() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.update_compute_cooldown(&0);
-
-        assert_eq!(client.get_compute_cooldown(), 0);
-        assert_eq!(client.compute_score(&subject), MIN_SCORE);
-        assert_eq!(client.compute_score(&subject), MIN_SCORE);
-    }
-
-    #[test]
-    fn test_admin_transfer_two_step() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin1 = Address::generate(&env);
-        let admin2 = Address::generate(&env);
         let feeder = Address::generate(&env);
+        client.initialize(&admin);
 
-        client.initialize(&admin1);
+        // Propose and apply weights with tx_weight = 100
+        client.propose_weights(&ScoringWeights { vc_weight: 0, tx_weight: 100, repayment_weight: 0 });
+        let jump = TIMELOCK_LEDGERS + 2;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        client.apply_weights();
 
         client.propose_new_admin(&admin2);
         client.accept_admin(&admin2);

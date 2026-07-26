@@ -201,11 +201,13 @@
     [],
     [],
     [],
+    [],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 101,
+    "sequence_number": 3000101,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -384,18 +386,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "ComputeCooldownLedgers"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 1
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Config"
                             }
                           ]
@@ -436,7 +426,7 @@
             },
             "ext": "v0"
           },
-          4095
+          3000101
         ]
       ],
       [
@@ -852,7 +842,7 @@
             },
             "ext": "v0"
           },
-          4095
+          3000101
         ]
       ]
     ]

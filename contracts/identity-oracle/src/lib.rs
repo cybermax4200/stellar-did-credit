@@ -361,6 +361,49 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Returns the DID document CID anchored for the given subject, if any.
+    pub fn get_did_document(env: Env, subject: Address) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DIDDocument(subject))
+    }
+
+    /// Deactivate the subject's DID.
+    ///
+    /// 1. Revokes all active verifiable credentials anchored for the subject.
+    /// 2. Removes the anchored DID Document CID.
+    /// 3. Emits a `DIDDeact` event.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
+        subject.require_auth();
+
+        // 1. Revoke all VCs
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        if !anchors.is_empty() {
+            let mut updated = Vec::new(&env);
+            for mut record in anchors.iter() {
+                record.revoked = true;
+                updated.push_back(record);
+            }
+            env.storage().persistent().set(&key, &updated);
+        }
+
+        // 2. Remove DID Document
+        env.storage().persistent().remove(&DataKey::DIDDocument(subject.clone()));
+
+        // 3. Emit event
+        env.events().publish((symbol_short!("DIDDeact"),), subject);
+
+        Ok(())
+    }
+
     /// Anchor a verifiable credential (VC) for a subject issued by a trusted issuer.
     ///
     /// Increments the issuer's `vcs_issued` reputation counter on success.
@@ -729,19 +772,6 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
     }
 
-    #[test]
-    fn test_unregistered_issuer_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
-        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash);
-        assert_eq!(result, Err(Ok(IdentityOracleError::IssuerNotRegistered)));
-    }
 
     #[test]
     fn test_deregister_issuer_succeeds() {

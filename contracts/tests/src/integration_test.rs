@@ -48,8 +48,8 @@ mod tests {
         // 7. Register a lender and feeder in credit-oracle
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 8. Call set_vc_count(subject, 1)
         credit.set_vc_count(&feeder, &subject, &1);
@@ -118,7 +118,7 @@ mod tests {
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&feeder);
+        credit.register_feeder(&admin, &feeder);
         credit.set_vc_count(&feeder, &subject, &0);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
@@ -160,8 +160,8 @@ mod tests {
 
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 1. Get initial score with vc_count = 1
         credit.set_vc_count(&feeder, &subject, &1);
@@ -376,8 +376,8 @@ mod tests {
         // 14. Setup credit-oracle to test score changes
         let lender = soroban_sdk::Address::generate(&env);
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
 
         // 15. Set initial VC count to 5 and compute score
         credit.set_vc_count(&feeder, &subject, &5);
@@ -701,5 +701,76 @@ mod tests {
             score_b_noweight,
             score_b_weighted
         );
+    }
+
+    /// Integration test for governance execution timelock:
+    /// vote passes → advance past voting → execution rejected (timelock) →
+    /// advance past delay → execution succeeds.
+    #[test]
+    fn test_governance_execution_timelock_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Transfer oracle admin to governance contract
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        // voting_period = 100 ledgers, execution_delay = 50 ledgers
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+
+        // Cast passing votes
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.vote(&voter, &proposal_id, &true, &200);
+
+        // Step 1: advance just past voting period (expiry_ledger + 1)
+        // but still within the execution timelock window
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // Execution must fail — timelock not yet expired
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::TimelockNotExpired)),
+            "expected TimelockNotExpired while within execution delay window"
+        );
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(!proposal.executed, "proposal must not be executed yet");
+
+        // Step 2: advance past the execution timelock (50 more ledgers)
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+
+        // Execution must now succeed
+        gov.execute(&proposal_id);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.executed, "proposal must be executed after timelock");
+
+        // Verify weights were applied to the credit oracle
+        let weights = credit.get_scoring_weights();
+        assert_eq!(weights.vc_weight, 50);
+        assert_eq!(weights.tx_weight, 20);
+        assert_eq!(weights.repayment_weight, 30);
     }
 }
