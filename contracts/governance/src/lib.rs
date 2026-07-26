@@ -1156,5 +1156,4 @@ mod tests {
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
     }
-    }
 }
