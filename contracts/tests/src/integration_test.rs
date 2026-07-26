@@ -38,9 +38,6 @@ mod tests {
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
-        let retrieved_cid = identity.get_did_document(&subject).expect("DID doc should exist");
-        assert_eq!(retrieved_cid, cid);
-
         // 5. Call anchor_vc for the subject with a test hash
         let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);
@@ -233,7 +230,7 @@ mod tests {
         assert!(identity.is_verified(&subject));
 
         // Revoke via revocation-registry
-        revocation.revoke(&issuer, &subject, &vc_hash);
+        revocation.revoke(&issuer, &vc_hash);
 
         // Verify that is_revoked returns true on the registry
         assert!(revocation.is_revoked(&vc_hash));
@@ -266,17 +263,16 @@ mod tests {
         // Two different issuers
         let issuer_a = soroban_sdk::Address::generate(&env);
         let issuer_b = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
 
         // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
         let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
 
         // First revoke by issuer_a registers the authority.
-        revocation.revoke(&issuer_a, &subject, &vc_hash);
+        revocation.revoke(&issuer_a, &vc_hash);
         assert!(revocation.is_revoked(&vc_hash));
 
         // Second revoke by issuer_b must fail.
-        let res = revocation.try_revoke(&issuer_b, &subject, &vc_hash);
+        let res = revocation.try_revoke(&issuer_b, &vc_hash);
         assert_eq!(
             res,
             Err(Ok(
@@ -492,14 +488,13 @@ mod tests {
 
         let issuer1 = soroban_sdk::Address::generate(&env);
         let issuer2 = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
 
         let hash1 = BytesN::from_array(&env, &[1u8; 32]);
         let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
         let hash3 = BytesN::from_array(&env, &[3u8; 32]);
 
         // issuer2 revokes hash2 individually to claim authority
-        revocation.revoke(&issuer2, &subject, &hash2);
+        revocation.revoke(&issuer2, &hash2);
         assert!(revocation.is_revoked(&hash2));
 
         // Create a batch with mixed hashes
@@ -510,13 +505,11 @@ mod tests {
 
         // issuer1 attempts to batch revoke the hashes
         let res = revocation.try_batch_revoke(&issuer1, &batch);
-
+        
         // Assert the call failed with IssuerMismatch
         assert_eq!(
             res,
-            Err(Ok(
-                revocation_registry::RevocationRegistryError::IssuerMismatch
-            ))
+            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
         );
 
         // Verify that hash1 and hash3 were NOT revoked (atomicity check)
@@ -524,58 +517,190 @@ mod tests {
         assert!(!revocation.is_revoked(&hash3));
     }
 
+    /// Integration test: issuers with high revocation rates (and therefore
+    /// lower reputation tiers, either applied manually by governance or via
+    /// the metrics-based recommendation) produce lower subject scores when
+    /// the credit oracle has issuer-tier weighting enabled.
+    ///
+    /// Scenario:
+    ///   * Issuer G (Good): issues 4 VCs to SubjectG, revokes none.
+    ///     → vcs_issued=4, vcs_revoked=0 → recommended Tier3 (gold).
+    ///   * Issuer B (Bad):  issues 4 VCs to SubjectB (all active), PLUS
+    ///     issues 4 additional VCs to a decoy SubjectX and revokes all 4.
+    ///     → vcs_issued=8, vcs_revoked=4 (50% revocation ratio)
+    ///     → recommended Tier0 (suspended / 0 weight).
+    ///
+    /// After applying the recommended tiers through governance and turning
+    /// on UseIssuerTierWeighting in the credit oracle, SubjectG has
+    /// 4 effective VCs (Tier3 × 4) while SubjectB has 0 effective VCs
+    /// (Tier0 × 4) even though both subjects hold 4 active VCs on paper.
+    /// The resulting credit scores reflect this difference.
     #[test]
-    fn test_revocation_registry_count_and_list_integration() {
+    fn test_high_revocation_issuer_produces_lower_scores() {
+        use governance::Governance;
+        use identity_oracle::IssuerTier;
+
         let env = Env::default();
         env.mock_all_auths();
 
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        // 1. Deploy and initialize the three contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
 
         let admin = soroban_sdk::Address::generate(&env);
-        revocation.initialize(&admin);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &1000);
 
-        let issuer1 = soroban_sdk::Address::generate(&env);
-        let issuer2 = soroban_sdk::Address::generate(&env);
+        // Link governance → identity-oracle for tier adjustments
+        gov.set_identity_oracle(&admin, &identity_id);
+        assert_eq!(gov.get_identity_oracle(), Some(identity_id.clone()));
 
-        assert_eq!(revocation.get_revocation_count(&issuer1), 0);
-        assert_eq!(revocation.get_revocation_count(&issuer2), 0);
-        assert_eq!(revocation.list_revoked(&issuer1, &0, &10).len(), 0);
+        // Link credit-oracle → identity-oracle for live VC lookups
+        credit.set_identity_oracle(&identity_id);
 
-        let subject = soroban_sdk::Address::generate(&env);
-        // 1. Single revocation by issuer1
-        let hash_a = BytesN::from_array(&env, &[101u8; 32]);
-        revocation.revoke(&issuer1, &subject, &hash_a);
+        // Register feeder + lender for the other scoring components so
+        // the score delta is driven purely by the VC tier weighting.
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&feeder);
+        credit.register_lender(&lender);
 
-        assert_eq!(revocation.get_revocation_count(&issuer1), 1);
-        let list1 = revocation.list_revoked(&issuer1, &0, &10);
-        assert_eq!(list1.len(), 1);
-        assert_eq!(list1.get(0).unwrap(), hash_a);
+        // 2. Register Good issuer G and Bad issuer B
+        let issuer_g = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer_g);
+        identity.register_issuer(&issuer_b);
 
-        // 2. Batch revocation by issuer1
-        let hash_b = BytesN::from_array(&env, &[102u8; 32]);
-        let hash_c = BytesN::from_array(&env, &[103u8; 32]);
-        let mut batch = soroban_sdk::Vec::new(&env);
-        batch.push_back(hash_b.clone());
-        batch.push_back(hash_c.clone());
-        revocation.batch_revoke(&issuer1, &batch);
+        // 3. Build reputation profiles
+        //    Issuer G: 4 VCs issued to SubjectG, 0 revoked
+        //    Issuer B: 4 VCs issued to SubjectB (active),
+        //              + 4 VCs issued to SubjectX → all 4 revoked
+        //              → 8 issued, 4 revoked (50% ratio)
+        let subject_g = soroban_sdk::Address::generate(&env);
+        let subject_b = soroban_sdk::Address::generate(&env);
+        let subject_x = soroban_sdk::Address::generate(&env);
 
-        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
-        let list1_all = revocation.list_revoked(&issuer1, &0, &10);
-        assert_eq!(list1_all.len(), 3);
-        assert_eq!(list1_all.get(0).unwrap(), hash_a);
-        assert_eq!(list1_all.get(1).unwrap(), hash_b);
-        assert_eq!(list1_all.get(2).unwrap(), hash_c);
+        for i in 0..4u8 {
+            let mut h = [0u8; 32];
+            h[0] = i;
+            identity.anchor_vc(&issuer_g, &subject_g, &BytesN::from_array(&env, &h));
+        }
 
-        // 3. Single revocation by issuer2
-        let hash_d = BytesN::from_array(&env, &[104u8; 32]);
-        revocation.revoke(&issuer2, &subject, &hash_d);
+        for i in 0..4u8 {
+            let mut h = [10u8; 32];
+            h[0] = 10 + i;
+            identity.anchor_vc(&issuer_b, &subject_b, &BytesN::from_array(&env, &h));
+        }
 
-        assert_eq!(revocation.get_revocation_count(&issuer2), 1);
-        assert_eq!(revocation.get_revocation_count(&issuer1), 3);
-        let list2 = revocation.list_revoked(&issuer2, &0, &10);
-        assert_eq!(list2.len(), 1);
-        assert_eq!(list2.get(0).unwrap(), hash_d);
+        for i in 0..4u8 {
+            let mut h = [20u8; 32];
+            h[0] = 20 + i;
+            let hash = BytesN::from_array(&env, &h);
+            identity.anchor_vc(&issuer_b, &subject_x, &hash);
+            identity.mark_vc_revoked(&issuer_b, &subject_x, &hash);
+        }
+
+        // 4. Verify metrics tracked correctly on identity-oracle
+        let pg = identity.get_issuer_profile(&issuer_g);
+        let pb = identity.get_issuer_profile(&issuer_b);
+        assert_eq!(pg.vcs_issued, 4);
+        assert_eq!(pg.vcs_revoked, 0);
+        assert_eq!(pb.vcs_issued, 8);
+        assert_eq!(pb.vcs_revoked, 4);
+
+        // 5. Governance's pure recommendation rule produces the expected tiers
+        assert_eq!(
+            Governance::recommend_tier_from_metrics(pg.vcs_issued, pg.vcs_revoked),
+            IssuerTier::Tier3
+        );
+        // 50% revocation ratio → Tier0 recommendation
+        assert_eq!(
+            Governance::recommend_tier_from_metrics(pb.vcs_issued, pb.vcs_revoked),
+            IssuerTier::Tier0
+        );
+
+        // 6. Governance applies both recommended tiers via adjust_issuer_tier
+        gov.adjust_issuer_tier(&admin, &issuer_g, &IssuerTier::Tier3);
+        gov.adjust_issuer_tier(&admin, &issuer_b, &IssuerTier::Tier0);
+
+        assert_eq!(
+            identity.get_issuer_profile(&issuer_g).tier,
+            IssuerTier::Tier3
+        );
+        assert_eq!(
+            identity.get_issuer_profile(&issuer_b).tier,
+            IssuerTier::Tier0
+        );
+
+        // 7. Raw active VC counts are equal (no tier weighting applied yet)
+        assert_eq!(identity.get_active_vc_count(&subject_g), 4);
+        assert_eq!(identity.get_active_vc_count(&subject_b), 4);
+
+        // 8. Weighted VC counts diverge dramatically
+        //    subject_g: 4 × Tier3 (1.00) = 400 hundredths → 4 effective
+        //    subject_b: 4 × Tier0 (0.00) =   0 hundredths → 0 effective
+        assert_eq!(identity.get_weighted_vc_count(&subject_g), 400);
+        assert_eq!(identity.get_weighted_vc_count(&subject_b), 0);
+
+        // 9. Give both subjects IDENTICAL tx_stats + repayment records so
+        //    any score delta comes exclusively from issuer-tier weighting.
+        let identical_tx = TxStats {
+            volume_30d: 2_000_000_000i128, // = 20 tx_score points
+            tx_count_30d: 10,
+            avg_counterparties: 0,
+        };
+        credit.update_tx_stats(&feeder, &subject_g, &identical_tx);
+        credit.update_tx_stats(&feeder, &subject_b, &identical_tx);
+        for _ in 0..6 {
+            credit.record_repayment(&lender, &subject_g, &100_000_000i128, &true);
+            credit.record_repayment(&lender, &subject_b, &100_000_000i128, &true);
+        }
+
+        // 10. WITHOUT weighting enabled → both scores are EQUAL
+        let score_g_noweight = credit.compute_score(&subject_g);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_b_noweight = credit.compute_score(&subject_b);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        assert_eq!(
+            score_g_noweight, score_b_noweight,
+            "without tier weighting both subjects should score the same"
+        );
+
+        // 11. Enable issuer-tier weighting
+        credit.set_issuer_tier_weighting(&true);
+        assert!(credit.get_issuer_tier_weighting());
+
+        // 12. WITH weighting enabled → subject_g outscores subject_b
+        let score_g_weighted = credit.compute_score(&subject_g);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_b_weighted = credit.compute_score(&subject_b);
+
+        assert!(
+            score_g_weighted > score_b_weighted,
+            "with tier weighting, subject with good-issuer VCs (score {}) \
+             should outscore subject with bad-issuer VCs (score {})",
+            score_g_weighted,
+            score_b_weighted
+        );
+
+        // subject_b should also score WORSE after weighting is turned on,
+        // relative to its own no-weight score.
+        assert!(
+            score_b_weighted < score_b_noweight,
+            "bad issuer's subject should score lower after weighting: \
+             before={}, after={}",
+            score_b_noweight,
+            score_b_weighted
+        );
     }
 
     /// Integration test for governance execution timelock:

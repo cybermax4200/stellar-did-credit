@@ -76,6 +76,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
       getAccount: mockGetAccount,
       sendTransaction: mockSendTransaction,
       simulateTransaction: mockSimulateTransaction,
+      getAccount: mockGetAccount,
+      sendTransaction: mockSendTransaction,
       getTransaction: mockGetTransaction,
     })),
     Api: {
@@ -127,12 +129,27 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("getDIDDocument", () => {
-    it("returns null when no DID is anchored", async () => {
+  describe("getDIDDocument", () => {
+    it("test_getDIDDocument_returns_cid", async () => {
       const expectedCid = "QmXYZ123abc...";
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: expectedCid },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getDIDDocument(subjectAddress);
+
+      expect(result).toBe(expectedCid);
+      expect(mockLastContractCall?.method).toBe("get_did_document");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("test_getDIDDocument_returns_null", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: null },
         },
       });
 
@@ -144,8 +161,8 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("revokeVC", () => {
-    it("calls revoke_vc on the registry", async () => {
+  describe("revokeVC", () => {
+    it("test_revokeVC_calls_revoke_and_mark_vc_revoked", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
@@ -182,7 +199,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("anchorDID", () => {
+  describe("anchorDID", () => {
     it("throws when simulation returns an explicit error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "anchor_did rejected" });
 
@@ -211,7 +228,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("issueVC", () => {
+  describe("issueVC", () => {
     it("throws when simulation returns an explicit error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "anchor_vc rejected" });
 
@@ -242,7 +259,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("verifyVC", () => {
+  describe("verifyVC", () => {
     it("test_verifyVC_true_for_valid_hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
@@ -282,7 +299,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("computeScore", () => {
+  describe("computeScore", () => {
     it("test_computeScore_returns_updated_record", async () => {
       // Verify that computeScore submits compute_score, waits for confirmation,
       // then returns the updated ScoreRecord from getScore.
@@ -443,7 +460,7 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("getVCCount", () => {
+  describe("getVCCount", () => {
     it("test_getVCCount_returns_active_count", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {

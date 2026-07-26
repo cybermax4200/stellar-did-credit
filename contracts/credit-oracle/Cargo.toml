@@ -11,6 +11,5 @@ soroban-sdk = { workspace = true }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-identity-oracle = { path = "../identity-oracle" }
 proptest = "1"
 

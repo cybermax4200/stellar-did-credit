@@ -6,10 +6,10 @@ The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`
 
 ## Inputs
 
-| Input                           | Source                        | Storage key                           |
-| ------------------------------- | ----------------------------- | ------------------------------------- |
-| `vc_count`                      | Feeder via `set_vc_count`     | `VcCount(subject)`                    |
-| `volume_30d`                    | Feeder via `update_tx_stats`  | `TxStats(subject).volume_30d`         |
+| Input                           | Source                        | Storage key                      |
+| ------------------------------- | ----------------------------- | -------------------------------- |
+| `vc_count`                      | Feeder via `set_vc_count`     | `VcCount(subject)`               |
+| `volume_30d`                    | Feeder via `update_tx_stats`  | `TxStats(subject).volume_30d`      |
 | `avg_counterparties`            | Feeder via `update_tx_stats`  | `TxStats(subject).avg_counterparties` |
 | `on_time_count` / `total_count` | Lender via `record_repayment` | `RepaymentRecord(subject)`            |
 
@@ -129,7 +129,7 @@ score = clamp(300 + 57×550÷100, 300, 850)
 
 ---
 
-### Example 3: 5 VCs, high volume, 100% repayment → score ~817
+### Example 3: 5 VCs, high volume, 100% repayment, diverse counterparties → score 833
 
 | Input           | Value                          |
 | --------------- | ------------------------------ |
