@@ -326,8 +326,8 @@ mod tests {
         // 5. Assert is_verified is true (5 active VCs)
         assert!(identity.is_verified(&subject));
 
-        // 6. Assert get_vc_count returns 5
-        assert_eq!(identity.get_vc_count(&subject), 5);
+        // 6. Assert get_total_vc_count returns 5
+        assert_eq!(identity.get_total_vc_count(&subject), 5);
 
         // 7. Create a vector of the first 3 hashes to batch revoke
         let mut batch_revoke_hashes = soroban_sdk::Vec::new(&env);
@@ -370,9 +370,9 @@ mod tests {
             "Subject should still be verified with 2 active VCs"
         );
 
-        // 13. Assert get_vc_count returns 5 (total count unchanged)
+        // 13. Assert get_total_vc_count returns 5 (total count unchanged after revocation)
         assert_eq!(
-            identity.get_vc_count(&subject),
+            identity.get_total_vc_count(&subject),
             5,
             "Total VC count should remain 5"
         );
