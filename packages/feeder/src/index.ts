@@ -558,6 +558,27 @@ async function withExponentialBackoff<T>(
   }
 }
 
+/**
+ * Parses a string as a positive integer (> 0).
+ * Logs a warning and returns `defaultValue` if the input is undefined,
+ * NaN, not finite, or ≤ 0.
+ */
+export function parsePositiveInt(
+  raw: string | undefined,
+  defaultValue: number,
+  name: string,
+): number {
+  if (raw === undefined) return defaultValue;
+  const parsed = parseInt(raw, 10);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    console.warn(
+      `[feeder] WARNING: ${name}="${raw}" is not a valid positive integer. Defaulting to ${defaultValue}.`,
+    );
+    return defaultValue;
+  }
+  return parsed;
+}
+
 // ---------------------------------------------------------------------------
 // CLI entry point
 // ---------------------------------------------------------------------------
@@ -586,14 +607,20 @@ if (require.main === module) {
   const simAccount =
     process.env["SIM_ACCOUNT"] ??
     "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
-  const pollIntervalMs = parseInt(
-    process.env["POLL_INTERVAL_MS"] ?? "3600000",
-    10,
+  const pollIntervalMs = parsePositiveInt(
+    process.env["POLL_INTERVAL_MS"],
+    3_600_000,
+    "POLL_INTERVAL_MS",
   );
-  const maxRetries = parseInt(process.env["MAX_RETRIES"] ?? "3", 10);
-  const retryBaseDelayMs = parseInt(
-    process.env["RETRY_BASE_DELAY_MS"] ?? "1000",
-    10,
+  const maxRetries = parsePositiveInt(
+    process.env["MAX_RETRIES"],
+    3,
+    "MAX_RETRIES",
+  );
+  const retryBaseDelayMs = parsePositiveInt(
+    process.env["RETRY_BASE_DELAY_MS"],
+    1_000,
+    "RETRY_BASE_DELAY_MS",
   );
 
   const subjects = subjectsRaw
