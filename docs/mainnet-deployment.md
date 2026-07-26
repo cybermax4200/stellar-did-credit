@@ -30,10 +30,12 @@ Treat mainnet deployment as a controlled operations exercise. The deployment ord
 2. Complete the pre-deployment checklist.
    - Confirm the security audit is complete, the code is pinned, and the deployment artifact is reproducible.
    - Review the initial scoring weights and the timelock window before deployment.
-3. Deploy the contracts.
-   - Run the deployment script with the target network set explicitly:
-     `NETWORK=mainnet bash scripts/deploy.sh --resume`
-   - The script writes the deployment addresses to `deployments.mainnet.json` and preserves previously deployed contracts when resumed.
+3. Deploy and initialize the contracts.
+   - Run the deployment script with the target network set explicitly (add `--initialize` to automatically initialize, configure cross-contract links, and verify deployed contracts):
+     `NETWORK=mainnet bash scripts/deploy.sh --resume --initialize`
+     Or for testnet:
+     `./scripts/deploy.sh --network testnet --initialize`
+   - The script writes the deployment metadata to `deployments.mainnet.json` (or `deployments.testnet.json`) and preserves previously deployed contracts when resumed.
 4. Configure the live deployment.
    - Record the three contract addresses, the admin account, and the WASM hashes in a protected runbook.
    - Register the initial issuers, feeders, and lenders only after the admin approval path has been verified.
