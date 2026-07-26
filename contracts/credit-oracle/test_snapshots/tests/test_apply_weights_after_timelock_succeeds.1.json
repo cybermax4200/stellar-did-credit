@@ -34,9 +34,6 @@
               "function_name": "propose_weights",
               "args": [
                 {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
-                },
-                {
                   "map": [
                     {
                       "key": {
@@ -124,18 +121,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "ComputeCooldownLedgers"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 1
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Config"
                             }
                           ]
@@ -176,7 +161,7 @@
             },
             "ext": "v0"
           },
-          500000
+          17282
         ]
       ],
       [
@@ -263,7 +248,7 @@
             },
             "ext": "v0"
           },
-          500000
+          17282
         ]
       ]
     ]

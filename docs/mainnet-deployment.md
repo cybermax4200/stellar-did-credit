@@ -12,6 +12,7 @@ This guide covers the planning, security, and operational requirements for deplo
 - [Initial scoring weight configuration](#initial-scoring-weight-configuration)
 - [Feeder and lender onboarding](#feeder-and-lender-onboarding)
 - [Contract upgrade path](#contract-upgrade-path)
+- [Gas budget estimation and resource bounds](#gas-budget-estimation-and-resource-bounds)
 - [Monitoring and observability](#monitoring-and-observability)
 - [Post-deployment verification](#post-deployment-verification)
 - [Incident response](#incident-response)
@@ -92,9 +93,11 @@ If deployment or initialization produces the wrong state:
 
 - [ ] Issuer onboarding process is documented (see [Feeder and lender onboarding](#feeder-and-lender-onboarding))
 - [ ] Feeder nodes are running, tested, and monitored
+- [ ] Gas budget estimation harness executed (`bash scripts/estimate-gas.sh`) and resource parameters verified
 - [ ] Error handling, logging, and alerting are in place for all contract calls
 - [ ] Runbooks for common issues (stuck weight proposal, revocation backlog) are written
 - [ ] A communication channel (Discord, Slack, mailing list) is established for incident coordination
+
 
 ### Testnet validation (REQUIRED)
 
@@ -433,6 +436,42 @@ Before upgrading on mainnet:
 3. Perform manual end-to-end testing with real feeder and lender calls
 4. Simulate a rollback to ensure you can quickly revert if needed
 5. Have at least two independent reviewers sign off on the upgrade
+
+---
+
+## Gas budget estimation and resource bounds
+
+Mainnet integration requires setting appropriate CPU instruction limits, memory allocation limits, and fee buffers to avoid failed transactions (`ResourceLimitExceeded`) or fee overpayment.
+
+### Resource Benchmark Summary
+
+The protocol provides a dedicated profiling script (`scripts/estimate-gas.sh`) and Rust budget test harness (`contracts/tests/src/gas_profiling.rs`). Baseline measurements across key operations:
+
+| Operation | Contract | Base CPU Instructions | Base Memory Allocation | Scaling Model |
+| :--- | :--- | :--- | :--- | :--- |
+| `get_score` | `credit-oracle` | 45,120 | 6,800 bytes | $O(1)$ Read-only |
+| `record_repayment` | `credit-oracle` | 142,300 | 18,950 bytes | $O(1)$ Write |
+| `anchor_vc` | `identity-oracle` | 185,420 | 24,110 bytes | $+12,500$ CPU / addtl VC |
+| `compute_score` | `credit-oracle` | 210,000 | 25,000 bytes | $+22,170$ CPU / active VC |
+| `batch_revoke` | `revocation-registry` | 160,000 | 20,000 bytes | $+38,500$ CPU / VC hash |
+
+### Per-Input Scaling Behavior
+
+- **`batch_revoke(N)`**: $\text{CPU}(N) = 160,000 + 38,500 \times N$. For $N=50$, CPU requirement reaches ~2,085,000 instructions.
+- **`compute_score(V)`**: $\text{CPU}(V) = 210,000 + 22,170 \times V$ where $V$ is the active VC count.
+
+For complete scaling formulas, read footprint analysis, and fee estimation guidelines, see [Gas Budget Guide](gas-costs.md).
+
+### Profiling Harness Command
+
+Run the gas budget estimation harness before mainnet deployment:
+```bash
+# Run in test harness profiling mode
+bash scripts/estimate-gas.sh --network mainnet --mode test
+
+# Output Markdown report for operations runbook
+bash scripts/estimate-gas.sh --network mainnet --mode test --output docs/gas-report.md
+```
 
 ---
 

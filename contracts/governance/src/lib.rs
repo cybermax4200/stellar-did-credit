@@ -34,6 +34,8 @@ pub enum GovernanceError {
     InvalidVoteWeight = 10,
     /// Total votes cast did not meet the required quorum.
     QuorumNotMet = 11,
+    /// Execution timelock has not yet expired after the voting period.
+    TimelockNotExpired = 12,
 }
 
 /// Storage keys for the governance contract.
@@ -67,6 +69,10 @@ pub struct GovernanceProposal {
     pub votes_against: i128,
     /// Ledger sequence number after which voting ends.
     pub expiry_ledger: u32,
+    /// Number of ledgers after `expiry_ledger` that must pass before `execute`
+    /// may be called. This gives the community a reaction window between a vote
+    /// passing and its effects taking hold.
+    pub execution_delay_ledgers: u32,
     /// Whether this proposal has been executed (weights applied or vote failed).
     pub executed: bool,
     /// Minimum `votes_for + votes_against` required for `execute` to apply
@@ -153,7 +159,9 @@ impl Governance {
     /// Create a new governance proposal to update the credit-oracle's scoring weights.
     ///
     /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
-    /// ledgers from the current sequence. Returns the new proposal ID.
+    /// ledgers from the current sequence. After voting ends, execution is further
+    /// delayed by `execution_delay_ledgers` ledgers to give the community a reaction
+    /// window. Returns the new proposal ID.
     ///
     /// Auth: `proposer` must sign the transaction.
     pub fn create_proposal(
@@ -161,6 +169,7 @@ impl Governance {
         proposer: Address,
         weights: ScoringWeights,
         voting_period_ledgers: u32,
+        execution_delay_ledgers: u32,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
         if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
@@ -185,6 +194,7 @@ impl Governance {
             votes_for: 0,
             votes_against: 0,
             expiry_ledger,
+            execution_delay_ledgers,
             executed: false,
             quorum_required,
         };
@@ -260,9 +270,13 @@ impl Governance {
 
     /// Execute an expired proposal.
     ///
+    /// Two conditions must both be true before execution is allowed:
+    /// 1. The voting period has ended (`sequence > expiry_ledger`).
+    /// 2. The execution timelock has expired (`sequence > expiry_ledger + execution_delay_ledgers`).
+    ///
     /// If `votes_for > votes_against` and the quorum is met, the proposed weights
     /// are applied to the credit-oracle. Otherwise the proposal is marked executed
-    /// without changing the weights. Can only be called after `expiry_ledger`.
+    /// without changing the weights.
     pub fn execute(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
         let proposal_key = DataKey::Proposal(proposal_id);
         let mut proposal: GovernanceProposal = env
@@ -273,6 +287,14 @@ impl Governance {
 
         if env.ledger().sequence() <= proposal.expiry_ledger {
             return Err(GovernanceError::ProposalNotExpired);
+        }
+
+        // Check execution timelock: must wait execution_delay_ledgers after voting ends.
+        let executable_at = proposal
+            .expiry_ledger
+            .saturating_add(proposal.execution_delay_ledgers);
+        if env.ledger().sequence() <= executable_at {
+            return Err(GovernanceError::TimelockNotExpired);
         }
 
         if proposal.executed {
@@ -291,7 +313,7 @@ impl Governance {
                 .expect("no credit oracle");
 
             let client = CreditOracleClient::new(&env, &credit_oracle_addr);
-            client.update_weights(&proposal.proposed_weights);
+            client.propose_weights(&proposal.proposed_weights);
         }
 
         proposal.executed = true;
@@ -362,6 +384,8 @@ mod tests {
     use soroban_sdk::{
         testutils::{Address as _, Events, Ledger},
         Env, TryIntoVal,
+        testutils::{Address as _, Ledger, Events},
+        Env, TryIntoVal
     };
 
     #[test]
@@ -392,7 +416,7 @@ mod tests {
         };
 
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
         assert_eq!(proposal_id, 1);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
@@ -424,6 +448,18 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
 
+        // Advance ledger to pass the timelock
+        let jump = 3_000_000;
+        env.as_contract(&credit_oracle_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // Apply proposed weights in credit-oracle
+        credit_oracle_client.apply_weights();
+
         // Verify credit oracle weights updated
         let active_weights = credit_oracle_client.get_scoring_weights();
         assert_eq!(active_weights.vc_weight, 50);
@@ -454,7 +490,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.quorum_required, 500);
@@ -497,7 +533,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
 
         let voter = Address::generate(&env);
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &0);
@@ -526,7 +562,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
 
         let canceller = Address::generate(&env);
         let reason = Some(soroban_sdk::String::from_str(&env, "Spam proposal"));
@@ -546,6 +582,19 @@ mod tests {
                     
                     let data: (Address, Option<soroban_sdk::String>) = data_val.try_into_val(&env).unwrap();
                     assert_eq!(data.0, canceller);
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id == gov_id {
+                if topics.len() == 2 {
+                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::Symbol::short("invalid"));
+                    if symbol == soroban_sdk::symbol_short!("PropCanc") {
+                        found_event = true;
+                        let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                        assert_eq!(id, proposal_id);
+                        let parsed_data: (Address, Option<soroban_sdk::String>) = data.try_into_val(&env).unwrap();
+                        assert_eq!(parsed_data.0, canceller);
+                        // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
+                        // We will skip strict String value checking for now.
+                    }
                 }
             }
         }
@@ -555,6 +604,11 @@ mod tests {
 
     #[test]
     fn test_initialize_emits_event() {
+    /// Verifies the full execution timelock flow:
+    /// vote passes → advance past voting → execution rejected (timelock) →
+    /// advance past delay → execution succeeds.
+    #[test]
+    fn test_execution_timelock_delays_after_voting_ends() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -584,5 +638,63 @@ mod tests {
         }
 
         assert!(found, "Init event should be emitted");
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        let proposer = Address::generate(&env);
+        // voting_period = 100 ledgers, execution_delay = 50 ledgers
+        let proposal_id =
+            gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.execution_delay_ledgers, 50);
+
+        // Cast enough votes for the proposal to pass
+        let voter = Address::generate(&env);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        // Advance just past voting period but NOT past the execution timelock
+        // sequence = expiry_ledger + 1  (voting done, delay not done)
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101; // past expiry, but only 1 ledger into the delay
+        });
+
+        // Execution must be rejected — timelock not yet expired
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::TimelockNotExpired)));
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(!proposal.executed);
+
+        // Advance past the execution timelock (50 more ledgers)
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+
+        // Execution must now succeed
+        gov_client.execute(&proposal_id);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.executed);
+
+        // Verify weights were applied
+        let active_weights = credit_oracle_client.get_scoring_weights();
+        assert_eq!(active_weights.vc_weight, 50);
+        assert_eq!(active_weights.tx_weight, 20);
+        assert_eq!(active_weights.repayment_weight, 30);
     }
 }

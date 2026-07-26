@@ -77,15 +77,9 @@ function requireEnv(name: string): string {
 }
 
 const issuerSecret = requireEnv("ISSUER_SECRET");
-const identityOracleId =
-  process.env["IDENTITY_ORACLE_ID"] ??
-  "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
-const creditOracleId =
-  process.env["CREDIT_ORACLE_ID"] ??
-  "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
-const revocationRegId =
-  process.env["REVOCATION_REG_ID"] ??
-  "CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX";
+const identityOracleId = requireEnv("IDENTITY_ORACLE_ID");
+const creditOracleId = requireEnv("CREDIT_ORACLE_ID");
+const revocationRegId = requireEnv("REVOCATION_REG_ID");
 const networkPassphrase =
   process.env["NETWORK_PASSPHRASE"] ?? "Test SDF Network ; September 2015";
 const rpcUrl =
