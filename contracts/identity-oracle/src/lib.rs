@@ -332,9 +332,42 @@ impl IdentityOracle {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
+        // Mark the issuer as not trusted (tombstone). We will rebuild the
+        // compact `IssuersIndex` in-memory and write it once so that the
+        // rewrite is atomic from the perspective of contract storage: either
+        // the function completes and both the tombstone + new index are
+        // written, or the call aborts and nothing is changed.
         env.storage()
             .persistent()
             .set(&DataKey::TrustedIssuer(issuer.clone()), &false);
+
+        // Read the append-only index and construct a compacted vector of
+        // currently-trusted issuers. Do all work in-memory and perform a
+        // single `set` at the end so partial progress is never persisted.
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::IssuersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedIssuer(addr.clone()))
+                .unwrap_or(false);
+            if is_trusted {
+                compacted.push_back(addr);
+            }
+        }
+
+        // Write the compacted index once. If this call fails (e.g. out of
+        // gas), the entire transaction will abort and the previous
+        // `TrustedIssuer` tombstone write will be rolled back too.
+        env.storage()
+            .persistent()
+            .set(&DataKey::IssuersIndex, &compacted);
 
         env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
