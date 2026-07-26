@@ -1,4 +1,5 @@
 #![no_std]
+use identity_oracle::IdentityOracleClient;
 use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal};
 
 pub const MIN_SCORE: u32 = 300;
@@ -51,6 +52,12 @@ pub enum DataKey {
     IdentityOracleId,
     /// Number of ledgers to wait before recomputing score
     ComputeCooldownLedgers,
+    /// Whether to weight each active VC by its issuer's tier (weight in basis
+    /// points). When `false` (default) each active VC contributes exactly 1
+    /// to the count; when `true`, a Tier-3 (100 bps) VC counts as 1, a
+    /// Tier-2 (50 bps) VC counts as 0.5, a Tier-1 (25 bps) as 0.25, and a
+    /// Tier-0 (0 bps) contributes nothing.
+    UseIssuerTierWeighting,
 }
 
 /// Credit score record with metadata
@@ -235,13 +242,33 @@ impl CreditOracle {
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
+        let tier_weighting_enabled: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::UseIssuerTierWeighting)
+            .unwrap_or(false);
+
         // Cross-contract lookup takes precedence if configured
         if let Some(identity_oracle_id) = env.storage().instance().get::<_, Address>(&DataKey::IdentityOracleId) {
-            vc_count = env.invoke_contract::<u32>(
-                &identity_oracle_id,
-                &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
-                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
-            );
+            if tier_weighting_enabled {
+                // Weighted path: sum each active VC's issuer-tier weight (in basis points),
+                // then divide by 100 to get the effective VC count on the same scale as
+                // the unweighted path (1 VC at Tier-3 = 1 effective count).
+                let identity_client = IdentityOracleClient::new(&env, &identity_oracle_id);
+                let vc_details = identity_client.get_vc_details(&subject);
+                let mut total_weight_bps: u64 = 0;
+                for record in vc_details.iter() {
+                    let issuer_weight = identity_client.get_issuer_tier(&record.issuer) as u64;
+                    total_weight_bps = total_weight_bps.saturating_add(issuer_weight);
+                }
+                vc_count = (total_weight_bps / 100) as u32;
+            } else {
+                vc_count = env.invoke_contract::<u32>(
+                    &identity_oracle_id,
+                    &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
+                    soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+                );
+            }
         }
 
         let vc_score = (vc_count * 20).min(100);
@@ -408,6 +435,39 @@ impl CreditOracle {
             .instance()
             .get(&DataKey::ComputeCooldownLedgers)
             .unwrap_or(1) // Default to 1 ledger as described in docs
+    }
+
+    /// Enable or disable issuer tier-based VC weighting in `compute_score`.
+    ///
+    /// When enabled, each active VC contributes (issuer_weight_bps / 100) to
+    /// the effective VC count instead of 1 — so Tier-3 VCs count fully,
+    /// Tier-2 count at 50%, Tier-1 at 25%, and Tier-0 at 0%.
+    ///
+    /// Auth: admin only.
+    pub fn set_use_issuer_tier_weighting(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::UseIssuerTierWeighting, &enabled);
+        env.events()
+            .publish((symbol_short!("TierWtEn"),), enabled);
+        Ok(())
+    }
+
+    /// Returns whether issuer tier-based VC weighting is currently enabled.
+    pub fn get_use_issuer_tier_weighting(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::UseIssuerTierWeighting)
+            .unwrap_or(false)
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.

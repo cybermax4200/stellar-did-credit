@@ -582,6 +582,184 @@ mod tests {
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
     #[test]
+    fn test_issuer_high_revocation_rate_produces_lower_scores() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Link governance -> identity-oracle so it can adjust tiers.
+        gov.set_identity_oracle(&admin, &identity_id);
+
+        // Link credit-oracle -> identity-oracle and enable tier weighting.
+        credit.set_identity_oracle(&identity_id);
+        credit.set_use_issuer_tier_weighting(&admin, &true);
+        assert!(credit.get_use_issuer_tier_weighting());
+
+        // Two issuers. We will give one a very high revocation ratio
+        // (>= 30% dropped to Tier 0) and one a very low ratio (Tier 3).
+        let good_issuer = soroban_sdk::Address::generate(&env);
+        let bad_issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&good_issuer);
+        identity.register_issuer(&bad_issuer);
+
+        // --- Good issuer: issue 5 VCs, revoke none. Tier should remain 3. ---
+        let good_subject = soroban_sdk::Address::generate(&env);
+        for i in 0..5u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = 10;
+            hash_arr[1] = i;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            identity.anchor_vc(&good_issuer, &good_subject, &vc_hash);
+        }
+        let good_profile = identity.get_issuer_profile(&good_issuer);
+        assert_eq!(good_profile.vcs_issued, 5);
+        assert_eq!(good_profile.vcs_revoked, 0);
+        assert_eq!(good_profile.active, true);
+
+        // Recommendation for good issuer exists (sample size >= 5) and is Tier 3.
+        let rec_good = identity.get_recommended_issuer_tier(&good_issuer);
+        assert_eq!(rec_good, Some(3));
+        let good_new_tier = gov.adjust_issuer_tier(&admin, &good_issuer).unwrap();
+        assert_eq!(good_new_tier, 3);
+        assert_eq!(identity.get_issuer_tier(&good_issuer), 100);
+
+        // --- Bad issuer: issue 5 VCs, revoke 3 out of 5 (60% -> Tier 0). ---
+        let bad_subject = soroban_sdk::Address::generate(&env);
+        let mut bad_vc_hashes = soroban_sdk::Vec::new(&env);
+        for i in 0..5u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = 20;
+            hash_arr[1] = i;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            identity.anchor_vc(&bad_issuer, &bad_subject, &vc_hash);
+            bad_vc_hashes.push_back(vc_hash);
+        }
+        for i in 0..3usize {
+            let vc_hash = bad_vc_hashes.get(i as u32).unwrap();
+            identity.mark_vc_revoked(&bad_issuer, &bad_subject, &vc_hash);
+        }
+        let bad_profile = identity.get_issuer_profile(&bad_issuer);
+        assert_eq!(bad_profile.vcs_issued, 5);
+        assert_eq!(bad_profile.vcs_revoked, 3);
+
+        // 3/5 = 60% revocation ratio -> recommend Tier 0 (>= 30% threshold)
+        let rec_bad = identity.get_recommended_issuer_tier(&bad_issuer);
+        assert_eq!(rec_bad, Some(0));
+        let bad_new_tier = gov.adjust_issuer_tier(&admin, &bad_issuer).unwrap();
+        assert_eq!(bad_new_tier, 0);
+        // Tier 0 -> 0 bps weight
+        assert_eq!(identity.get_issuer_tier(&bad_issuer), 0);
+
+        // Metric guard: re-revoking a VC must NOT double-increment vcs_revoked.
+        identity.mark_vc_revoked(
+            &bad_issuer,
+            &bad_subject,
+            &bad_vc_hashes.get(0).unwrap(),
+        );
+        let bad_profile_2 = identity.get_issuer_profile(&bad_issuer);
+        assert_eq!(bad_profile_2.vcs_revoked, 3, "revocation must not double count");
+
+        // --- Sybil resistance check: deregister + reregister preserves metrics ---
+        identity.deregister_issuer(&bad_issuer);
+        let dereg_profile = identity.get_issuer_profile(&bad_issuer);
+        assert_eq!(dereg_profile.active, false);
+        assert_eq!(dereg_profile.vcs_issued, 5);
+        assert_eq!(dereg_profile.vcs_revoked, 3);
+        assert_eq!(dereg_profile.tier, 0);
+
+        identity.register_issuer(&bad_issuer);
+        let rereg_profile = identity.get_issuer_profile(&bad_issuer);
+        assert_eq!(rereg_profile.active, true, "reregister must flip active=true");
+        assert_eq!(rereg_profile.vcs_issued, 5, "metrics must be preserved across reregister");
+        assert_eq!(rereg_profile.vcs_revoked, 3, "metrics must be preserved across reregister");
+        assert_eq!(rereg_profile.tier, 0, "tier must be preserved across reregister");
+
+        // --- Score comparison: with tier weighting enabled, bad issuer's
+        //     subject must score strictly lower than good issuer's subject,
+        //     even though both started with 5 VCs anchored. ---
+        // First, re-issue the 2 non-revoked VCs for bad_subject to a fresh
+        // "comparable" subject so both have 5 *active* anchored VCs, just
+        // issued by issuers at different tiers.
+        let good_weighted_subject = soroban_sdk::Address::generate(&env);
+        for i in 0..5u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = 30;
+            hash_arr[1] = i;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            identity.anchor_vc(&good_issuer, &good_weighted_subject, &vc_hash);
+        }
+        // Bad issuer still at Tier 0 (0 bps). Issue 5 VCs to a "bad_subject_scored".
+        let bad_weighted_subject = soroban_sdk::Address::generate(&env);
+        for i in 0..5u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = 40;
+            hash_arr[1] = i;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            identity.anchor_vc(&bad_issuer, &bad_weighted_subject, &vc_hash);
+        }
+        // Active count for both is 5.
+        assert_eq!(identity.get_active_vc_count(&good_weighted_subject), 5);
+        assert_eq!(identity.get_active_vc_count(&bad_weighted_subject), 5);
+
+        // Compute scores for both subjects using identical tx + repayment data
+        // so the only difference is issuer-tier weighted VC count.
+        let lender = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_lender(&admin, &lender);
+        credit.register_feeder(&admin, &feeder);
+        credit.update_tx_stats(
+            &feeder,
+            &good_weighted_subject,
+            &TxStats {
+                volume_30d: 0,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            },
+        );
+        credit.update_tx_stats(
+            &feeder,
+            &bad_weighted_subject,
+            &TxStats {
+                volume_30d: 0,
+                tx_count_30d: 0,
+                avg_counterparties: 0,
+            },
+        );
+        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        let good_score = credit.compute_score(&good_weighted_subject);
+        let bad_score = credit.compute_score(&bad_weighted_subject);
+
+        assert!(
+            good_score > bad_score,
+            "good-tier issuer (Tier 3, 5 VCs) should produce higher score than bad-tier issuer (Tier 0, 5 VCs). got good={} bad={}",
+            good_score, bad_score
+        );
+
+        // Baseline without tier weighting: scores should be identical with
+        // the flag off (both subjects have 5 active VCs).
+        credit.set_use_issuer_tier_weighting(&admin, &false);
+        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        let good_score_unweighted = credit.compute_score(&good_weighted_subject);
+        let bad_score_unweighted = credit.compute_score(&bad_weighted_subject);
+        assert_eq!(
+            good_score_unweighted, bad_score_unweighted,
+            "without tier weighting, 5 VCs from any issuer should score equal"
+        );
+    }
+
+    #[test]
     fn test_governance_execution_timelock_integration() {
         let env = Env::default();
         env.mock_all_auths();

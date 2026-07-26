@@ -4,6 +4,7 @@
 //! Provides on-chain proposal creation, voting, and execution that can
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle::{CreditOracleClient, ScoringWeights};
+use identity_oracle::IdentityOracleClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
@@ -45,6 +46,9 @@ pub enum DataKey {
     Admin,
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
+    /// Address of the identity-oracle contract this governance controls for
+    /// issuer tier management.
+    IdentityOracle,
     /// Monotonically increasing counter used to assign proposal IDs.
     NextProposalId,
     /// Default quorum (minimum total votes) required for proposal execution.
@@ -117,6 +121,30 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+        Ok(())
+    }
+
+    /// Set the identity-oracle contract address used for issuer tier management
+    /// via `recommend_issuer_tier` and `adjust_issuer_tier`.
+    ///
+    /// Auth: admin only.
+    pub fn set_identity_oracle(
+        env: Env,
+        admin: Address,
+        identity_oracle: Address,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::IdentityOracle, &identity_oracle);
         Ok(())
     }
 
@@ -353,6 +381,66 @@ impl Governance {
         env.storage()
             .persistent()
             .get(&DataKey::Proposal(proposal_id))
+    }
+
+    /// Queries the identity-oracle for the recommended tier level (0-3) for
+    /// an issuer based on its current revocation ratio.
+    ///
+    /// Returns `None` if the issuer has issued fewer than
+    /// `MIN_ISSUER_SAMPLE_SIZE` VCs (avoids volatility with too-few samples).
+    ///
+    /// Requires that `set_identity_oracle` was called first.
+    pub fn recommend_issuer_tier(env: Env, issuer: Address) -> Option<u32> {
+        let identity_oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityOracle)
+            .expect("identity oracle not set");
+        let client = IdentityOracleClient::new(&env, &identity_oracle);
+        client.get_recommended_issuer_tier(&issuer)
+    }
+
+    /// Adjusts an issuer's tier level on the identity-oracle to the
+    /// recommended tier computed from its revocation metrics.
+    ///
+    /// This is a governance-gated operation: the admin must sign to invoke
+    /// the cross-contract `set_issuer_tier_level` on the identity-oracle.
+    ///
+    /// Returns the newly applied tier level, or the current tier when no
+    /// recommendation exists (below minimum sample size).
+    pub fn adjust_issuer_tier(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+    ) -> Result<u32, GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let identity_oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::IdentityOracle)
+            .expect("identity oracle not set");
+        let client = IdentityOracleClient::new(&env, &identity_oracle);
+
+        let recommended = client.get_recommended_issuer_tier(&issuer);
+        let new_tier = if let Some(t) = recommended {
+            client.set_issuer_tier_level(&admin, &issuer, &t);
+            t
+        } else {
+            let profile = client.get_issuer_profile(&issuer);
+            profile.tier
+        };
+        env.events()
+            .publish((symbol_short!("IssAdjTir"),), (issuer, new_tier));
+        Ok(new_tier)
     }
 
     /// Cancel a governance proposal.

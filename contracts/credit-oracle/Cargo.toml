@@ -8,9 +8,9 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
+identity-oracle = { path = "../identity-oracle" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
-identity-oracle = { path = "../identity-oracle" }
 proptest = "1"
 

@@ -113,6 +113,12 @@ pub enum DataKey {
     IssuerTier(Address),
     /// Credential type label for a subject's anchored VC hash.
     VCCredentialType(Address, BytesN<32>),
+    /// Reputation profile tracking per-issuer metrics and tier level.
+    /// Persisted across deregister/reregister cycles for Sybil resistance.
+    IssuerProfile(Address),
+    /// Per-VC flag to guard against double-counting revocations in
+    /// `IssuerProfile.vcs_revoked`. Keyed by issuer + vc_hash.
+    RevocationCounted(Address, BytesN<32>),
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -129,6 +135,26 @@ pub struct VCRecord {
     pub revoked: bool,
 }
 
+/// Reputation profile for a credential issuer.
+///
+/// Metrics are preserved across deregister/reregister cycles (Sybil resistance)
+/// and never reset to zero. Only the `active` flag flips on registration changes.
+#[contracttype]
+#[derive(Clone)]
+pub struct IssuerProfile {
+    /// Whether this issuer is currently registered as active (non-deregistered).
+    pub active: bool,
+    /// Total number of verifiable credentials ever anchored by this issuer.
+    /// Never decremented, even on revocation.
+    pub vcs_issued: u32,
+    /// Total number of VCs issued by this issuer that transitioned to revoked.
+    /// Only increments the *first* time a given VC is marked revoked to
+    /// prevent double-counting (Metric Guard).
+    pub vcs_revoked: u32,
+    /// Current tier level: 0 (suspended) to 3 (gold).
+    pub tier: u32,
+}
+
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
@@ -136,6 +162,26 @@ const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
+/// Minimum allowed issuer trust multiplier (Tier 0 suspended).
+pub const MIN_ISSUER_TIER_BPS: u32 = 0;
+/// Minimum VCs issued before tier recommendations are computed.
+pub const MIN_ISSUER_SAMPLE_SIZE: u32 = 5;
+/// Tier 3 (Gold) weight in basis points.
+pub const TIER3_WEIGHT_BPS: u32 = 100;
+/// Tier 2 (Silver) weight in basis points.
+pub const TIER2_WEIGHT_BPS: u32 = 50;
+/// Tier 1 (Bronze) weight in basis points.
+pub const TIER1_WEIGHT_BPS: u32 = 25;
+/// Tier 0 (Suspended) weight in basis points.
+pub const TIER0_WEIGHT_BPS: u32 = 0;
+/// Revocation ratio threshold (basis points) for Tier 3 (Gold): ratio < threshold.
+pub const TIER3_MAX_REVOCATION_RATIO_BPS: u32 = 500;
+/// Revocation ratio threshold (basis points) for Tier 2 (Silver): ratio < threshold.
+pub const TIER2_MAX_REVOCATION_RATIO_BPS: u32 = 1500;
+/// Revocation ratio threshold (basis points) for Tier 1 (Bronze): ratio < threshold.
+pub const TIER1_MAX_REVOCATION_RATIO_BPS: u32 = 3000;
+/// Default issuer tier level (Gold = 3).
+pub const DEFAULT_ISSUER_TIER_LEVEL: u32 = 3;
 
 fn generic_credential_type(_env: &Env) -> Symbol {
     symbol_short!("generic")
@@ -158,6 +204,76 @@ fn store_credential_type(
         &DataKey::VCCredentialType(subject.clone(), vc_hash.clone()),
         &credential_type,
     );
+}
+
+/// Maps a tier level (0-3) to its corresponding weight in basis points.
+pub fn tier_level_to_weight_bps(tier: u32) -> u32 {
+    match tier {
+        3 => TIER3_WEIGHT_BPS,
+        2 => TIER2_WEIGHT_BPS,
+        1 => TIER1_WEIGHT_BPS,
+        _ => TIER0_WEIGHT_BPS,
+    }
+}
+
+fn load_issuer_profile(env: &Env, issuer: &Address) -> IssuerProfile {
+    env.storage()
+        .persistent()
+        .get(&DataKey::IssuerProfile(issuer.clone()))
+        .unwrap_or(IssuerProfile {
+            active: false,
+            vcs_issued: 0,
+            vcs_revoked: 0,
+            tier: DEFAULT_ISSUER_TIER_LEVEL,
+        })
+}
+
+fn issuer_profile_exists(env: &Env, issuer: &Address) -> bool {
+    env.storage()
+        .persistent()
+        .has(&DataKey::IssuerProfile(issuer.clone()))
+}
+
+fn store_issuer_profile_only(env: &Env, issuer: &Address, profile: &IssuerProfile) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::IssuerProfile(issuer.clone()), profile);
+}
+
+fn store_issuer_profile_and_sync_weight(env: &Env, issuer: &Address, profile: &IssuerProfile) {
+    env.storage()
+        .persistent()
+        .set(&DataKey::IssuerProfile(issuer.clone()), profile);
+    let weight_bps = tier_level_to_weight_bps(profile.tier);
+    env.storage()
+        .persistent()
+        .set(&DataKey::IssuerTier(issuer.clone()), &weight_bps);
+}
+
+/// Computes the recommended tier level (0-3) based on the issuer's current
+/// revocation ratio (in basis points). Returns `None` if the sample size is
+/// below `MIN_ISSUER_SAMPLE_SIZE` (avoids volatility with too-few data points).
+pub fn recommend_issuer_tier(vcs_issued: u32, vcs_revoked: u32) -> Option<u32> {
+    if vcs_issued < MIN_ISSUER_SAMPLE_SIZE {
+        return None;
+    }
+    if vcs_issued == 0 {
+        return Some(DEFAULT_ISSUER_TIER_LEVEL);
+    }
+    let ratio_bps = (vcs_revoked as u64)
+        .checked_mul(10_000u64)
+        .unwrap_or(u64::MAX)
+        .checked_div(vcs_issued as u64)
+        .unwrap_or(0) as u32;
+    if ratio_bps < TIER3_MAX_REVOCATION_RATIO_BPS {
+        Some(3)
+    } else if ratio_bps < TIER2_MAX_REVOCATION_RATIO_BPS {
+        Some(2)
+    } else if ratio_bps < TIER1_MAX_REVOCATION_RATIO_BPS {
+        Some(1)
+    } else {
+        Some(0)
+    }
 }
 
 /// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
@@ -292,6 +408,10 @@ impl IdentityOracle {
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
     /// Auth: admin only — verified via `require_admin`.
+    ///
+    /// Sybil resistance: if the issuer was previously registered (then deregistered),
+    /// its historical `IssuerProfile` metrics (`vcs_issued`, `vcs_revoked`, `tier`)
+    /// are preserved rather than reset.
     pub fn register_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage()
@@ -312,6 +432,21 @@ impl IdentityOracle {
         }
 
         env.storage().persistent().set(&issuer_key, &true);
+
+        // Restore or create issuer profile, preserving metrics across reregister.
+        // On first-time registration, sync IssuerTier weight from the default
+        // tier level. On reregistration (profile exists), flip only the active
+        // flag via `store_issuer_profile_only` to avoid overwriting a custom
+        // IssuerTier weight previously set via `set_issuer_tier`.
+        let first_registration = !issuer_profile_exists(&env, &issuer);
+        let mut profile = load_issuer_profile(&env, &issuer);
+        profile.active = true;
+        if first_registration {
+            store_issuer_profile_and_sync_weight(&env, &issuer, &profile);
+        } else {
+            store_issuer_profile_only(&env, &issuer, &profile);
+        }
+
         env.events().publish((symbol_short!("IssReg"),), issuer);
         Ok(())
     }
@@ -325,6 +460,10 @@ impl IdentityOracle {
     /// number of registered issuers. `list_issuers` is what hides
     /// deregistered issuers from the returned set.
     ///
+    /// The issuer's `IssuerProfile` (vcs_issued, vcs_revoked, tier) is
+    /// preserved in storage so reregistration can not reset reputation
+    /// (Sybil resistance) — only the `active` flag is flipped to false.
+    ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
@@ -335,6 +474,12 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::TrustedIssuer(issuer.clone()), &false);
+
+        // Preserve reputation metrics: flip only active=false on profile.
+        // Use `_only` variant to avoid overwriting a custom IssuerTier weight.
+        let mut profile = load_issuer_profile(&env, &issuer);
+        profile.active = false;
+        store_issuer_profile_only(&env, &issuer, &profile);
 
         env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
@@ -491,6 +636,13 @@ impl IdentityOracle {
 
         store_credential_type(&env, &subject, &vc_hash, credential_type);
 
+        let mut issuer_profile = load_issuer_profile(&env, &issuer);
+        issuer_profile.vcs_issued = issuer_profile
+            .vcs_issued
+            .checked_add(1)
+            .expect("issuer vcs_issued overflow");
+        store_issuer_profile_only(&env, &issuer, &issuer_profile);
+
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
         env.storage()
@@ -561,6 +713,19 @@ impl IdentityOracle {
             } else {
                 seed_active_vc_count(&env, &subject);
             }
+
+            // Metric Guard: only count this issuer-level revocation once per VC
+            // to avoid double-counting. Uses RevocationCounted key.
+            let counted_key = DataKey::RevocationCounted(issuer.clone(), vc_hash.clone());
+            if !env.storage().persistent().has(&counted_key) {
+                env.storage().persistent().set(&counted_key, &true);
+                let mut issuer_profile = load_issuer_profile(&env, &issuer);
+                issuer_profile.vcs_revoked = issuer_profile
+                    .vcs_revoked
+                    .checked_add(1)
+                    .expect("issuer vcs_revoked overflow");
+                store_issuer_profile_only(&env, &issuer, &issuer_profile);
+            }
         } else if load_active_vc_count(&env, &subject).is_none() {
             seed_active_vc_count(&env, &subject);
         }
@@ -629,7 +794,7 @@ impl IdentityOracle {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
-    /// Set an issuer's trust multiplier in basis points (100 = 1×, 200 = 2×).
+    /// Set an issuer's trust multiplier in basis points (0 = 0×, 100 = 1×, 200 = 2×).
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn set_issuer_tier(
@@ -643,7 +808,7 @@ impl IdentityOracle {
         if admin != stored {
             return Err(IdentityOracleError::NotAuthorized);
         }
-        if weight_bps == 0 || weight_bps > MAX_ISSUER_TIER_BPS {
+        if weight_bps > MAX_ISSUER_TIER_BPS {
             panic!("invalid issuer tier");
         }
         env.storage()
@@ -663,6 +828,49 @@ impl IdentityOracle {
             .persistent()
             .get(&DataKey::IssuerTier(issuer))
             .unwrap_or(DEFAULT_ISSUER_TIER_BPS)
+    }
+
+    /// Returns the full `IssuerProfile` for an issuer (active flag, metrics, tier level).
+    /// Defaults are returned for an issuer that has never been registered.
+    pub fn get_issuer_profile(env: Env, issuer: Address) -> IssuerProfile {
+        load_issuer_profile(&env, &issuer)
+    }
+
+    /// Sets an issuer's tier level (0 = suspended, 1 = bronze, 2 = silver, 3 = gold).
+    /// Updates both the `IssuerProfile.tier` and the `IssuerTier` weight_bps storage.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn set_issuer_tier_level(
+        env: Env,
+        admin: Address,
+        issuer: Address,
+        tier_level: u32,
+    ) -> Result<(), IdentityOracleError> {
+        ensure_not_paused(&env)?;
+        let stored = require_admin(&env);
+        if admin != stored {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        if tier_level > 3 {
+            panic!("invalid issuer tier level");
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        let mut profile = load_issuer_profile(&env, &issuer);
+        profile.tier = tier_level;
+        store_issuer_profile_and_sync_weight(&env, &issuer, &profile);
+        env.events()
+            .publish((symbol_short!("IssTirLvl"),), (issuer, tier_level));
+        Ok(())
+    }
+
+    /// Returns the recommended tier level based on the issuer's current metrics,
+    /// or `None` if fewer than `MIN_ISSUER_SAMPLE_SIZE` VCs have been issued
+    /// (avoids volatile recommendations with too-few data points).
+    pub fn get_recommended_issuer_tier(env: Env, issuer: Address) -> Option<u32> {
+        let profile = load_issuer_profile(&env, &issuer);
+        recommend_issuer_tier(profile.vcs_issued, profile.vcs_revoked)
     }
 
     /// Backwards-compatible wrapper.
