@@ -648,4 +648,88 @@ mod tests {
         assert_eq!(weights.tx_weight, 20);
         assert_eq!(weights.repayment_weight, 30);
     }
+
+    #[test]
+    fn test_governance_integration_deploy_all_contracts_and_admin_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy all four contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let gov_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        // Initialize all contracts with the same admin for simplicity
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Wire identity <-> revocation and credit <-> identity
+        identity.set_revocation_registry(&revocation_id);
+        credit.set_identity_oracle(&identity_id).unwrap();
+
+        // 1) Two-step admin transfer on `credit`: admin -> new_admin
+        let new_admin = soroban_sdk::Address::generate(&env);
+        // Propose new admin (signed by current admin)
+        credit.propose_new_admin(&new_admin).unwrap();
+        // Accept as new admin
+        credit.accept_admin(&new_admin).unwrap();
+
+        // Verify admin changed by exercising an admin-only call using `new_admin`
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&new_admin, &feeder).unwrap();
+
+        // 2) Transfer oracle admin to governance contract
+        credit.propose_new_admin(&gov_id).unwrap();
+        // Governance accepts the oracle admin on its behalf
+        gov.accept_oracle_admin().unwrap();
+
+        // 3) Governance proposal lifecycle: create -> vote -> execute -> apply
+        let proposed_weights = ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 25,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32);
+
+        // Cast votes to pass the proposal
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.vote(&voter, &proposal_id, &true, &200i128).unwrap();
+
+        // Advance ledger past voting expiry
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 11;
+        });
+
+        // Execute proposal (governance is now credit admin and will propose weights)
+        gov.execute(&proposal_id).unwrap();
+
+        // Advance ledger to pass credit-oracle timelock and apply the proposed weights
+        let jump = 100_000u32;
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        credit.apply_weights();
+
+        // Verify the credit oracle weights were updated
+        let active_weights = credit.get_scoring_weights();
+        assert_eq!(active_weights.vc_weight, 45);
+        assert_eq!(active_weights.tx_weight, 25);
+        assert_eq!(active_weights.repayment_weight, 30);
+    }
 }
