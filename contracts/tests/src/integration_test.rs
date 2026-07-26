@@ -612,6 +612,10 @@ mod tests {
 
         // Cast passing votes
         let voter = soroban_sdk::Address::generate(&env);
+        
+        // Register voter with sufficient weight
+        gov.register_voter(&admin, &voter, &200);
+        
         gov.vote(&voter, &proposal_id, &true, &200);
 
         // Step 1: advance just past voting period (expiry_ledger + 1)
@@ -705,6 +709,10 @@ mod tests {
 
         // Cast votes to pass the proposal
         let voter = soroban_sdk::Address::generate(&env);
+        
+        // Register voter with sufficient weight
+        gov.register_voter(&admin, &voter, &200i128);
+        
         gov.vote(&voter, &proposal_id, &true, &200i128).unwrap();
 
         // Advance ledger past voting expiry
