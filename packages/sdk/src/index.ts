@@ -21,6 +21,7 @@ export interface ScoreRecord {
   vcCount: number;
   repaymentRate: number;
   txVolume30d: bigint;
+  previousScore: number | null;
 }
 
 export interface TxStats {
@@ -569,6 +570,10 @@ function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord
     vcCount: Number(raw["vc_count"]),
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
+    previousScore:
+      raw["previous_score"] != null
+        ? Number(raw["previous_score"])
+        : null,
   };
 }
 

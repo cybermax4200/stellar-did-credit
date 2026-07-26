@@ -67,6 +67,8 @@ pub struct ScoreRecord {
     pub repayment_rate: u32,
     /// Transaction volume in last 30 days
     pub tx_volume_30d: i128,
+    /// Previous credit score, if one exists
+    pub previous_score: Option<u32>,
 }
 
 /// Transaction statistics for a user
@@ -275,6 +277,7 @@ impl CreditOracle {
                                 .checked_div(repayment.total_count)
                                 .unwrap_or(0);
 
+        let mut previous_score: Option<u32> = None;
         let mut needs_write = true;
         if let Some(prev) = env.storage().persistent().get::<_, ScoreRecord>(&DataKey::Score(subject.clone())) {
             if prev.score == score 
@@ -284,6 +287,7 @@ impl CreditOracle {
             {
                 needs_write = false;
             }
+            previous_score = Some(prev.score);
         }
 
         if needs_write {
@@ -293,6 +297,7 @@ impl CreditOracle {
                 vc_count,
                 repayment_rate,
                 tx_volume_30d: tx_stats.volume_30d,
+                previous_score,
             });
         }
 

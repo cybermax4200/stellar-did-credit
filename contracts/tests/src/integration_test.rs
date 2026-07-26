@@ -799,4 +799,59 @@ mod tests {
         let after_rereg = identity.list_issuers();
         assert_eq!(after_rereg.len(), 1);
     }
+
+    /// Verify that computing a score twice captures the previous score in the record.
+    #[test]
+    fn test_score_record_preserves_previous_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // First computation: base score with no data
+        let first_score = credit.compute_score(&subject);
+        assert_eq!(first_score, 300);
+
+        // Verify previous_score is None on first write
+        let record1 = credit.get_score(&subject).unwrap();
+        assert_eq!(record1.previous_score, None);
+
+        // Now add some data so the second computation yields a different score
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        credit.set_vc_count(&feeder, &subject, &1);
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+
+        // Advance ledger so the new write is not skipped as unchanged
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // Second computation
+        let second_score = credit.compute_score(&subject);
+        assert!(second_score > first_score);
+
+        // Verify previous_score is set to the first score
+        let record2 = credit.get_score(&subject).unwrap();
+        assert_eq!(record2.previous_score, Some(first_score));
+        assert_eq!(record2.score, second_score);
+    }
 }
