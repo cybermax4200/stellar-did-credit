@@ -86,3 +86,28 @@ describe("Feeder graceful shutdown", () => {
     setTimeoutSpy.mockRestore();
   });
 });
+
+describe("Horizon rate limiting handling", () => {
+  it("retries on 429 and respects Retry-After header", async () => {
+    const consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Mock Horizon.Server to simulate a 429 on first call with Retry-After=1
+    const mockCall = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        const err: any = new Error("429 Too Many Requests");
+        err.response = { status: 429, headers: new Map([["retry-after", "1"]]) };
+        throw err;
+      })
+      .mockImplementationOnce(() => Promise.resolve({ records: [] }));
+
+    const payments = () => ({ forAccount: () => ({ order: () => ({ limit: () => ({ call: mockCall }) }) }) });
+    (Horizon as any).Server = jest.fn().mockImplementation(() => ({ payments }));
+
+    const stats = await (await import("./index")).fetchHorizonStats("https://horizon.example", "GADDR");
+    expect(stats.txCount30d).toBe(0);
+    expect(consoleWarn).toHaveBeenCalled();
+
+    consoleWarn.mockRestore();
+  });
+});

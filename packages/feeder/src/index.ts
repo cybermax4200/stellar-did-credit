@@ -104,12 +104,46 @@ export async function fetchHorizonStats(
   // Map from transaction hash → set of distinct counterparty addresses
   const counterpartiesPerTx = new Map<string, Set<string>>();
 
-  let page = await horizon
-    .payments()
-    .forAccount(address)
-    .order("desc")
-    .limit(200)
-    .call();
+  // Rate-limit aware call helper: if Horizon responds with 429 and a
+  // `Retry-After` header, wait that duration and retry.
+  async function callWithHorizonRateLimit<T>(fn: () => Promise<T>): Promise<T> {
+    const maxRateLimitRetries = 5;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const status = err?.response?.status;
+        const headers = err?.response?.headers;
+        if (status === 429 && headers) {
+          // Try to read `Retry-After` header (seconds). Fall back to a small delay.
+          let retryAfterMs = 1000;
+          try {
+            const ra =
+              typeof headers.get === "function"
+                ? headers.get("retry-after")
+                : headers["retry-after"];
+            if (ra) {
+              const sec = Number(ra);
+              if (!Number.isNaN(sec)) retryAfterMs = Math.max(500, sec * 1000);
+            }
+          } catch (e) {
+            // ignore header parsing errors
+          }
+          console.warn(
+            `[feeder] Horizon rate-limited (429); retrying in ${retryAfterMs}ms`,
+          );
+          if (attempt >= maxRateLimitRetries) throw err;
+          await sleep(retryAfterMs);
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  let page = await callWithHorizonRateLimit(() =>
+    horizon.payments().forAccount(address).order("desc").limit(200).call(),
+  );
 
   outer: while (page.records.length > 0) {
     for (const record of page.records) {
@@ -149,7 +183,7 @@ export async function fetchHorizonStats(
       }
     }
 
-    page = await page.next();
+    page = await callWithHorizonRateLimit(() => page.next());
   }
 
   const txCount30d = txHashes.size;
@@ -548,7 +582,26 @@ async function withExponentialBackoff<T>(
         throw err;
       }
 
-      const delayMs = delayBase * 2 ** attempt;
+      // If the error carries a `Retry-After` header, prefer that delay.
+      let retryAfterMs: number | undefined = undefined;
+      try {
+        const status = (err as any)?.response?.status;
+        const headers = (err as any)?.response?.headers;
+        if (status === 429 && headers) {
+          const ra =
+            typeof headers.get === "function"
+              ? headers.get("retry-after")
+              : headers["retry-after"];
+          if (ra) {
+            const sec = Number(ra);
+            if (!Number.isNaN(sec)) retryAfterMs = Math.max(500, sec * 1000);
+          }
+        }
+      } catch (e) {
+        /* ignore */
+      }
+
+      const delayMs = retryAfterMs ?? delayBase * 2 ** attempt;
       console.warn(
         `[feeder] retry ${attempt + 1}/${retries} for ${operationName} in ${delayMs}ms:`,
         err instanceof Error ? err.message : err,
