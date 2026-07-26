@@ -45,6 +45,25 @@ interface ScoreRecord {
 }
 ```
 
+### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
+
+Computes and persists a subject's credit score on-chain. This method submits a transaction to call `compute_score`, waits for confirmation, and then fetches the updated score.
+
+**Important: Cooldown Interaction**
+The `compute_score` contract method is protected by a configurable cooldown period (`ComputeCooldownLedgers`) to prevent spam and reduce computational load.
+- If you call `computeScore` while the cooldown is active, the contract will reject the transaction.
+- **Fresh Deployments**: Depending on the contract's configuration, the cooldown might apply immediately upon initialization. If your first `computeScore` call fails right after a fresh deployment, you may need to wait for the initial cooldown period (e.g., 1 ledger) to pass.
+
+#### Recommended Cooldown Settings
+
+The cooldown can be configured by the contract admin using `update_compute_cooldown`. The ideal setting depends on the environment:
+
+| Environment | Recommended Cooldown (Ledgers) | Rationale |
+|-------------|--------------------------------|-----------|
+| **Development / Local** | `1` | Allows rapid testing and immediate score recomputation. |
+| **Testnet** | `100` (~8 minutes) | Balances testing convenience with realistic network conditions. |
+| **Mainnet** | `17280` (~24 hours) | Prevents spam, reduces fees, and aligns with typical score update frequencies. |
+
 ### Other methods (coming soon)
 
 - `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain

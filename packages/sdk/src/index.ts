@@ -280,9 +280,15 @@ export class StellarDIDCreditSDK {
    * Submits a signed transaction to the credit-oracle contract, waits for ledger
    * confirmation, then fetches the persisted score via `getScore`.
    *
+   * **Note on Cooldowns:** The `compute_score` contract method is protected by a 
+   * cooldown period (`ComputeCooldownLedgers`). If this method is called while the 
+   * cooldown is active (or immediately after a fresh deployment before the initial 
+   * cooldown has passed), the transaction will fail.
+   *
    * @param payerKeypair - Stellar keypair paying the transaction fee
    * @param subjectAddress - Stellar G... address of the subject
    * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
+   * @throws Error if the transaction fails due to the cooldown period being active
    */
   async computeScore(
     payerKeypair: Keypair,
@@ -308,6 +314,9 @@ export class StellarDIDCreditSDK {
     const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (sim.error && sim.error.toLowerCase().includes("cooldown")) {
+        throw new Error(`computeScore failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
+      }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
 
@@ -321,6 +330,9 @@ export class StellarDIDCreditSDK {
     const response = await this.server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
+      if (response.errorResult && String(response.errorResult).toLowerCase().includes("cooldown")) {
+        throw new Error(`Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
+      }
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
