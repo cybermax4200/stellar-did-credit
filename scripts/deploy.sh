@@ -10,6 +10,7 @@ SOURCE=${SOURCE:-deployer}
 DEPLOYMENTS_FILE=${DEPLOYMENTS_FILE:-}
 RESUME=false
 FUND=false
+INITIALIZE=false
 FRIENDBOT_URL=${FRIENDBOT_URL:-https://friendbot.stellar.org}
 
 # ---------------------------------------------------------------------------
@@ -33,13 +34,17 @@ while [[ $# -gt 0 ]]; do
       FUND=true
       shift
       ;;
+    --initialize)
+      INITIALIZE=true
+      shift
+      ;;
     --help|-h)
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--initialize]" >&2
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--initialize]" >&2
       exit 1
       ;;
   esac
@@ -236,6 +241,7 @@ fi
 # Validate deployer key
 # ---------------------------------------------------------------------------
 DEPLOYER_ADDRESS=$(stellar keys address "$SOURCE" 2>&1) || true
+DEPLOYER_ADDRESS=$(printf '%s' "$DEPLOYER_ADDRESS" | tr -d '\r')
 if [[ ! "$DEPLOYER_ADDRESS" =~ ^G[A-Z2-7]{54}$ ]]; then
   echo "Error: '$SOURCE' key not found. Run: stellar keys generate --global $SOURCE --network $NETWORK" >&2
   exit 1
@@ -247,8 +253,12 @@ if [[ "$FUND" == "true" ]]; then
 fi
 
 # ---------------------------------------------------------------------------
-# Build
+# Build & Deploy
 # ---------------------------------------------------------------------------
+if $INITIALIZE; then
+  echo "✓ Deploying..."
+fi
+
 echo "Building contracts..."
 stellar contract build
 
@@ -293,6 +303,98 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# Optional Initialization, Configuration, & Verification
+# ---------------------------------------------------------------------------
+if $INITIALIZE; then
+  echo "✓ Initializing..."
+
+  initialize_contract() {
+    local contract_name="$1"
+    local contract_id="$2"
+
+    echo "Initializing $contract_name ($contract_id)..."
+    local output
+    if output=$(stellar contract invoke \
+      --id "$contract_id" \
+      --source "$SOURCE" \
+      --network "$NETWORK" \
+      -- initialize \
+      --admin "$DEPLOYER_ADDRESS" 2>&1); then
+      echo "  $contract_name initialized successfully."
+    else
+      if echo "$output" | grep -qE "AlreadyInitialized|Error\(Contract, 1\)"; then
+        echo "  $contract_name is already initialized, skipping."
+      else
+        echo "Error: Failed to initialize $contract_name ($contract_id) during step 'initialize': $output" >&2
+        exit 1
+      fi
+    fi
+  }
+
+  # Dependency order:
+  # 1. identity-oracle
+  initialize_contract "identity-oracle" "$IDENTITY_ID"
+
+  # 2. revocation-registry
+  initialize_contract "revocation-registry" "$REVOCATION_ID"
+
+  # 3. credit-oracle
+  initialize_contract "credit-oracle" "$CREDIT_ID"
+
+  echo "✓ Configuring..."
+  # 4. configure revocation registry on identity-oracle (and cross-contract references)
+  echo "Configuring revocation-registry ($REVOCATION_ID) on identity-oracle ($IDENTITY_ID)..."
+  if output=$(stellar contract invoke \
+    --id "$IDENTITY_ID" \
+    --source "$SOURCE" \
+    --network "$NETWORK" \
+    -- set_revocation_registry \
+    --registry_id "$REVOCATION_ID" 2>&1); then
+    echo "  Revocation registry configured successfully on identity-oracle."
+  else
+    echo "Error: Failed to configure revocation-registry on identity-oracle ($IDENTITY_ID) during step 'configure': $output" >&2
+    exit 1
+  fi
+
+  echo "✓ Verifying..."
+  # Verification step: Invoke read/query methods for every contract
+  echo "Verifying identity-oracle ($IDENTITY_ID)..."
+  if ! output=$(stellar contract invoke \
+    --id "$IDENTITY_ID" \
+    --source "$SOURCE" \
+    --network "$NETWORK" \
+    -- get_issuer_tier \
+    --issuer "$DEPLOYER_ADDRESS" 2>&1); then
+    echo "Error: Verification failed for identity-oracle ($IDENTITY_ID) during step 'verify': $output" >&2
+    exit 1
+  fi
+  echo "  identity-oracle verified successfully."
+
+  echo "Verifying revocation-registry ($REVOCATION_ID)..."
+  if ! output=$(stellar contract invoke \
+    --id "$REVOCATION_ID" \
+    --source "$SOURCE" \
+    --network "$NETWORK" \
+    -- get_revocation_count \
+    --issuer "$DEPLOYER_ADDRESS" 2>&1); then
+    echo "Error: Verification failed for revocation-registry ($REVOCATION_ID) during step 'verify': $output" >&2
+    exit 1
+  fi
+  echo "  revocation-registry verified successfully."
+
+  echo "Verifying credit-oracle ($CREDIT_ID)..."
+  if ! output=$(stellar contract invoke \
+    --id "$CREDIT_ID" \
+    --source "$SOURCE" \
+    --network "$NETWORK" \
+    -- get_scoring_weights 2>&1); then
+    echo "Error: Verification failed for credit-oracle ($CREDIT_ID) during step 'verify': $output" >&2
+    exit 1
+  fi
+  echo "  credit-oracle verified successfully."
+fi
+
+# ---------------------------------------------------------------------------
 # Atomic JSON output
 #
 # deployments.<network>.json is written exactly once, only after every contract
@@ -301,6 +403,21 @@ fi
 # a partially written or malformed JSON file.
 # ---------------------------------------------------------------------------
 echo "Saving to $DEPLOYMENTS_FILE..."
+if $INITIALIZE; then
+cat > "$DEPLOYMENTS_FILE" <<EOF
+{
+  "network": "$NETWORK",
+  "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "initialized": true,
+  "contracts": {
+    "identity-oracle": "$IDENTITY_ID",
+    "credit-oracle": "$CREDIT_ID",
+    "revocation-registry": "$REVOCATION_ID"
+  }
+}
+EOF
+  echo "✓ Deployment complete"
+else
 cat > "$DEPLOYMENTS_FILE" <<EOF
 {
   "network": "$NETWORK",
@@ -312,6 +429,6 @@ cat > "$DEPLOYMENTS_FILE" <<EOF
   }
 }
 EOF
-
-echo "Done." 
+  echo "Done."
+fi 
 
