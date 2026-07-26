@@ -398,74 +398,6 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let score_with_5_vcs = credit.compute_score(&subject);
-    }
-
-    #[test]
-    fn test_list_issuers_reflects_register_and_deregister_operations() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
-
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        let issuer_c = soroban_sdk::Address::generate(&env);
-
-        identity.register_issuer(&issuer_a);
-        identity.register_issuer(&issuer_b);
-        identity.register_issuer(&issuer_c);
-
-        let all = identity.list_issuers();
-        assert_eq!(all.len(), 3);
-
-        identity.deregister_issuer(&issuer_b);
-        let after = identity.list_issuers();
-        assert_eq!(after.len(), 2);
-        // remaining entries should be a and c in some order
-        let mut found_a = false;
-        let mut found_c = false;
-        for i in 0..after.len() {
-            let a = after.get(i).unwrap();
-            if a == issuer_a {
-                found_a = true;
-            }
-            if a == issuer_c {
-                found_c = true;
-            }
-        }
-        assert!(found_a && found_c, "expected issuer_a and issuer_c to remain");
-    }
-
-    #[test]
-    fn test_reregistering_deregistered_issuer_does_not_duplicate_index() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
-
-        let issuer = soroban_sdk::Address::generate(&env);
-
-        identity.register_issuer(&issuer);
-        let first = identity.list_issuers();
-        assert_eq!(first.len(), 1);
-
-        identity.deregister_issuer(&issuer);
-        let after_dereg = identity.list_issuers();
-        assert_eq!(after_dereg.len(), 0);
-
-        // Re-register — should not create a duplicate entry in the compacted index
-        identity.register_issuer(&issuer);
-        let after_rereg = identity.list_issuers();
-        assert_eq!(after_rereg.len(), 1);
-    }
 
         // 16. Update VC count to 2 (after batch revocation) and recompute score
         credit.set_vc_count(&feeder, &subject, &2);
@@ -799,5 +731,72 @@ mod tests {
         assert_eq!(active_weights.vc_weight, 45);
         assert_eq!(active_weights.tx_weight, 25);
         assert_eq!(active_weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_list_issuers_reflects_register_and_deregister_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer_a = soroban_sdk::Address::generate(&env);
+        let issuer_b = soroban_sdk::Address::generate(&env);
+        let issuer_c = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer_a);
+        identity.register_issuer(&issuer_b);
+        identity.register_issuer(&issuer_c);
+
+        let all = identity.list_issuers();
+        assert_eq!(all.len(), 3);
+
+        identity.deregister_issuer(&issuer_b);
+        let after = identity.list_issuers();
+        assert_eq!(after.len(), 2);
+        // remaining entries should be a and c in some order
+        let mut found_a = false;
+        let mut found_c = false;
+        for i in 0..after.len() {
+            let a = after.get(i).unwrap();
+            if a == issuer_a {
+                found_a = true;
+            }
+            if a == issuer_c {
+                found_c = true;
+            }
+        }
+        assert!(found_a && found_c, "expected issuer_a and issuer_c to remain");
+    }
+
+    #[test]
+    fn test_reregistering_deregistered_issuer_does_not_duplicate_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer);
+        let first = identity.list_issuers();
+        assert_eq!(first.len(), 1);
+
+        identity.deregister_issuer(&issuer);
+        let after_dereg = identity.list_issuers();
+        assert_eq!(after_dereg.len(), 0);
+
+        // Re-register — should not create a duplicate entry in the compacted index
+        identity.register_issuer(&issuer);
+        let after_rereg = identity.list_issuers();
+        assert_eq!(after_rereg.len(), 1);
     }
 }
