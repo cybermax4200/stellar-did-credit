@@ -717,4 +717,19 @@ mod tests {
         assert_eq!(list.len(), 1);
         assert_eq!(list.get(0).unwrap(), vc_hash);
     }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, 1)")]
+    fn test_initialize_already_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let admin2 = Address::generate(&env);
+        client.initialize(&admin2);
+    }
 }

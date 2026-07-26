@@ -904,6 +904,201 @@ mod tests {
         // Advance ledger time again
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+        client.record_repayment(&lender, &subject, &1000, &true);
+        client.deregister_lender(&admin, &lender);
+        let result = client.try_record_repayment(&lender, &subject, &1000, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_upgrade_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+    }
+
+    /// When tx_weight = 0, the counterparty bonus contributes nothing to the final score
+    /// because it is a sub-component of tx_score, which is multiplied by tx_weight.
+    #[test]
+    fn test_counterparty_bonus_zero_when_tx_weight_is_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Propose and apply weights with tx_weight = 0
+        client.propose_weights(&ScoringWeights { vc_weight: 60, tx_weight: 0, repayment_weight: 40 });
+        let jump = TIMELOCK_LEDGERS + 2;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
+
+        let subject_with_counterparties = Address::generate(&env);
+        let subject_without_counterparties = Address::generate(&env);
+
+        // Give first subject 100 counterparties (max bonus)
+        client.update_tx_stats(&feeder, &subject_with_counterparties, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 100,
+        });
+        // Second subject has no counterparties
+        client.update_tx_stats(&feeder, &subject_without_counterparties, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 0,
+        });
+
+        let score_with = client.compute_score(&subject_with_counterparties);
+        let score_without = client.compute_score(&subject_without_counterparties);
+
+        // Both scores must be identical — tx_weight=0 suppresses the counterparty bonus
+        assert_eq!(score_with, score_without,
+            "counterparty bonus should have no effect when tx_weight is 0");
+    }
+
+    /// When tx_weight = 100, the counterparty bonus is fully applied and
+    /// a subject with 100+ counterparties scores higher than one with none.
+    #[test]
+    fn test_counterparty_bonus_applied_when_tx_weight_is_100() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Propose and apply weights with tx_weight = 100
+        client.propose_weights(&ScoringWeights { vc_weight: 0, tx_weight: 100, repayment_weight: 0 });
+        let jump = TIMELOCK_LEDGERS + 2;
+        env.as_contract(&contract_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().set_sequence_number(env.ledger().sequence() + jump);
+        client.apply_weights();
+
+        client.register_feeder(&admin, &feeder);
+
+        let subject_with = Address::generate(&env);
+        let subject_without = Address::generate(&env);
+
+        // Same volume, but subject_with has 100 counterparties (max bonus = 20 pts)
+        client.update_tx_stats(&feeder, &subject_with, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 100,
+        });
+        client.update_tx_stats(&feeder, &subject_without, &TxStats {
+            volume_30d: 0,
+            tx_count_30d: 0,
+            avg_counterparties: 0,
+        });
+
+        let score_with = client.compute_score(&subject_with);
+        let score_without = client.compute_score(&subject_without);
+
+        assert!(score_with > score_without,
+            "subject with 100 counterparties should score higher when tx_weight=100");
+    }
+
+    #[test]
+    fn test_admin_transfer_two_step() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin1);
+
+        client.propose_new_admin(&admin2);
+        client.accept_admin(&admin2);
+
+        // new admin can register feeder
+        client.register_feeder(&admin2, &feeder);
+
+        // old admin cannot register feeder
+        let feeder2 = Address::generate(&env);
+        let res = client.try_register_feeder(&admin1, &feeder2);
+        assert_eq!(res, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    #[should_panic(expected = "not authorized")]
+    fn test_non_pending_admin_cannot_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+
+        client.initialize(&admin1);
+        client.propose_new_admin(&admin2);
+
+        let _ = client.accept_admin(&non_admin);
+    }
+
+    #[test]
+    fn test_compute_score_skips_write_when_inputs_unchanged() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // First computation sets initial values
+        client.compute_score(&subject);
+        let record1 = client.get_score(&subject).unwrap();
+
+        // Advance ledger time by 100 seconds
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
+        // Second computation with identical inputs
+        client.compute_score(&subject);
+        let record2 = client.get_score(&subject).unwrap();
+
+        // Timestamp shouldn't change because write was skipped
+        assert_eq!(record1.last_updated, record2.last_updated);
+
+        // Change an input (VC count)
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.set_vc_count(&feeder, &subject, &2);
+
+        // Advance ledger time again
+        env.ledger().set_timestamp(env.ledger().timestamp() + 100);
+
         // Third computation with changed input
         client.compute_score(&subject);
         let record3 = client.get_score(&subject).unwrap();
@@ -911,5 +1106,20 @@ mod tests {
         // Write occurred, so timestamp is updated
         assert!(record3.last_updated > record2.last_updated);
         assert_eq!(record3.vc_count, 2);
+    }
+
+    #[test]
+    #[should_panic(expected = "Error(Contract, 1)")]
+    fn test_initialize_already_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        
+        let admin2 = Address::generate(&env);
+        client.initialize(&admin2);
     }
 }
