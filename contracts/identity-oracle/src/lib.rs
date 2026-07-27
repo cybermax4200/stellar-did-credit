@@ -621,7 +621,14 @@ impl IdentityOracle {
         false
     }
 
-    /// Returns the total number of anchored VC records for `subject`, including revoked entries.
+    /// Returns the total number of anchored VC records for `subject`, **including revoked
+    /// entries**.
+    ///
+    /// Naming note: despite the name, this is not "the meaningful total" for scoring or
+    /// verification purposes — it counts every record ever anchored, revoked or not. Callers
+    /// who want the count of credentials that are still valid right now should use
+    /// [`Self::get_active_vc_count`] instead. This function is primarily useful for auditing
+    /// (e.g. "how many VCs has this subject ever had anchored, including revoked ones").
     pub fn get_total_vc_count(env: Env, subject: Address) -> u32 {
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
@@ -633,6 +640,10 @@ impl IdentityOracle {
     }
 
     /// Returns the number of anchored VC records for `subject` that are **not revoked**.
+    ///
+    /// Naming note: this is the "active total" — the count integrators almost always want for
+    /// scoring or verification. It differs from [`Self::get_total_vc_count`], which includes
+    /// revoked entries.
     pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
         load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
     }

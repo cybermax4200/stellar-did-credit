@@ -58,7 +58,14 @@ The protocol admin must register each trusted issuer before that address can cal
 | `mark_vc_revoked(issuer, subject, vc_hash)` | issuer   | Marks a specific VC as revoked                              |
 | `is_verified(subject)`                      | anyone   | Returns true if the subject has at least one non-revoked VC |
 | `get_active_vc_count(subject)`              | anyone   | Returns the cached active VC count; seeded lazily from existing anchors and then maintained on `anchor_vc` / `mark_vc_revoked` |
+| `get_total_vc_count(subject)`               | anyone   | Returns the total count of VC records ever anchored for the subject, **including revoked ones** |
 | `verify_vc(subject, vc_hash)`               | anyone   | Returns true if a specific VC exists and is not revoked     |
+
+> **`get_total_vc_count` vs. `get_active_vc_count`:** despite the name, `get_total_vc_count`
+> is not "the meaningful total" — it counts every VC ever anchored for a subject, including
+> revoked ones. `get_active_vc_count` excludes revoked entries and is what integrators almost
+> always want for scoring and verification. Prefer `get_active_vc_count` unless you specifically
+> need the revoked-inclusive count for auditing.
 
 **Storage layout**
 
@@ -84,6 +91,8 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `initialize(admin)`                                  | deployer | Sets admin and default scoring weights (40/30/30)  |
 | `register_feeder(admin, feeder)`                     | admin    | Whitelists a data feeder                           |
 | `register_lender(admin, lender)`                     | admin    | Whitelists a lender                                |
+| `list_feeders()`                                     | anyone   | Returns the currently registered feeder addresses  |
+| `list_lenders()`                                     | anyone   | Returns the currently registered lender addresses  |
 | `set_vc_count(feeder, subject, count)`               | feeder   | Caches the subject's VC count from identity-oracle |
 | `update_tx_stats(feeder, subject, stats)`            | feeder   | Updates 30-day transaction volume and count        |
 | `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event; current v1 behavior does not verify a real loan relationship and should be treated as a lender attestation rather than proof of disbursement |
@@ -99,6 +108,8 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `Config`                   | `ScoringWeights`  | Instance storage — vc/tx/repayment weights        |
 | `TrustedFeeder(Address)`   | `bool`            | Persistent — registered feeder flag               |
 | `TrustedLender(Address)`   | `bool`            | Persistent — registered lender flag               |
+| `FeedersIndex`             | `Vec<Address>`    | Persistent — append-only list of every address ever registered as a feeder; `list_feeders()` filters this against `TrustedFeeder` |
+| `LendersIndex`             | `Vec<Address>`    | Persistent — append-only list of every address ever registered as a lender; `list_lenders()` filters this against `TrustedLender` |
 | `TxStats(Address)`         | `TxStats`         | Persistent — 30-day tx volume and count           |
 | `RepaymentRecord(Address)` | `RepaymentRecord` | Persistent — on-time and total repayment counts   |
 | `VcCount(Address)`         | `u32`             | Persistent — cached VC count from identity-oracle |
