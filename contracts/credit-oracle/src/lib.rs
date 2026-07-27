@@ -1,5 +1,5 @@
 #![no_std]
-use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal};
+use soroban_sdk::{contract, contractimpl, contracttype, contracterror, symbol_short, Address, BytesN, Env, IntoVal, Vec};
 
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
@@ -35,6 +35,16 @@ pub enum DataKey {
     TrustedFeeder(Address),
     /// Trusted lender address authorized to record repayments
     TrustedLender(Address),
+    /// Append-only index of every address ever registered as a trusted
+    /// feeder. Entries are never removed on deregistration; `list_feeders`
+    /// filters this index against `TrustedFeeder` to return only the
+    /// currently-registered set.
+    FeedersIndex,
+    /// Append-only index of every address ever registered as a trusted
+    /// lender. Entries are never removed on deregistration; `list_lenders`
+    /// filters this index against `TrustedLender` to return only the
+    /// currently-registered set.
+    LendersIndex,
     /// Transaction statistics for a user
     TxStats(Address),
     /// Repayment record for a user
@@ -145,6 +155,17 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let mut feeders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+        if !feeders.contains(&feeder) {
+            feeders.push_back(feeder.clone());
+            env.storage().persistent().set(&DataKey::FeedersIndex, &feeders);
+        }
+
         env.storage().persistent().set(&DataKey::TrustedFeeder(feeder.clone()), &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
@@ -169,6 +190,17 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let mut lenders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+        if !lenders.contains(&lender) {
+            lenders.push_back(lender.clone());
+            env.storage().persistent().set(&DataKey::LendersIndex, &lenders);
+        }
+
         env.storage().persistent().set(&DataKey::TrustedLender(lender.clone()), &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
@@ -365,6 +397,50 @@ impl CreditOracle {
             .instance()
             .get(&DataKey::Config)
             .unwrap()
+    }
+
+    /// Returns the currently registered (non-deregistered) trusted feeder addresses.
+    ///
+    /// `FeedersIndex` is append-only and may contain deregistered addresses,
+    /// so this filters it against each entry's live `TrustedFeeder` flag.
+    ///
+    /// Auth: none — read-only.
+    pub fn list_feeders(env: Env) -> Vec<Address> {
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for feeder in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+                active.push_back(feeder);
+            }
+        }
+        active
+    }
+
+    /// Returns the currently registered (non-deregistered) trusted lender addresses.
+    ///
+    /// `LendersIndex` is append-only and may contain deregistered addresses,
+    /// so this filters it against each entry's live `TrustedLender` flag.
+    ///
+    /// Auth: none — read-only.
+    pub fn list_lenders(env: Env) -> Vec<Address> {
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for lender in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+                active.push_back(lender);
+            }
+        }
+        active
     }
 
     /// Set the identity-oracle contract ID for cross-contract VC count lookups.
@@ -871,6 +947,76 @@ mod tests {
         let result = client.get_identity_oracle();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), identity_oracle_id);
+    }
+
+    #[test]
+    fn test_list_feeders_reflects_register_and_deregister_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let feeder1 = Address::generate(&env);
+        let feeder2 = Address::generate(&env);
+
+        assert_eq!(client.list_feeders(), Vec::new(&env));
+
+        client.register_feeder(&admin, &feeder1);
+        assert_eq!(client.list_feeders(), Vec::from_array(&env, [feeder1.clone()]));
+
+        client.register_feeder(&admin, &feeder2);
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder1.clone(), feeder2.clone()])
+        );
+
+        // Re-registering an already-registered feeder must not duplicate it.
+        client.register_feeder(&admin, &feeder1);
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder1.clone(), feeder2.clone()])
+        );
+
+        client.deregister_feeder(&admin, &feeder1);
+        assert_eq!(client.list_feeders(), Vec::from_array(&env, [feeder2]));
+    }
+
+    #[test]
+    fn test_list_lenders_reflects_register_and_deregister_operations() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let lender1 = Address::generate(&env);
+        let lender2 = Address::generate(&env);
+
+        assert_eq!(client.list_lenders(), Vec::new(&env));
+
+        client.register_lender(&admin, &lender1);
+        assert_eq!(client.list_lenders(), Vec::from_array(&env, [lender1.clone()]));
+
+        client.register_lender(&admin, &lender2);
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender1.clone(), lender2.clone()])
+        );
+
+        // Re-registering an already-registered lender must not duplicate it.
+        client.register_lender(&admin, &lender1);
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender1.clone(), lender2.clone()])
+        );
+
+        client.deregister_lender(&admin, &lender1);
+        assert_eq!(client.list_lenders(), Vec::from_array(&env, [lender2]));
     }
 }
 
