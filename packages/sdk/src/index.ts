@@ -22,6 +22,13 @@ export interface ScoreRecord {
   repaymentRate: number;
   txVolume30d: bigint;
   previousScore: number | null;
+  /** Ledger sequence number when this score was last computed.
+   *  Compare against the current ledger to assess freshness. */
+  computedAtLedger: number;
+  /** Whether the score is considered stale. Computed at read time
+   *  by comparing computedAtLedger against the current ledger sequence.
+   *  Always false for a freshly computed score. */
+  stale: boolean;
 }
 
 export interface TxStats {
@@ -606,6 +613,8 @@ function parseScoreRecord(scVal: xdr.ScVal, subjectAddress: string): ScoreRecord
       raw["previous_score"] != null
         ? Number(raw["previous_score"])
         : null,
+    computedAtLedger: Number(raw["computed_at_ledger"]),
+    stale: Boolean(raw["stale"]),
   };
 }
 

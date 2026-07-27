@@ -71,13 +71,17 @@ pub enum DataKey {
     ProtocolStats,
 }
 
+/// Number of ledgers after which a score is considered stale.
+/// Roughly 30 days at 5-second ledgers (~86,400 ledgers).
+const STALE_LEDGER_AGE: u32 = 86_400;
+
 /// Credit score record with metadata
 #[contracttype]
 #[derive(Clone)]
 pub struct ScoreRecord {
     /// Credit score value
     pub score: u32,
-    /// Timestamp of last update
+    /// Timestamp of last update (Unix seconds)
     pub last_updated: u64,
     /// Number of verified credentials
     pub vc_count: u32,
@@ -87,6 +91,15 @@ pub struct ScoreRecord {
     pub tx_volume_30d: i128,
     /// Previous credit score, if one exists
     pub previous_score: Option<u32>,
+    /// Ledger sequence number when this score was last computed.
+    /// Consumers can compare this against the current ledger sequence
+    /// to determine freshness without relying solely on wall-clock time.
+    pub computed_at_ledger: u32,
+    /// Whether the stored score is considered stale based on
+    /// `STALE_LEDGER_AGE`. Computed at read time in `get_score` by
+    /// comparing `computed_at_ledger` against the current ledger
+    /// sequence. Always `false` for a freshly computed score.
+    pub stale: bool,
 }
 
 /// Transaction statistics for a user
@@ -144,9 +157,7 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 }
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ProtocolStats, stats);
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -451,6 +462,8 @@ impl CreditOracle {
                     repayment_rate,
                     tx_volume_30d: tx_stats.volume_30d,
                     previous_score,
+                    computed_at_ledger: env.ledger().sequence(),
+                    stale: false,
                 },
             );
         }
@@ -458,9 +471,22 @@ impl CreditOracle {
         score
     }
 
-    /// Get credit score for a user; returns None if score has not been computed yet
+    /// Get credit score for a user; returns None if score has not been computed yet.
+    ///
+    /// The returned `ScoreRecord` includes a `stale` flag computed
+    /// at read time by comparing `computed_at_ledger` against the
+    /// current ledger sequence. A score is considered stale when the
+    /// ledger delta exceeds `STALE_LEDGER_AGE` (~30 days).
     pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
-        env.storage().persistent().get(&DataKey::Score(subject))
+        env.storage()
+            .persistent()
+            .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
+            .map(|mut record| {
+                let current_ledger = env.ledger().sequence();
+                record.stale =
+                    current_ledger.saturating_sub(record.computed_at_ledger) > STALE_LEDGER_AGE;
+                record
+            })
     }
 
     /// Propose new scoring weights with timelock
@@ -1318,4 +1344,3 @@ mod tests {
         assert_eq!(stats2.total_subjects_scored, 1);
     }
 }
-
