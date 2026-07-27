@@ -3,10 +3,7 @@ mod tests {
     use credit_oracle::{CreditOracle, CreditOracleClient, TxStats};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
-    use soroban_sdk::{
-        testutils::Address as _,
-        Address, BytesN, Env, Vec,
-    };
+    use soroban_sdk::{testutils::Address as _, Address, BytesN, Env, Vec};
 
     #[derive(Debug)]
     pub struct GasProfileResult {
@@ -129,7 +126,13 @@ mod tests {
 
         // Output results table format
         std::println!("\n=================== GAS PROFILING HARNESS RESULTS ===================");
-        std::println!("| {:<18} | {:<10} | {:<16} | {:<12} |", "Operation", "Input Size", "CPU Instructions", "Memory Bytes");
+        std::println!(
+            "| {:<18} | {:<10} | {:<16} | {:<12} |",
+            "Operation",
+            "Input Size",
+            "CPU Instructions",
+            "Memory Bytes"
+        );
         std::println!("|--------------------|------------|------------------|--------------|");
         for p in &profiles {
             std::println!(

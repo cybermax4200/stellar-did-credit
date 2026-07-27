@@ -38,7 +38,9 @@ mod tests {
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
-        let retrieved_cid = identity.get_did_document(&subject).expect("DID doc should exist");
+        let retrieved_cid = identity
+            .get_did_document(&subject)
+            .expect("DID doc should exist");
         assert_eq!(retrieved_cid, cid);
 
         // 5. Call anchor_vc for the subject with a test hash
@@ -612,10 +614,10 @@ mod tests {
 
         // Cast passing votes
         let voter = soroban_sdk::Address::generate(&env);
-        
+
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200);
-        
+
         gov.vote(&voter, &proposal_id, &true, &200);
 
         // Step 1: advance just past voting period (expiry_ledger + 1)
@@ -644,7 +646,10 @@ mod tests {
         gov.execute(&proposal_id);
 
         let proposal = gov.get_proposal(&proposal_id).unwrap();
-        assert!(proposal.executed, "proposal must be executed after timelock");
+        assert!(
+            proposal.executed,
+            "proposal must be executed after timelock"
+        );
 
         // Verify weights were applied to the credit oracle
         let weights = credit.get_scoring_weights();
@@ -709,10 +714,10 @@ mod tests {
 
         // Cast votes to pass the proposal
         let voter = soroban_sdk::Address::generate(&env);
-        
+
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200i128);
-        
+
         gov.vote(&voter, &proposal_id, &true, &200i128).unwrap();
 
         // Advance ledger past voting expiry
@@ -778,7 +783,10 @@ mod tests {
                 found_c = true;
             }
         }
-        assert!(found_a && found_c, "expected issuer_a and issuer_c to remain");
+        assert!(
+            found_a && found_c,
+            "expected issuer_a and issuer_c to remain"
+        );
     }
 
     #[test]
