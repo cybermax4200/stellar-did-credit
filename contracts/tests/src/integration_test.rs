@@ -808,6 +808,99 @@ mod tests {
         assert_eq!(after_rereg.len(), 1);
     }
 
+    #[test]
+    fn test_protocol_stats_identity_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        // Verify initial stats are zero
+        let stats0 = identity.get_protocol_stats();
+        assert_eq!(stats0.total_dids_anchored, 0);
+        assert_eq!(stats0.total_vcs_anchored, 0);
+        assert_eq!(stats0.total_vcs_revoked, 0);
+
+        // Anchor a DID
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = soroban_sdk::String::from_str(&env, "ipfs://QmStatsTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let stats1 = identity.get_protocol_stats();
+        assert_eq!(stats1.total_dids_anchored, 1);
+
+        // Anchor two VCs
+        let vc_hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash1);
+        identity.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        let stats2 = identity.get_protocol_stats();
+        assert_eq!(stats2.total_vcs_anchored, 2);
+        assert_eq!(stats2.total_vcs_revoked, 0);
+
+        // Revoke one VC
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hash1);
+
+        let stats3 = identity.get_protocol_stats();
+        assert_eq!(stats3.total_vcs_anchored, 2);
+        assert_eq!(stats3.total_vcs_revoked, 1);
+    }
+
+    #[test]
+    fn test_protocol_stats_credit_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        credit.register_lender(&admin, &lender);
+
+        // Verify initial stats are zero
+        let stats0 = credit.get_protocol_stats();
+        assert_eq!(stats0.total_subjects_scored, 0);
+        assert_eq!(stats0.total_repayments_recorded, 0);
+
+        // Record some repayments
+        let subject = soroban_sdk::Address::generate(&env);
+        for _ in 0..3 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+
+        let stats1 = credit.get_protocol_stats();
+        assert_eq!(stats1.total_repayments_recorded, 3);
+        assert_eq!(stats1.total_subjects_scored, 0);
+
+        // Compute score for the subject
+        credit.compute_score(&subject);
+
+        let stats2 = credit.get_protocol_stats();
+        assert_eq!(stats2.total_subjects_scored, 1);
+
+        // Compute score again for same subject — should NOT double count
+        credit.compute_score(&subject);
+        let stats3 = credit.get_protocol_stats();
+        assert_eq!(stats3.total_subjects_scored, 1);
+
+        // Compute score for a different subject
+        let subject2 = soroban_sdk::Address::generate(&env);
+        credit.compute_score(&subject2);
+
+        let stats4 = credit.get_protocol_stats();
+        assert_eq!(stats4.total_subjects_scored, 2);
+    }
+
     /// Verify that computing a score twice captures the previous score in the record.
     #[test]
     fn test_score_record_preserves_previous_score() {

@@ -22,6 +22,19 @@ pub enum CreditOracleError {
     NoPendingAdmin = 6,
 }
 
+/// Aggregate protocol-level counters stored in instance storage.
+///
+/// Updated on every write operation to provide on-chain operational metrics
+/// without requiring an external indexer.
+#[contracttype]
+#[derive(Clone, Default)]
+pub struct ProtocolStats {
+    /// Total number of unique subjects that have had a credit score computed.
+    pub total_subjects_scored: u64,
+    /// Total number of repayment events recorded across all subjects.
+    pub total_repayments_recorded: u64,
+}
+
 /// Storage keys for the credit oracle contract
 #[contracttype]
 pub enum DataKey {
@@ -51,6 +64,8 @@ pub enum DataKey {
     IdentityOracleId,
     /// Number of ledgers to wait before recomputing score
     ComputeCooldownLedgers,
+    /// Aggregate protocol-level counters
+    ProtocolStats,
 }
 
 /// Credit score record with metadata
@@ -117,6 +132,37 @@ const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 
 #[contract]
 pub struct CreditOracle;
+
+fn load_protocol_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolStats)
+        .unwrap_or_default()
+}
+
+fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ProtocolStats, stats);
+}
+
+fn increment_subjects_scored(env: &Env) {
+    let mut stats = load_protocol_stats(env);
+    stats.total_subjects_scored = stats
+        .total_subjects_scored
+        .checked_add(1)
+        .expect("total_subjects_scored overflow");
+    save_protocol_stats(env, &stats);
+}
+
+fn increment_repayments_recorded(env: &Env) {
+    let mut stats = load_protocol_stats(env);
+    stats.total_repayments_recorded = stats
+        .total_repayments_recorded
+        .checked_add(1)
+        .expect("total_repayments_recorded overflow");
+    save_protocol_stats(env, &stats);
+}
 
 #[contractimpl]
 impl CreditOracle {
@@ -210,6 +256,7 @@ impl CreditOracle {
         }
         record.total_count += 1;
         env.storage().persistent().set(&DataKey::RepaymentRecord(subject), &record);
+        increment_repayments_recorded(&env);
         Ok(())
     }
 
@@ -291,6 +338,9 @@ impl CreditOracle {
         }
 
         if needs_write {
+            if previous_score.is_none() {
+                increment_subjects_scored(&env);
+            }
             env.storage().persistent().set(&DataKey::Score(subject.clone()), &ScoreRecord {
                 score,
                 last_updated: env.ledger().timestamp(),
@@ -443,6 +493,14 @@ impl CreditOracle {
         }
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Returns aggregate protocol-level counters.
+    ///
+    /// These counters are updated on every write operation and provide
+    /// on-chain operational metrics without requiring an external indexer.
+    pub fn get_protocol_stats(env: Env) -> ProtocolStats {
+        load_protocol_stats(&env)
     }
 }
 
@@ -872,7 +930,6 @@ mod tests {
         assert!(result.is_some());
         assert_eq!(result.unwrap(), identity_oracle_id);
     }
-}
 
     #[test]
     fn test_admin_transfer_two_step() {
@@ -900,7 +957,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
@@ -958,4 +1015,83 @@ mod tests {
         assert!(record3.last_updated > record2.last_updated);
         assert_eq!(record3.vc_count, 2);
     }
+
+    #[test]
+    fn test_protocol_stats_default_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_subjects_scored, 0);
+        assert_eq!(stats.total_repayments_recorded, 0);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_record_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_repayments_recorded, 1);
+
+        client.record_repayment(&lender, &subject, &1000, &false);
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_repayments_recorded, 2);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_subjects_scored() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        client.compute_score(&subject1);
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_subjects_scored, 1);
+
+        client.compute_score(&subject2);
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_subjects_scored, 2);
+    }
+
+    #[test]
+    fn test_protocol_stats_no_double_count_recompute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+
+        // First computation — subjects_scored should increment
+        client.compute_score(&subject);
+        let stats1 = client.get_protocol_stats();
+        assert_eq!(stats1.total_subjects_scored, 1);
+
+        // Second computation with identical inputs — should NOT double count
+        client.compute_score(&subject);
+        let stats2 = client.get_protocol_stats();
+        assert_eq!(stats2.total_subjects_scored, 1);
+    }
 }
+

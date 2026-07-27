@@ -75,6 +75,21 @@ pub enum IdentityOracleError {
     ContractPaused = 8,
 }
 
+/// Aggregate protocol-level counters stored in instance storage.
+///
+/// Updated on every write operation to provide on-chain operational metrics
+/// without requiring an external indexer.
+#[contracttype]
+#[derive(Clone, Default)]
+pub struct ProtocolStats {
+    /// Total number of DID documents anchored (via `anchor_did`).
+    pub total_dids_anchored: u64,
+    /// Total number of verifiable credentials anchored (via `anchor_vc` / `anchor_vc_typed`).
+    pub total_vcs_anchored: u64,
+    /// Total number of verifiable credentials revoked (via `mark_vc_revoked` / `deactivate_did`).
+    pub total_vcs_revoked: u64,
+}
+
 /// Storage key variants for the identity-oracle contract.
 #[contracttype]
 pub enum DataKey {
@@ -113,6 +128,8 @@ pub enum DataKey {
     IssuerTier(Address),
     /// Credential type label for a subject's anchored VC hash.
     VCCredentialType(Address, BytesN<32>),
+    /// Aggregate protocol-level counters.
+    ProtocolStats,
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -176,6 +193,46 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
 
 #[contract]
 pub struct IdentityOracle;
+
+fn load_protocol_stats(env: &Env) -> ProtocolStats {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolStats)
+        .unwrap_or_default()
+}
+
+fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ProtocolStats, stats);
+}
+
+fn increment_dids_anchored(env: &Env) {
+    let mut stats = load_protocol_stats(env);
+    stats.total_dids_anchored = stats
+        .total_dids_anchored
+        .checked_add(1)
+        .expect("total_dids_anchored overflow");
+    save_protocol_stats(env, &stats);
+}
+
+fn increment_vcs_anchored(env: &Env) {
+    let mut stats = load_protocol_stats(env);
+    stats.total_vcs_anchored = stats
+        .total_vcs_anchored
+        .checked_add(1)
+        .expect("total_vcs_anchored overflow");
+    save_protocol_stats(env, &stats);
+}
+
+fn increment_vcs_revoked(env: &Env, count: u64) {
+    let mut stats = load_protocol_stats(env);
+    stats.total_vcs_revoked = stats
+        .total_vcs_revoked
+        .checked_add(count)
+        .expect("total_vcs_revoked overflow");
+    save_protocol_stats(env, &stats);
+}
 
 fn is_record_revoked(env: &Env, record: &VCRecord) -> bool {
     if record.revoked {
@@ -422,6 +479,7 @@ impl IdentityOracle {
             PERS_TTL_THRESHOLD,
             PERS_TTL_EXTEND,
         );
+        increment_dids_anchored(&env);
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
         Ok(())
@@ -454,11 +512,18 @@ impl IdentityOracle {
 
         if !anchors.is_empty() {
             let mut updated = Vec::new(&env);
+            let mut revoked_count: u64 = 0;
             for mut record in anchors.iter() {
+                if !record.revoked {
+                    revoked_count += 1;
+                }
                 record.revoked = true;
                 updated.push_back(record);
             }
             env.storage().persistent().set(&key, &updated);
+            if revoked_count > 0 {
+                increment_vcs_revoked(&env, revoked_count);
+            }
         }
 
         // 2. Remove DID Document
@@ -544,6 +609,7 @@ impl IdentityOracle {
             seed_active_vc_count(&env, &subject);
         }
 
+        increment_vcs_anchored(&env);
         env.events()
             .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
         Ok(())
@@ -585,6 +651,7 @@ impl IdentityOracle {
 
         env.storage().persistent().set(&key, &updated);
         if transitioned_to_revoked {
+            increment_vcs_revoked(&env, 1);
             if let Some(mut active_count) = load_active_vc_count(&env, &subject) {
                 active_count = active_count
                     .checked_sub(1)
@@ -830,6 +897,14 @@ impl IdentityOracle {
             }
         }
         active
+    }
+
+    /// Returns aggregate protocol-level counters.
+    ///
+    /// These counters are updated on every write operation and provide
+    /// on-chain operational metrics without requiring an external indexer.
+    pub fn get_protocol_stats(env: Env) -> ProtocolStats {
+        load_protocol_stats(&env)
     }
 }
 
@@ -1471,7 +1546,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, 1)")]
+    #[should_panic(expected = "Error(Contract, #1)")]
     fn test_initialize_already_initialized() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1483,5 +1558,149 @@ mod tests {
 
         let admin2 = Address::generate(&env);
         client.initialize(&admin2);
+    }
+
+    #[test]
+    fn test_protocol_stats_default_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 0);
+        assert_eq!(stats.total_vcs_anchored, 0);
+        assert_eq!(stats.total_vcs_revoked, 0);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_anchor_did() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDIDStats");
+        client.anchor_did(&subject, &cid);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 1);
+
+        let subject2 = Address::generate(&env);
+        let cid2 = String::from_str(&env, "ipfs://QmTestDIDStats2");
+        client.anchor_did(&subject2, &cid2);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 2);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_anchor_vc() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_vcs_anchored, 1);
+
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_vcs_anchored, 2);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_mark_vc_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_vcs_anchored, 1);
+        assert_eq!(stats.total_vcs_revoked, 1);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_deactivate_did() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDIDDeact");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash1);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        client.deactivate_did(&subject);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 1);
+        assert_eq!(stats.total_vcs_anchored, 2);
+        assert_eq!(stats.total_vcs_revoked, 2);
+    }
+
+    #[test]
+    fn test_protocol_stats_no_increment_on_dedup_vc() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+        let stats_after_first = client.get_protocol_stats();
+        assert_eq!(stats_after_first.total_vcs_anchored, 1);
+
+        // Duplicate (issuer, hash) pair should be a no-op
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+        let stats_after_dedup = client.get_protocol_stats();
+        assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
     }
 }
