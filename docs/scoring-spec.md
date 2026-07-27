@@ -161,13 +161,20 @@ score = clamp(300 + 94×550÷100, 300, 850)
 
 ## Edge cases
 
-### Stale score (`last_updated` more than 30 days ago)
+### Stale score (`last_updated` more than 30 days ago, or `computed_at_ledger` far behind)
 
-The contract does not enforce score freshness. `get_score` returns whatever was last computed, regardless of age. The `last_updated` field in `ScoreRecord` is a ledger timestamp (Unix seconds) that consumers should check.
+The contract now includes a `stale` flag in `ScoreRecord` that is computed at read time by `get_score`.
+A score is considered stale when the difference between the current ledger sequence and `computed_at_ledger`
+exceeds `STALE_LEDGER_AGE` (86,400 ledgers, approximately 30 days at 5-second ledgers).
 
-**Recommended consumer behaviour:** treat a score older than 30 days (2,592,000 seconds) as untrustworthy and prompt the subject or feeder to call `compute_score` again.
+The `ScoreRecord` includes three fields for freshness assessment:
 
-The feeder is responsible for keeping `TxStats` and `VcCount` current. If the feeder stops updating, the score will drift from reality but will not error — it will simply reflect stale inputs.
+- **`last_updated`** — a ledger timestamp (Unix seconds) that consumers can compare against wall-clock time.
+- **`computed_at_ledger`** — the ledger sequence number when the score was last computed. Compare this against the current ledger sequence for a deterministic, clock-independent freshness check.
+- **`stale`** — a boolean flag computed at read time by `get_score`. `true` means the score is older than `STALE_LEDGER_AGE` ledgers and should not be trusted for lending decisions without recomputation.
+
+Consumers should treat a score with `stale = true` as untrustworthy and prompt the subject or feeder to call `compute_score` again.
+Lenders should check `stale` before making lending decisions, and may also apply domain-specific policies (e.g., reject scores where `stale = true` or where `last_updated` exceeds a custom threshold).
 
 ### All VCs revoked
 
