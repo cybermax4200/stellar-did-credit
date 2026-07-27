@@ -1,7 +1,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal,
+    IntoVal, Symbol,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -69,6 +69,12 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
+    /// Last ledger sequence when a subject's score was computed
+    LastComputed(Address),
+    /// Credential-type multiplier in basis points (100 = 1×).
+    CredentialTypeWeight(Symbol),
+    /// Monotonically increasing storage layout version. Absent means V1.
+    StorageVersion,
 }
 
 /// Credit score record with metadata
@@ -123,15 +129,34 @@ pub struct PendingWeightsRecord {
     pub effective_ledger: u32,
 }
 
-/// Internal repayment counters for a subject
+/// Internal repayment counters for a subject.
+///
+/// Used to compute the repayment score component (0–100 based on on-time rate).
+/// Replaces [`RepaymentRecordV1`]; use `migrate` to upgrade existing storage.
 #[contracttype]
 #[derive(Clone)]
 pub struct RepaymentRecord {
     pub on_time_count: u32,
     pub total_count: u32,
+    /// Cumulative amount repaid across all recorded repayments.
+    pub total_repaid: i128,
+}
+
+/// Legacy repayment counters stored by V1 of the contract.
+///
+/// Preserved as a distinct type so the `migrate` function can deserialise
+/// pre-upgrade storage entries and convert them to [`RepaymentRecord`].
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentRecordV1 {
+    /// Number of repayments made on time.
+    pub on_time_count: u32,
+    /// Total number of repayments recorded.
+    pub total_count: u32,
 }
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
+const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
 
 #[contract]
 pub struct CreditOracle;
@@ -186,6 +211,14 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::Config, &default_weights);
+        env.storage().instance().set(
+            &DataKey::ComputeCooldownLedgers,
+            &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
+        );
+        // New deployments start at storage layout V2 — no migration needed.
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -314,21 +347,87 @@ impl CreditOracle {
         {
             return Err(CreditOracleError::LenderNotRegistered);
         }
-        let mut record: RepaymentRecord = env
+        let current_version: u32 = env
             .storage()
-            .persistent()
-            .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord {
-                on_time_count: 0,
-                total_count: 0,
-            });
-        if on_time {
-            record.on_time_count += 1;
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1);
+
+        if current_version < 2 {
+            // Storage is still V1 layout — read and write back as RepaymentRecordV1
+            // so we don't corrupt existing data before migrate() is called.
+            let mut record: RepaymentRecordV1 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap_or(RepaymentRecordV1 {
+                    on_time_count: 0,
+                    total_count: 0,
+                });
+            if on_time {
+                record.on_time_count = record.on_time_count.saturating_add(1);
+            }
+            record.total_count = record.total_count.saturating_add(1);
+            env.storage()
+                .persistent()
+                .set(&DataKey::RepaymentRecord(subject), &record);
+        } else {
+            let mut record: RepaymentRecord = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap_or(RepaymentRecord {
+                    on_time_count: 0,
+                    total_count: 0,
+                    total_repaid: 0,
+                });
+            if on_time {
+                record.on_time_count = record.on_time_count.saturating_add(1);
+            }
+            record.total_count = record.total_count.saturating_add(1);
+            record.total_repaid = record.total_repaid.saturating_add(_amount);
+            env.storage()
+                .persistent()
+                .set(&DataKey::RepaymentRecord(subject), &record);
         }
-        record.total_count += 1;
+        increment_repayments_recorded(&env);
+        Ok(())
+    }
+
+    /// Migrate stored repayment records from V1 (2-field) to V2 (3-field) layout.
+    ///
+    /// Call this once after upgrading the contract WASM. Pass every subject
+    /// whose repayment history must be preserved. After all subjects are
+    /// converted the contract bumps `StorageVersion` to `2` so future reads
+    /// and writes use the new layout automatically.
+    ///
+    /// **Authentication:** only the current admin may call this function.
+    pub fn migrate(
+        env: Env,
+        subjects: soroban_sdk::Vec<Address>,
+    ) -> Result<(), CreditOracleError> {
+        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        admin.require_auth();
+
+        for i in 0..subjects.len() {
+            let subject = subjects.get(i).unwrap();
+            let key = DataKey::RepaymentRecord(subject.clone());
+            if let Some(v1) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, RepaymentRecordV1>(&key)
+            {
+                let v2 = RepaymentRecord {
+                    on_time_count: v1.on_time_count,
+                    total_count: v1.total_count,
+                    total_repaid: 0,
+                };
+                env.storage().persistent().set(&key, &v2);
+            }
+        }
         env.storage()
-            .persistent()
-            .set(&DataKey::RepaymentRecord(subject), &record);
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -365,14 +464,37 @@ impl CreditOracle {
                 avg_counterparties: 0,
             });
 
-        let repayment: RepaymentRecord = env
+        let storage_version: u32 = env
             .storage()
-            .persistent()
-            .get(&DataKey::RepaymentRecord(subject.clone()))
-            .unwrap_or(RepaymentRecord {
-                on_time_count: 0,
-                total_count: 0,
-            });
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1);
+
+        let repayment: RepaymentRecord = if storage_version < 2 {
+            // V1 layout: two-field struct. Convert to V2 with total_repaid = 0.
+            let v1: RepaymentRecordV1 = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap_or(RepaymentRecordV1 {
+                    on_time_count: 0,
+                    total_count: 0,
+                });
+            RepaymentRecord {
+                on_time_count: v1.on_time_count,
+                total_count: v1.total_count,
+                total_repaid: 0,
+            }
+        } else {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap_or(RepaymentRecord {
+                    on_time_count: 0,
+                    total_count: 0,
+                    total_repaid: 0,
+                })
+        };
 
         let mut vc_count: u32 = env
             .storage()
@@ -441,7 +563,15 @@ impl CreditOracle {
             previous_score = Some(prev.score);
         }
 
+        let is_first = !env
+            .storage()
+            .persistent()
+            .has(&DataKey::Score(subject.clone()));
+
         if needs_write {
+            if is_first {
+                increment_subjects_scored(&env);
+            }
             env.storage().persistent().set(
                 &DataKey::Score(subject.clone()),
                 &ScoreRecord {
@@ -454,6 +584,9 @@ impl CreditOracle {
                 },
             );
         }
+
+        env.events()
+            .publish((symbol_short!("Score"),), (subject.clone(), score));
 
         score
     }
@@ -651,7 +784,9 @@ impl CreditOracle {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use soroban_sdk::testutils::{Address as _, Ledger as _};
+    use proptest::prelude::*;
+    use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::TryIntoVal;
 
     #[test]
     fn test_default_weights_sum_to_100() {
@@ -782,6 +917,98 @@ mod tests {
 
         let score = client.compute_score(&subject);
         assert_eq!(score, MIN_SCORE);
+    }
+
+    #[test]
+    fn test_compute_score_emits_score_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Compute the score which should emit a Score event
+        let score = client.compute_score(&subject);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the Score event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("Score") — decode Val back to Symbol for comparison
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_val = topics.get(0).unwrap();
+        let topic_sym: Symbol = topic_val.try_into_val(&env).expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("Score"), "expected Score topic");
+
+        // Verify the data payload is (subject, score) — decode Val back to typed tuple
+        let (event_subject, event_score): (Address, u32) =
+            data.try_into_val(&env).expect("data should be (Address, u32)");
+        assert_eq!(event_subject, subject, "event subject mismatch");
+        assert_eq!(event_score, score, "event score mismatch");
+    }
+
+    #[test]
+    fn test_counterparty_bonus_adds_points() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        // Set up identical scores except for counterparty diversity
+        client.set_vc_count(&feeder, &subject, &3);
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 3_000_000_000i128,
+                tx_count_30d: 100,
+                avg_counterparties: 0, // no bonus
+            },
+        );
+        for _ in 0..8 {
+            client.record_repayment(&lender, &subject, &1000, &true);
+        }
+        let score_without_bonus = client.compute_score(&subject);
+
+        // Same config but with diverse counterparties
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 3_000_000_000i128,
+                tx_count_30d: 100,
+                avg_counterparties: 35, // bonus applies
+            },
+        );
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_with_bonus = client.compute_score(&subject);
+
+        // Score with bonus should be higher (by ~30 points with default tx_weight=30)
+        assert!(
+            score_with_bonus > score_without_bonus,
+            "expected bonus score ({}) > non-bonus score ({})",
+            score_with_bonus,
+            score_without_bonus
+        );
     }
 
     #[test]

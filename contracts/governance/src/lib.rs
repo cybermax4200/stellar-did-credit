@@ -906,6 +906,25 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
 
+        // Verify weights are NOT changed immediately (timelock in effect)
+        let weights_after_execute = credit_oracle_client.get_scoring_weights();
+        assert_eq!(weights_after_execute.vc_weight, 40); // Still default
+
+        // Advance ledger past timelock (~24 hours = 17,280 ledgers)
+        let jump = 17_280 + 2;
+        env.as_contract(&credit_oracle_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // Apply weights after timelock
+        gov_client.apply_weights();
+
         // Verify weights were applied
         let active_weights = credit_oracle_client.get_scoring_weights();
         assert_eq!(active_weights.vc_weight, 50);
