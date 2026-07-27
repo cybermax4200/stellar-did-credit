@@ -49,6 +49,8 @@ The primary statement Phase 4 targets:
 | `avg_counterparties` | `u32` | Average distinct counterparties, 30d — **must** be part of the commitment; see soundness note below |
 | `repayment_rate` | `u32` | Basis points (0–10000) |
 | `last_updated` | `u64` | Ledger timestamp of computation |
+| `computed_at_ledger` | `u32` | Ledger sequence of computation |
+| `stale` | `bool` | Whether the score is stale at the time the proof is generated |
 | `vc_weight`, `tx_weight`, `repayment_weight` | `u32` | Weights active at computation |
 | `vc_score`, `tx_score`, `repay_score`, `counterparty_bonus` | `u32` | Intermediate component scores |
 | `composite` | `u32` | Weighted composite before final mapping |
@@ -76,7 +78,7 @@ vc_score == min(vc_count * 20, 100)
 tx_score == min(tx_volume_30d / 100_000_000, 100)   // integer division
 repay_score == repayment_rate / 100
 counterparty_bonus == 10 if avg_counterparties >= 10 else 0
-score_commitment == Commit(score, vc_count, tx_volume_30d, avg_counterparties, repayment_rate, last_updated, blinding)
+score_commitment == Commit(score, vc_count, tx_volume_30d, avg_counterparties, repayment_rate, last_updated, computed_at_ledger, blinding)
 ```
 
 The on-chain verifier checks the SNARK **and** that public inputs match the invocation arguments. Binding `subject` and `credit_oracle_id` into the Fiat–Shamir transcript prevents proof reuse across accounts or deployments.
@@ -90,7 +92,7 @@ The on-chain verifier checks the SNARK **and** that public inputs match the invo
 | Range | `600 ≤ score ≤ 700` for tiered loan products |
 | Equality | `score == 712` for audit disputes (subject opts in) |
 | Component bound | `repayment_rate ≥ 8000` without revealing score |
-| Freshness | `last_updated ≥ T` combined with score range |
+| Freshness | `last_updated ≥ T` or `computed_at_ledger ≥ L` combined with score range |
 
 ---
 
@@ -142,7 +144,7 @@ Map each `ScoreRecord` field to a field element and commit:
 
 ```
 C = score·G_score + vc_count·G_vc + tx_vol·G_tx + avg_cp·G_cp + repay_rate·G_repay
-  + last_updated·G_ts + blinding·H
+  + last_updated·G_ts + computed_at_ledger·G_ledger + stale·G_stale + blinding·H
 ```
 
 `avg_cp` (average counterparties) is included so `counterparty_bonus` is bound to on-chain `TxStats` data rather than left as a free witness value — see the soundness note above.
@@ -158,7 +160,7 @@ C = score·G_score + vc_count·G_vc + tx_vol·G_tx + avg_cp·G_cp + repay_rate·
 If [CAP-0075](https://github.com/stellar/stellar-protocol/blob/master/core/cap-0075.md) (Poseidon) is available on the target network:
 
 ```
-commitment = Poseidon(score, vc_count, tx_volume_30d, repayment_rate, last_updated, blinding)
+commitment = Poseidon(score, vc_count, tx_volume_30d, repayment_rate, last_updated, computed_at_ledger, stale, blinding)
 ```
 
 Poseidon is SNARK-friendly (few constraints) and aligns with future Stellar host functions. The circuit proves knowledge of preimage and the score relation simultaneously.
@@ -181,6 +183,7 @@ This adds a contract change but removes the need to trust off-chain witness sour
 | `u32` (`avg_counterparties`) | 32-bit integer; only the `>= 10` comparison is constrained, value itself stays private |
 | `Address` | 32-byte public key hash as field element(s) |
 | `u64` (`last_updated`) | 64-bit integer |
+| `u32` (`computed_at_ledger`) | 32-bit integer |
 
 All arithmetic in the circuit must use **integer division semantics** matching the contract (see [scoring-spec.md](scoring-spec.md)).
 

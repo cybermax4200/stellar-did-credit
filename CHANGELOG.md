@@ -12,6 +12,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `identity-oracle` and `credit-oracle`: aggregate protocol-level counters stored in instance storage for on-chain operational metrics. Each contract exposes a `get_protocol_stats()` getter that returns a struct with counters updated on every write operation. Identity-oracle tracks `total_dids_anchored`, `total_vcs_anchored`, and `total_vcs_revoked`. Credit-oracle tracks `total_subjects_scored` and `total_repayments_recorded`. Unit tests verify counters increment correctly and do not double-count deduplicated operations (#256)
 - `identity-oracle`: `get_did_document(subject)` — read-only function that returns the anchored DID document CID for a subject, or `None` if no DID is anchored (#229)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `getDIDDocument(subjectAddress)` — fetches the anchored DID document CID from identity-oracle, returning `null` if not set (#229)
+- `credit-oracle`: `ScoreRecord` now includes `stale: bool` — `get_score` computes staleness at read time by comparing `computed_at_ledger` against the current ledger sequence; a score is stale when the ledger delta exceeds `STALE_LEDGER_AGE` (~30 days at 5-second ledgers). `compute_score` always writes `stale = false` for freshly computed scores (#241)
+- SDK: `ScoreRecord.stale` field added to the TypeScript type and parser (#241)
+- `docs/scoring-spec.md`: updated stale-score section to explain the `stale` flag and how consumers should interpret freshness (#241)
+- `docs/zk-proof-design.md`: updated commitment preimage and witness tables to include `stale` (#241)
 
 ### Added
 

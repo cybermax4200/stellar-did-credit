@@ -5,7 +5,7 @@
   "private": true,
   "scripts": {
     "issue": "ts-node src/issue.ts",
-    "build": "tsc"
+    "build": "node init && tsc"
   },
   "dependencies": {
     "@stellar-did-credit/sdk": "workspace:*",

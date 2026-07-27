@@ -4,7 +4,7 @@
   "description": "TypeScript SDK for the Stellar DID Credit Protocol",
   "main": "src/index.ts",
   "scripts": {
-    "build": "tsc",
+    "build": "node init && tsc",
     "test": "jest",
     "lint": "tsc --noEmit && eslint src",
     "docs": "typedoc --tsconfig tsconfig.json --out docs-api --skipErrorChecking src/index.ts"

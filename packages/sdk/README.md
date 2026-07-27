@@ -42,6 +42,8 @@ interface ScoreRecord {
   vcCount: number; // number of verified credentials
   repaymentRate: number; // basis points (0–10000)
   txVolume30d: bigint; // 30-day transaction volume in stroops
+  computedAtLedger: number; // ledger sequence when score was computed
+  stale: boolean; // true if score is older than STALE_LEDGER_AGE (~30 days)
 }
 ```
 
