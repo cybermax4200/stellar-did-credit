@@ -39,7 +39,12 @@ fn require_admin(env: &Env) -> Address {
 }
 
 fn ensure_not_paused(env: &Env) -> Result<(), IdentityOracleError> {
-    if env.storage().instance().get(&DataKey::Paused).unwrap_or(false) {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
         Err(IdentityOracleError::ContractPaused)
     } else {
         Ok(())
@@ -247,7 +252,9 @@ impl IdentityOracle {
     /// Pause all writes on the contract.
     pub fn pause(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Paused, &true);
         env.events().publish((symbol_short!("Paused"),), ());
         Ok(())
@@ -256,7 +263,9 @@ impl IdentityOracle {
     /// Resume the contract and allow writes again.
     pub fn unpause(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
-        env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("Unpaused"),), ());
         Ok(())
@@ -375,7 +384,9 @@ impl IdentityOracle {
 
     /// Check whether a subject has already anchored a DID document.
     pub fn has_anchored_did(env: Env, subject: Address) -> bool {
-        env.storage().persistent().has(&DataKey::DIDDocument(subject))
+        env.storage()
+            .persistent()
+            .has(&DataKey::DIDDocument(subject))
     }
 
     /// Anchor a DID document on-chain by storing its IPFS CID.
@@ -462,7 +473,9 @@ impl IdentityOracle {
         }
 
         // 2. Remove DID Document
-        env.storage().persistent().remove(&DataKey::DIDDocument(subject.clone()));
+        env.storage()
+            .persistent()
+            .remove(&DataKey::DIDDocument(subject.clone()));
 
         // 3. Emit event
         env.events().publish((symbol_short!("DIDDeact"),), subject);
@@ -867,7 +880,6 @@ mod tests {
         assert!(!client.is_verified(&subject));
         assert!(client.get_did_document(&subject).is_none());
     }
-
 
     #[test]
     fn test_anchor_vc_by_trusted_issuer() {

@@ -374,10 +374,8 @@ impl Governance {
         let client = CreditOracleClient::new(&env, &credit_oracle_addr);
         client.apply_weights();
 
-        env.events().publish(
-            (symbol_short!("WtApplied"),),
-            env.ledger().sequence(),
-        );
+        env.events()
+            .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
 
         Ok(())
     }
@@ -428,15 +426,13 @@ impl Governance {
             return Err(GovernanceError::InvalidVoteWeight);
         }
         admin.require_auth();
-        
+
         env.storage()
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
 
-        env.events().publish(
-            (symbol_short!("VoterReg"), voter.clone()),
-            weight,
-        );
+        env.events()
+            .publish((symbol_short!("VoterReg"), voter.clone()), weight);
 
         Ok(())
     }
@@ -476,10 +472,8 @@ impl Governance {
                 .set(&DataKey::VoterWeight(voter.clone()), &weight);
         }
 
-        env.events().publish(
-            (symbol_short!("VoterUpd"), voter.clone()),
-            weight,
-        );
+        env.events()
+            .publish((symbol_short!("VoterUpd"), voter.clone()), weight);
 
         Ok(())
     }
@@ -509,10 +503,8 @@ impl Governance {
             .persistent()
             .remove(&DataKey::VoterWeight(voter.clone()));
 
-        env.events().publish(
-            (symbol_short!("VoterDer"), voter.clone()),
-            (),
-        );
+        env.events()
+            .publish((symbol_short!("VoterDer"), voter.clone()), ());
 
         Ok(())
     }
@@ -528,9 +520,7 @@ impl Governance {
     ///
     /// Returns `None` if the voter is not registered.
     pub fn get_voter_weight(env: Env, voter: Address) -> Option<i128> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::VoterWeight(voter))
+        env.storage().persistent().get(&DataKey::VoterWeight(voter))
     }
 
     /// Get how much weight a voter has used in a specific proposal.
@@ -552,7 +542,7 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoterWeight(voter.clone()))
             .unwrap_or(0);
-        
+
         let used_weight = env
             .storage()
             .persistent()
@@ -563,7 +553,7 @@ impl Governance {
     }
 
     /// Cancel a governance proposal.
-    /// 
+    ///
     /// Note: Full cancellation logic is out of scope. This only emits the cancellation event.
     pub fn cancel(
         env: Env,
@@ -572,12 +562,12 @@ impl Governance {
         reason: Option<soroban_sdk::String>,
     ) -> Result<(), GovernanceError> {
         canceller.require_auth();
-        
+
         env.events().publish(
             (symbol_short!("PropCanc"), proposal_id),
             (canceller, reason),
         );
-        
+
         Ok(())
     }
 }
@@ -587,8 +577,8 @@ mod tests {
     use super::*;
     use credit_oracle::{CreditOracle, CreditOracleClient};
     use soroban_sdk::{
-        testutils::{Address as _, Ledger, Events},
-        Env, TryIntoVal
+        testutils::{Address as _, Events, Ledger},
+        Env, TryIntoVal,
     };
 
     #[test]
@@ -629,11 +619,11 @@ mod tests {
         // Vote
         let voter1 = Address::generate(&env);
         let voter2 = Address::generate(&env);
-        
+
         // Register voters with appropriate weights
         gov_client.register_voter(&admin, &voter1, &1000);
         gov_client.register_voter(&admin, &voter2, &400);
-        
+
         gov_client.vote(&voter1, &proposal_id, &true, &1000);
         gov_client.vote(&voter2, &proposal_id, &false, &400);
 
@@ -723,11 +713,11 @@ mod tests {
         // votes_for + votes_against == quorum_required exactly, and for > against.
         let voter1 = Address::generate(&env);
         let voter2 = Address::generate(&env);
-        
+
         // Register voters with appropriate weights
         gov_client.register_voter(&admin, &voter1, &300);
         gov_client.register_voter(&admin, &voter2, &200);
-        
+
         gov_client.vote(&voter1, &proposal_id, &true, &300);
         gov_client.vote(&voter2, &proposal_id, &false, &200);
 
@@ -785,10 +775,10 @@ mod tests {
         let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
 
         let voter = Address::generate(&env);
-        
+
         // Register voter with sufficient weight for this test
         gov_client.register_voter(&admin, &voter, &100);
-        
+
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &0);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
 
@@ -828,13 +818,18 @@ mod tests {
         for (contract_id, topics, data) in events.iter() {
             if contract_id == gov_id {
                 if topics.len() == 2 {
-                    let symbol: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap_or(soroban_sdk::symbol_short!("invalid"));
+                    let symbol: soroban_sdk::Symbol = topics
+                        .get(0)
+                        .unwrap()
+                        .try_into_val(&env)
+                        .unwrap_or(soroban_sdk::symbol_short!("invalid"));
                     if symbol == soroban_sdk::symbol_short!("PropCanc") {
                         found_event = true;
                         let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
                         assert_eq!(id, proposal_id);
 
-                        let event_data: (Address, Option<soroban_sdk::String>) = data.try_into_val(&env).unwrap();
+                        let event_data: (Address, Option<soroban_sdk::String>) =
+                            data.try_into_val(&env).unwrap();
                         assert_eq!(event_data.0, canceller);
                         // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
                         // We will skip strict String value checking for now.
@@ -874,18 +869,17 @@ mod tests {
 
         let proposer = Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers
-        let proposal_id =
-            gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.execution_delay_ledgers, 50);
 
         // Cast enough votes for the proposal to pass
         let voter = Address::generate(&env);
-        
+
         // Register voter with sufficient weight
         gov_client.register_voter(&admin, &voter, &200);
-        
+
         gov_client.vote(&voter, &proposal_id, &true, &200);
 
         // Advance just past voting period but NOT past the execution timelock
@@ -1037,11 +1031,17 @@ mod tests {
         // Voter casts partial votes
         gov_client.vote(&voter, &proposal_id, &true, &60);
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 60);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 40);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id, &voter),
+            40
+        );
 
         gov_client.vote(&voter, &proposal_id, &false, &40);
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 100);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 0);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id, &voter),
+            0
+        );
 
         // Trying to vote more should fail
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &1);
@@ -1072,7 +1072,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        
+
         // Create two proposals
         let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
         let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
@@ -1083,20 +1083,32 @@ mod tests {
         // Vote on first proposal
         gov_client.vote(&voter, &proposal_id_1, &true, &80);
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id_1, &voter), 80);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id_1, &voter), 20);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id_1, &voter),
+            20
+        );
 
         // Weight usage is tracked separately for second proposal
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id_2, &voter), 0);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id_2, &voter), 100);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id_2, &voter),
+            100
+        );
 
         // Can vote full weight on second proposal
         gov_client.vote(&voter, &proposal_id_2, &false, &100);
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id_2, &voter), 100);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id_2, &voter), 0);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id_2, &voter),
+            0
+        );
 
         // First proposal usage unchanged
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id_1, &voter), 80);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id_1, &voter), 20);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id_1, &voter),
+            20
+        );
     }
 
     #[test]

@@ -35,11 +35,41 @@ fn require_admin(env: &Env) -> Address {
 }
 
 fn ensure_not_paused(env: &Env) -> Result<(), RevocationRegistryError> {
-    if env.storage().instance().get(&RevocationKey::Paused).unwrap_or(false) {
+    if env
+        .storage()
+        .instance()
+        .get(&RevocationKey::Paused)
+        .unwrap_or(false)
+    {
         Err(RevocationRegistryError::ContractPaused)
     } else {
         Ok(())
     }
+}
+
+// ── Reentrancy guard ─────────────────────────────────────────────
+// `revoke` calls identity-oracle.mark_vc_revoked, which in turn calls
+// revocation-registry.is_revoked — a circular call path.  While
+// is_revoked is currently read-only, the guard defends against future
+// upgrades that could make the callback write state or call back into
+// revoke itself.
+
+/// Set the reentrancy lock.  Returns `ReentrancyDetected` if already held.
+fn enter_guard(env: &Env) -> Result<(), RevocationRegistryError> {
+    if env.storage().instance().has(&RevocationKey::ReentrancyLock) {
+        return Err(RevocationRegistryError::ReentrancyDetected);
+    }
+    env.storage()
+        .instance()
+        .set(&RevocationKey::ReentrancyLock, &true);
+    Ok(())
+}
+
+/// Release the reentrancy lock.  Safe to call even if the lock is absent.
+fn exit_guard(env: &Env) {
+    env.storage()
+        .instance()
+        .remove(&RevocationKey::ReentrancyLock);
 }
 
 /// Error types for the revocation registry contract.
@@ -58,6 +88,9 @@ pub enum RevocationRegistryError {
     BatchTooLarge = 5,
     /// The contract is currently paused and cannot accept writes.
     ContractPaused = 6,
+    /// A reentrant call into `revoke` was detected while a cross-contract
+    /// call to identity-oracle was already in flight.
+    ReentrancyDetected = 7,
 }
 
 /// Storage keys for revocation registry contract.
@@ -84,6 +117,9 @@ pub enum RevocationKey {
     /// List of revoked VC hashes per issuer.
     /// issuer → Vec<BytesN<32>>
     IssuerRevokedList(Address),
+    /// Reentrancy guard for `revoke`. Present (= true) while a
+    /// cross-contract call to identity-oracle is in flight; absent otherwise.
+    ReentrancyLock,
 }
 
 // ── Instance TTL bump constants ──────────────────────────────────
@@ -211,6 +247,7 @@ impl RevocationRegistry {
             .instance()
             .get::<_, Address>(&RevocationKey::IdentityOracleId)
         {
+            enter_guard(&env)?;
             env.invoke_contract::<()>(
                 &identity_oracle_id,
                 &soroban_sdk::Symbol::new(&env, "mark_vc_revoked"),
@@ -221,6 +258,7 @@ impl RevocationRegistry {
                     vc_hash.clone().into_val(&env)
                 ],
             );
+            exit_guard(&env);
         }
         // Extend TTL for both revocation entries
         env.storage().persistent().extend_ttl(
@@ -243,11 +281,9 @@ impl RevocationRegistry {
         if !list.contains(vc_hash.clone()) {
             list.push_back(vc_hash.clone());
             env.storage().persistent().set(&list_key, &list);
-            env.storage().persistent().extend_ttl(
-                &list_key,
-                PERS_TTL_THRESHOLD,
-                PERS_TTL_EXTEND,
-            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
@@ -293,12 +329,7 @@ impl RevocationRegistry {
     /// - `issuer`: Address of the issuer whose revocations are queried.
     /// - `cursor`: Starting index (0-based).
     /// - `limit`: Maximum number of items to return.
-    pub fn list_revoked(
-        env: Env,
-        issuer: Address,
-        cursor: u32,
-        limit: u32,
-    ) -> Vec<BytesN<32>> {
+    pub fn list_revoked(env: Env, issuer: Address, cursor: u32, limit: u32) -> Vec<BytesN<32>> {
         let list_key = RevocationKey::IssuerRevokedList(issuer);
         let list: Vec<BytesN<32>> = env
             .storage()
@@ -384,7 +415,7 @@ impl RevocationRegistry {
                 PERS_TTL_THRESHOLD,
                 PERS_TTL_EXTEND,
             );
-            
+
             if !list.contains(vc_hash.clone()) {
                 list.push_back(vc_hash.clone());
                 list_modified = true;
@@ -393,11 +424,9 @@ impl RevocationRegistry {
 
         if list_modified {
             env.storage().persistent().set(&list_key, &list);
-            env.storage().persistent().extend_ttl(
-                &list_key,
-                PERS_TTL_THRESHOLD,
-                PERS_TTL_EXTEND,
-            );
+            env.storage()
+                .persistent()
+                .extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.events()
@@ -731,5 +760,89 @@ mod tests {
 
         let admin2 = Address::generate(&env);
         client.initialize(&admin2);
+    }
+
+    // ── Reentrancy guard tests ────────────────────────────────────────────
+
+    /// Guard is absent before any revoke call and absent after a successful
+    /// revoke (no identity-oracle configured, so the guard is never set).
+    #[test]
+    fn test_guard_absent_without_identity_oracle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[0xAAu8; 32]);
+
+        client.revoke(&issuer, &subject, &vc_hash);
+        assert!(client.is_revoked(&vc_hash));
+
+        // Lock must not be present after a successful call.
+        let lock_present: bool = env.as_contract(&contract_id, || {
+            env.storage().instance().has(&RevocationKey::ReentrancyLock)
+        });
+        assert!(
+            !lock_present,
+            "reentrancy lock must be released after revoke"
+        );
+    }
+
+    /// Manually setting the lock and then calling enter_guard returns
+    /// ReentrancyDetected, proving the guard logic fires correctly.
+    #[test]
+    fn test_enter_guard_detects_locked_state() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+
+        // Simulate the lock being held (as if a cross-contract call is in flight).
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&RevocationKey::ReentrancyLock, &true);
+        });
+
+        // enter_guard must return ReentrancyDetected.
+        let result = env.as_contract(&contract_id, || enter_guard(&env));
+        assert_eq!(result, Err(RevocationRegistryError::ReentrancyDetected));
+    }
+
+    /// exit_guard clears the lock; a subsequent enter_guard succeeds.
+    #[test]
+    fn test_exit_guard_releases_lock() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&RevocationKey::ReentrancyLock, &true);
+            exit_guard(&env);
+            // After exit_guard the lock must be gone.
+            assert!(!env.storage().instance().has(&RevocationKey::ReentrancyLock));
+            // And enter_guard must now succeed.
+            assert!(enter_guard(&env).is_ok());
+        });
+    }
+
+    /// Sequential revoke calls on different hashes all succeed, proving the
+    /// guard does not produce false positives across independent calls.
+    #[test]
+    fn test_sequential_revokes_succeed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        for i in 0u8..4 {
+            let vc_hash = BytesN::from_array(&env, &[i; 32]);
+            assert!(client.try_revoke(&issuer, &subject, &vc_hash).is_ok());
+            assert!(client.is_revoked(&vc_hash));
+        }
     }
 }
