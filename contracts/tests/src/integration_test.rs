@@ -639,6 +639,7 @@ mod tests {
     /// Integration test for the governance-to-credit-oracle execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
+    // Governance tests below exercise the deployed governance and credit-oracle contracts together.
     #[test]
     fn test_governance_execution_timelock_integration() {
         let env = Env::default();
