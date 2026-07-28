@@ -2,7 +2,7 @@
 pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, Symbol,
+    IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -32,6 +32,8 @@ pub enum CreditOracleError {
     DisputeNotFound = 9,
     /// The provided input key is not a valid score input name.
     InvalidInputKey = 10,
+    /// The provided identity oracle contract is invalid or did not respond.
+    InvalidIdentityOracle = 11,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -54,6 +56,8 @@ pub enum DataKey {
     Admin,
     /// Pending contract admin address for two-step transfer
     PendingAdmin,
+    /// Storage layout version.
+    StorageVersion,
     /// Global configuration
     Config,
     /// Trusted feeder address authorized to update transaction stats
@@ -90,9 +94,61 @@ pub enum DataKey {
     DisputeIndex(Address),
 }
 
+/// Pure scoring function that computes a credit score from input parameters.
+///
+/// This function contains no Soroban environment dependencies, making it
+/// suitable for fuzz testing and property-based testing.
+/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+pub fn compute_score_pure(
+    vc_count: u32,
+    volume_30d: i128,
+    avg_counterparties: u32,
+    on_time_count: u32,
+    total_count: u32,
+    vc_weight: u32,
+    tx_weight: u32,
+    repayment_weight: u32,
+) -> u32 {
+    let vc_score = (vc_count.saturating_mul(20)).min(100) as u128;
+    let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
+    let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
+    let tx_score = (volume_score + counterparty_bonus).min(100);
+    let repay_score = (on_time_count as u128)
+        .saturating_mul(10_000)
+        .checked_div(total_count as u128)
+        .map(|r| r / 100)
+        .unwrap_or(0);
+    let composite = (vc_score * vc_weight as u128
+        + tx_score * tx_weight as u128
+        + repay_score * repayment_weight as u128)
+        / 100;
+    let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
+    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+}
+
 /// Number of ledgers after which a score is considered stale.
 /// Roughly 30 days at 5-second ledgers (~86,400 ledgers).
 const STALE_LEDGER_AGE: u32 = 86_400;
+
+fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+where
+    T: TryFromVal<Env, Val>,
+{
+    matches!(
+        env.try_invoke_contract::<T, soroban_sdk::InvokeError>(contract_id, &func, args),
+        Ok(Ok(_))
+    )
+}
+
+fn validate_identity_oracle_ref(env: &Env, identity_oracle_id: &Address) -> bool {
+    let dummy_subject = env.current_contract_address();
+    validate_contract_function::<u32>(
+        env,
+        identity_oracle_id,
+        Symbol::new(env, "get_active_vc_count"),
+        soroban_sdk::vec![env, dummy_subject.clone().into_val(env)],
+    )
+}
 
 /// Credit score record with metadata
 #[contracttype]
@@ -322,18 +378,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut compacted = Vec::new(&env);
-        for addr in ever_registered.iter() {
-            if env
-                .storage()
-                .persistent()
-                .has(&DataKey::TrustedFeeder(addr.clone()))
-            {
+        for i in 0..ever_registered.len() {
+            let addr: Address = ever_registered.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
                 compacted.push_back(addr);
             }
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::FeedersIndex, &compacted);
+        env.storage().persistent().set(&DataKey::FeedersIndex, &compacted);
 
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
@@ -406,18 +457,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut compacted = Vec::new(&env);
-        for addr in ever_registered.iter() {
-            if env
-                .storage()
-                .persistent()
-                .has(&DataKey::TrustedLender(addr.clone()))
-            {
+        for i in 0..ever_registered.len() {
+            let addr: Address = ever_registered.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
                 compacted.push_back(addr);
             }
         }
-        env.storage()
-            .persistent()
-            .set(&DataKey::LendersIndex, &compacted);
+        env.storage().persistent().set(&DataKey::LendersIndex, &compacted);
 
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
@@ -540,12 +586,8 @@ impl CreditOracle {
         }
         let record_key = DataKey::RepaymentRecord(subject);
         env.storage()
-            .persistent()
-            .set(&record_key, &record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&record_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        increment_repayments_recorded(&env);
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -636,7 +678,7 @@ impl CreditOracle {
                 soroban_sdk::vec![&env, subject.clone().into_val(&env)],
             );
             if is_deactivated {
-                return MIN_SCORE;
+                return Ok(MIN_SCORE);
             }
 
             vc_count = env.invoke_contract::<u32>(
@@ -646,32 +688,18 @@ impl CreditOracle {
             );
         }
 
-        let vc_score = (vc_count * 20).min(100);
-
-        // tx_score is the sum of the volume sub-score and the counterparty bonus.
-        // The counterparty bonus awards up to 20 extra points for network diversity
-        // (1 point per 5 unique counterparties, capped at 20), making it a
-        // sub-component of the transaction score.
-        //
-        // NOTE: Because the bonus is multiplied by tx_weight in the composite
-        // calculation, setting tx_weight = 0 also suppresses the counterparty bonus.
-        // This is intentional — see docs/scoring-spec.md for rationale.
-        let volume_score = ((tx_stats.volume_30d / 100_000_000i128) as u32).min(80);
-        let counterparty_bonus = (tx_stats.avg_counterparties / 5).min(20);
-        let tx_score = (volume_score + counterparty_bonus).min(100);
-
-        let repay_score = (repayment.on_time_count * 10000)
-            .checked_div(repayment.total_count)
-            .map(|r| r / 100)
-            .unwrap_or(0);
-
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
-        let composite = (vc_score * weights.vc_weight
-            + tx_score * weights.tx_weight
-            + repay_score * weights.repayment_weight)
-            / 100;
 
-        let score = (MIN_SCORE + composite * 550 / 100).clamp(MIN_SCORE, MAX_SCORE);
+        let score = compute_score_pure(
+            vc_count,
+            tx_stats.volume_30d,
+            tx_stats.avg_counterparties,
+            repayment.on_time_count,
+            repayment.total_count,
+            weights.vc_weight,
+            weights.tx_weight,
+            weights.repayment_weight,
+        );
 
         let repayment_rate = (repayment.on_time_count * 10000)
             .checked_div(repayment.total_count)
@@ -866,6 +894,9 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+        if !validate_identity_oracle_ref(&env, &identity_oracle_id) {
+            return Err(CreditOracleError::InvalidIdentityOracle);
+        }
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
@@ -964,12 +995,9 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for feeder in feeders.iter() {
-            if env
-                .storage()
-                .persistent()
-                .has(&DataKey::TrustedFeeder(feeder.clone()))
-            {
+        for i in 0..feeders.len() {
+            let feeder: Address = feeders.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
                 active.push_back(feeder);
             }
         }
@@ -1039,8 +1067,8 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut already_indexed = false;
-        for k in disputed_keys.iter() {
-            if k == input_key {
+        for i in 0..disputed_keys.len() {
+            if disputed_keys.get(i).unwrap() == input_key {
                 already_indexed = true;
                 break;
             }
@@ -1134,7 +1162,8 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut records = Vec::new(&env);
-        for key in disputed_keys.iter() {
+        for i in 0..disputed_keys.len() {
+            let key: Symbol = disputed_keys.get(i).unwrap();
             if let Some(record) = env
                 .storage()
                 .persistent()
@@ -1155,12 +1184,9 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for lender in lenders.iter() {
-            if env
-                .storage()
-                .persistent()
-                .has(&DataKey::TrustedLender(lender.clone()))
-            {
+        for i in 0..lenders.len() {
+            let lender: Address = lenders.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
                 active.push_back(lender);
             }
         }
@@ -2171,20 +2197,21 @@ mod tests {
         client.flag_score_input(&subject, &input_key, &reason);
 
         let events = env.events().all();
-        let dispute_events: soroban_sdk::Vec<_> = events
-            .iter()
-            .filter(|(id, topics, _)| {
-                *id == contract_id && topics.len() == 1 && {
-                    let topic: soroban_sdk::Symbol = topics
-                        .get(0)
-                        .unwrap()
-                        .try_into_val(&env)
-                        .unwrap();
-                    topic == symbol_short!("DsptFild")
+        let mut dispute_count = 0u32;
+        for i in 0..events.len() {
+            let (id, topics, _) = events.get(i).unwrap();
+            if id == contract_id && topics.len() == 1 {
+                let topic: soroban_sdk::Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap();
+                if topic == symbol_short!("DsptFild") {
+                    dispute_count += 1;
                 }
-            })
-            .collect();
-        assert_eq!(dispute_events.len(), 1, "expected DsptFild event");
+            }
+        }
+        assert_eq!(dispute_count, 1, "expected 1 DsptFild event");
     }
 
 }

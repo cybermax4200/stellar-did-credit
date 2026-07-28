@@ -1,0 +1,25 @@
+[package]
+name = "credit-oracle-fuzz"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.credit-oracle]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "compute_score_pure"
+path = "fuzz_targets/compute_score_pure.rs"
+bench = false
+test = false
+doc = false

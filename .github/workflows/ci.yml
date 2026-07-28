@@ -32,6 +32,30 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
 
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-fuzz-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz
+
+      - name: Run fuzz tests
+        run: cargo +nightly fuzz run compute_score_pure -- -runs=10000
+        working-directory: contracts/credit-oracle
+
   ts-test:
     runs-on: ubuntu-latest
     steps:
