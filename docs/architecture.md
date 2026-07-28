@@ -52,6 +52,8 @@ The protocol admin must register each trusted issuer before that address can cal
 | Function                                    | Caller   | Description                                                 |
 | ------------------------------------------- | -------- | ----------------------------------------------------------- |
 | `initialize(admin)`                         | deployer | Sets the contract administrator                             |
+| `set_revocation_registry(registry_id)`       | admin    | Links the revocation-registry contract (REQUIRED for cross-contract revocation checks) |
+| `get_revocation_registry()`                  | anyone   | Returns the linked revocation-registry address or `None`     |
 | `register_issuer(admin, issuer)`            | admin    | Whitelists a credential issuer                              |
 | `anchor_did(subject, did_doc_cid)`          | subject  | Stores an IPFS CID pointing to the subject's DID document   |
 | `anchor_vc(issuer, subject, vc_hash)`       | issuer   | Records a SHA-256 hash of an off-chain VC                   |
@@ -70,6 +72,9 @@ The protocol admin must register each trusted issuer before that address can cal
 | `DIDDocument(Address)`   | `String`        | Persistent — IPFS CID of the subject's DID document    |
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
 | `ActiveVCCount(Address)` | `u32`           | Persistent — cached count of active VC anchors for the subject |
+
+| `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   || `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
+| `RevocationRegistryId`   | `Address`       | Instance storage � linked revocation-registry contract address (optional, set via `set_revocation_registry`) |
 
 ---
 

@@ -242,6 +242,24 @@ fn increment_vcs_revoked(env: &Env, count: u64) {
     save_protocol_stats(env, &stats);
 }
 
+/// Check whether a VC record should be considered revoked.
+///
+/// Returns `true` if the record has been locally revoked (via
+/// `mark_vc_revoked`) **or** if the configured `RevocationRegistry`
+/// reports the VC hash as revoked.
+///
+/// # Important: Registry Not Configured
+///
+/// If no `RevocationRegistryId` has been configured (via
+/// `set_revocation_registry`), this function silently skips the
+/// cross-contract revocation check.  Only the local `record.revoked`
+/// flag is consulted.  This means revocations performed through the
+/// `RevocationRegistry` contract will be **ignored** until the registry
+/// is linked.
+///
+/// Deployers must ensure the deployment order documented in
+/// `docs/mainnet-deployment.md` is followed to avoid silent
+/// misconfiguration.
 fn is_record_revoked(env: &Env, record: &VCRecord) -> bool {
     if record.revoked {
         return true;
@@ -351,10 +369,17 @@ impl IdentityOracle {
 
     /// Set the revocation registry contract ID used to check global revocations.
     ///
+    /// **Required:** After deploying all three contracts, call this function
+    /// on the identity-oracle with the address of the deployed revocation-registry
+    /// contract. Without this configuration, the identity oracle will silently
+    /// ignore revocations performed through the revocation-registry.
+    ///
     /// When set, `is_verified`, `get_active_vc_count`, and `verify_vc` will
     /// additionally consult the registry before returning results.
     ///
-    /// Auth: admin only â€” verified via `require_admin`.
+    /// See `docs/mainnet-deployment.md` for the required deployment order.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
     pub fn set_revocation_registry(
         env: Env,
         registry_id: Address,
@@ -898,6 +923,27 @@ impl IdentityOracle {
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
         Ok(())
+    }
+
+    /// Returns the currently configured revocation registry contract ID, or
+    /// `None` if no registry has been configured yet.
+    ///
+    /// # Important
+    ///
+    /// If `None` is returned, `is_verified`, `get_active_vc_count`, and
+    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag —
+    /// any revocations performed through the `RevocationRegistry` contract
+    /// will be **silently ignored**.
+    ///
+    /// Deployers must call `set_revocation_registry` after deploying the
+    /// revocation-registry contract to enable cross-contract revocation
+    /// checking.
+    ///
+    /// See `docs/mainnet-deployment.md` for the required deployment order.
+    pub fn get_revocation_registry(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RevocationRegistryId)
     }
 
     /// Admin-only maintenance: extend instance storage TTL so critical
@@ -1601,6 +1647,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #1)")]
     fn test_initialize_already_initialized() {
+
+    // -----------------------------------------------------------------------
+    // Revocation Registry configuration tests
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `get_revocation_registry` returns `None` before
+    /// configuration, matching the intended initial state.
+    #[test]
+    fn test_get_revocation_registry_returns_none_after_initialize() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1627,6 +1682,15 @@ mod tests {
 
     #[test]
     fn test_protocol_stats_increments_on_anchor_did() {
+
+        let registry = client.get_revocation_registry();
+        assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
+    }
+
+    /// Verifies that `set_revocation_registry` correctly stores the address
+    /// and `get_revocation_registry` returns it.
+    #[test]
+    fn test_set_revocation_registry_sets_address() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1652,6 +1716,27 @@ mod tests {
 
     #[test]
     fn test_protocol_stats_increments_on_anchor_vc() {
+
+        let registry_id = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Initially None
+        assert!(client.get_revocation_registry().is_none());
+
+        // Set the registry
+        client.set_revocation_registry(&registry_id);
+
+        // Now should return Some
+        let stored = client.get_revocation_registry();
+        assert!(stored.is_some(), "RevocationRegistryId should be Some after set_revocation_registry");
+        assert_eq!(stored.unwrap(), registry_id);
+    }
+
+    /// Verifies that `set_revocation_registry` can update an existing
+    /// registry address to a new one.
+    #[test]
+    fn test_set_revocation_registry_can_update() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1755,5 +1840,20 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+}
+
+        let registry_id_1 = Address::generate(&env);
+        let registry_id_2 = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set to first registry
+        client.set_revocation_registry(&registry_id_1);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_1);
+
+        // Update to second registry
+        client.set_revocation_registry(&registry_id_2);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_2);
     }
 }

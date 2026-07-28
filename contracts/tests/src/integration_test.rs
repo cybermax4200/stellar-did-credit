@@ -1161,3 +1161,54 @@ mod tests {
         assert_eq!(rec1_v2_updated.total_repaid, 5000);
     }
 }
+
+    #[test]
+    fn test_revocation_registry_missing_does_not_break_is_verified() {
+        // This test verifies that the identity oracle works correctly even
+        // when RevocationRegistryId is NOT configured. In this state,
+        // revocations through the registry are silently ignored, but the
+        // contract should still function (backward compatibility).
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Intentionally do NOT call identity.set_revocation_registry()
+        // Verify get_revocation_registry returns None
+        assert!(identity.get_revocation_registry().is_none());
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[210u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+
+        // Revoke via revocation-registry (NOT via mark_vc_revoked)
+        revocation.revoke(&issuer, &vc_hash);
+
+        // Without registry linkage, revocations are silently ignored
+        // This is the known limitation - the contract still works
+        // but does not check the external registry
+        assert!(identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+        assert!(identity.verify_vc(&subject, &vc_hash));
+
+        // Now set the registry and confirm the revocation IS detected
+        identity.set_revocation_registry(&revocation_id);
+
+        assert!(!identity.is_verified(&subject));
+        assert_eq!(identity.get_active_vc_count(&subject), 0);
+        assert!(!identity.verify_vc(&subject, &vc_hash));
+    }
