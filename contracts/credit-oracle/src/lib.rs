@@ -69,6 +69,8 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
+    /// Credential type weight (default is 20)
+    CredentialTypeWeight(soroban_sdk::Symbol),
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -197,6 +199,28 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::Config, &default_weights);
+        Ok(())
+    }
+
+    /// Set the point weight for a specific credential type.
+    pub fn set_credential_type_weight(
+        env: Env,
+        admin: Address,
+        credential_type: soroban_sdk::Symbol,
+        weight: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .set(&DataKey::CredentialTypeWeight(credential_type), &weight);
         Ok(())
     }
 
@@ -391,6 +415,8 @@ impl CreditOracle {
             .get(&DataKey::VcCount(subject.clone()))
             .unwrap_or(0u32);
 
+        let mut vc_score: u32 = 0;
+
         // Cross-contract lookup takes precedence if configured
         if let Some(identity_oracle_id) = env
             .storage()
@@ -402,9 +428,26 @@ impl CreditOracle {
                 &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
                 soroban_sdk::vec![&env, subject.clone().into_val(&env)],
             );
+            
+            let active_vc_types: soroban_sdk::Vec<soroban_sdk::Symbol> = env.invoke_contract(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "get_active_vc_types"),
+                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+            );
+            
+            for vc_type in active_vc_types.iter() {
+                let weight: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::CredentialTypeWeight(vc_type))
+                    .unwrap_or(20u32);
+                vc_score = vc_score.saturating_add(weight);
+            }
+        } else {
+            vc_score = vc_count * 20;
         }
 
-        let vc_score = (vc_count * 20).min(100);
+        vc_score = vc_score.min(100);
 
         // tx_score is the sum of the volume sub-score and the counterparty bonus.
         // The counterparty bonus awards up to 20 extra points for network diversity

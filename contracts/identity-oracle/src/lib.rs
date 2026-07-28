@@ -554,18 +554,7 @@ impl IdentityOracle {
         issuer: Address,
         subject: Address,
         vc_hash: BytesN<32>,
-    ) -> Result<(), IdentityOracleError> {
-        let credential_type = generic_credential_type(&env);
-        Self::anchor_vc_typed(env, issuer, subject, vc_hash, credential_type)
-    }
-
-    /// Anchor a VC with an explicit credential type label (e.g. `kyc`, `employment`).
-    pub fn anchor_vc_typed(
-        env: Env,
-        issuer: Address,
-        subject: Address,
-        vc_hash: BytesN<32>,
-        credential_type: Symbol,
+        credential_type: Option<Symbol>,
     ) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         issuer.require_auth();
@@ -577,6 +566,8 @@ impl IdentityOracle {
         if !is_trusted {
             return Err(IdentityOracleError::IssuerNotRegistered);
         }
+
+        let c_type = credential_type.unwrap_or(generic_credential_type(&env));
 
         let key = DataKey::VCAnchors(subject.clone());
         let mut anchors: Vec<VCRecord> = env
@@ -601,7 +592,7 @@ impl IdentityOracle {
         };
         let is_active = !is_record_revoked(&env, &record);
 
-        store_credential_type(&env, &subject, &vc_hash, credential_type);
+        store_credential_type(&env, &subject, &vc_hash, c_type);
 
         anchors.push_back(record);
         env.storage().persistent().set(&key, &anchors);
@@ -741,6 +732,25 @@ impl IdentityOracle {
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
     pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> Symbol {
         get_stored_credential_type(&env, &subject, &vc_hash)
+    }
+
+    /// Returns the credential types of all active (non-revoked) VC anchors for `subject`.
+    pub fn get_active_vc_types(env: Env, subject: Address) -> Vec<Symbol> {
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut types = Vec::new(&env);
+        for record in anchors.iter() {
+            if !is_record_revoked(&env, &record) {
+                let vc_type = get_stored_credential_type(&env, &subject, &record.vc_hash);
+                types.push_back(vc_type);
+            }
+        }
+        types
     }
 
     /// Set an issuer's trust multiplier in basis points (100 = 1×, 200 = 2×).
