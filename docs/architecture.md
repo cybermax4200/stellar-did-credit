@@ -74,7 +74,7 @@ The protocol admin must register each trusted issuer before that address can cal
 | `ActiveVCCount(Address)` | `u32`           | Persistent — cached count of active VC anchors for the subject |
 
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   || `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
-| `RevocationRegistryId`   | `Address`       | Instance storage � linked revocation-registry contract address (optional, set via `set_revocation_registry`) |
+| `RevocationRegistryId`   | `Address`       | Instance storage � linked revocation-registry contract address (optional, set via `set_revocation_registry`) |
 
 ---
 
@@ -95,6 +95,10 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `compute_score(subject)`                             | anyone   | Runs the scoring formula and persists the result   |
 | `get_score(subject)`                                 | anyone   | Returns the last computed ScoreRecord              |
 | `update_weights(weights)`                            | admin    | Changes scoring weights (must sum to 100)          |
+| `flag_score_input(subject, input_key, reason)`       | subject  | Files a dispute against a specific score input     |
+| `resolve_dispute(subject, input_key, accepted)`      | admin    | Accepts or rejects a pending dispute               |
+| `get_dispute(subject, input_key)`                    | anyone   | Returns a dispute record or None                   |
+| `list_disputes(subject)`                             | anyone   | Lists all dispute records for a subject            |
 
 **Storage layout**
 
@@ -144,17 +148,17 @@ All three contracts (`identity-oracle`, `credit-oracle`, and `revocation-registr
 ### Flow Mechanics
 
 1. **`propose_new_admin(env, new_admin)`**
-   - **Caller**: The current `Admin`.
-   - **Action**: Stores the `new_admin` address in the contract's instance storage under `DataKey::PendingAdmin`.
-   - **Note**: The current admin retains full authority until the transfer is accepted.
+    - **Caller**: The current `Admin`.
+    - **Action**: Stores the `new_admin` address in the contract's instance storage under `DataKey::PendingAdmin`.
+    - **Note**: The current admin retains full authority until the transfer is accepted.
 
 2. **`accept_admin(env, new_admin)`**
-   - **Caller**: The `new_admin` (the proposed pending admin).
-   - **Action**: Reads the `PendingAdmin` from storage. If it matches the caller, the contract overwrites the main `Admin` key with the new address and clears the `PendingAdmin` key. The caller now holds full admin authority.
+    - **Caller**: The `new_admin` (the proposed pending admin).
+    - **Action**: Reads the `PendingAdmin` from storage. If it matches the caller, the contract overwrites the main `Admin` key with the new address and clears the `PendingAdmin` key. The caller now holds full admin authority.
 
 ### Governance Edge Case
 
-The `governance` contract acts as an automated admin for the `credit-oracle`. During deployment/setup, the deployer (acting as the initial `credit-oracle` admin) calls `propose_new_admin(gov_contract_address)`. 
+The `governance` contract acts as an automated admin for the `credit-oracle`. During deployment/setup, the deployer (acting as the initial `credit-oracle` admin) calls `propose_new_admin(gov_contract_address)`.
 
 Subsequently, the `governance` contract calls its own `accept_oracle_admin()` function, which dynamically invokes `accept_admin` on the `credit-oracle`. Thus, the `governance` contract does not itself call `propose_new_admin` during its own adoption phase; it simply accepts the admin role that was already proposed to it by the deployer.
 
@@ -227,7 +231,7 @@ Benchmarking the cached read path in unit tests produced roughly flat CPU usage 
 
 ### Fallback Path (Cached)
 
-If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`. 
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`.
 
 While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
 
@@ -303,6 +307,67 @@ Soroban persistent and instance storage entries have a time-to-live (TTL) measur
 - Deploy an off-chain cron job (or serverless function) that calls `maintain_storage` on all three contracts at least once every **6 months** (well within the 1‑year instance TTL).
 - No additional action is needed for persistent entries — their TTLs are extended automatically whenever they are written.
 - If an entry has not been touched for more than ~30 days, it may be archived. This is by design: orphaned data can be garbage-collected by the network.
+
+---
+
+## Dispute Mechanism
+
+Subjects can flag a specific score input as incorrect using `flag_score_input` on the `credit-oracle` contract. The admin reviews and resolves the dispute; a resolution event signals the off-chain feeder to re-fetch and correct the data.
+
+### Who can dispute
+
+Only the subject themselves (`subject.require_auth()`) may file a dispute. Admins resolve disputes; feeders re-sync data in response.
+
+### What can be disputed
+
+The `input_key` parameter must be one of three recognised values:
+
+| `input_key`  | What it covers                                      |
+| ------------ | --------------------------------------------------- |
+| `tx_stats`   | 30-day transaction volume, count, counterparties    |
+| `repayment`  | On-time / total repayment counts                    |
+| `vc_count`   | Cached verifiable credential count                  |
+
+### Anti-griefing
+
+Only **one pending dispute per `(subject, input_key)` pair** is allowed at a time. Attempting to re-file while an existing dispute is `Pending` returns `DisputeAlreadyPending`. After the admin resolves a dispute (`Resolved` or `Rejected`), the subject may file a new one for the same key.
+
+### Dispute lifecycle
+
+```
+[filed]    subject calls flag_score_input  ->  Pending
+[accepted] admin calls resolve_dispute(accepted=true)  ->  Resolved
+[rejected] admin calls resolve_dispute(accepted=false) ->  Rejected
+[re-filed] after Resolved/Rejected, subject may file again ->  Pending
+```
+
+### Resolution and feeder re-sync
+
+When the admin accepts a dispute, the contract emits a `DsptRslv` event containing `(subject, input_key)`. The off-chain feeder indexes this event, re-fetches the flagged data, and submits the correction via `update_tx_stats`, `record_repayment`, or `set_vc_count`. Anyone can then call `compute_score` to recompute with corrected inputs.
+
+When the admin rejects a dispute, a `DsptRjct` event is emitted. The subject may re-file if they believe the data is still incorrect.
+
+### Key functions (credit-oracle)
+
+| Function | Caller | Description |
+| -------- | ------ | ----------- |
+| `flag_score_input(subject, input_key, reason)` | subject | Files a dispute against a score input |
+| `resolve_dispute(subject, input_key, accepted)` | admin   | Accepts or rejects a pending dispute |
+| `get_dispute(subject, input_key)`               | anyone  | Returns the dispute record, or `None` |
+| `list_disputes(subject)`                        | anyone  | Returns all dispute records for a subject |
+
+### Storage (credit-oracle)
+
+| Key                        | Type            | Description |
+| -------------------------- | --------------- | ----------- |
+| `Dispute(Address, Symbol)` | `DisputeRecord` | Persistent - one record per (subject, input_key) pair |
+| `DisputeIndex(Address)`    | `Vec<Symbol>`   | Persistent - index of all disputed input keys for a subject |
+
+### Out of scope
+
+- Off-chain dispute resolution processes
+- Legal / compliance dispute handling
+- Bond/stake economics (no bond required in this implementation)
 
 ---
 

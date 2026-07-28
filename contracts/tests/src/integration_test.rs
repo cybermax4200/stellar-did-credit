@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, RepaymentRecord,
-        RepaymentRecordV1, ScoringWeights, TxStats,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeRecord,
+        DisputeStatus, RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
@@ -1479,3 +1479,148 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 0);
         assert!(!identity.verify_vc(&subject, &vc_hash));
     }
+
+    /// Full flow: file dispute → admin resolves → feeder re-syncs → score updates.
+    ///
+    /// Covers acceptance criteria for issue #244:
+    /// file dispute → admin resolves → score updates.
+    #[test]
+    fn test_dispute_file_resolve_score_updates() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // Feeder submits tx_stats with an inflated volume (incorrect data).
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 100_000_000_000i128,
+                tx_count_30d: 500,
+                avg_counterparties: 50,
+            },
+        );
+        for _ in 0..5 {
+            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        }
+        let inflated_score = credit.compute_score(&subject);
+        assert!(inflated_score > 300, "expected inflated score > 300, got {}", inflated_score);
+
+        // Step 1: Subject files a dispute against tx_stats.
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(
+            &env,
+            "My 30d volume is much lower; feeder data is incorrect",
+        );
+        credit.flag_score_input(&subject, &input_key, &reason);
+
+        let dispute = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(dispute.status, DisputeStatus::Pending);
+
+        // Step 2: Admin accepts the dispute.
+        credit.resolve_dispute(&subject, &input_key, &true);
+
+        let resolved = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(resolved.status, DisputeStatus::Resolved);
+
+        // Step 3: Verify DsptRslv event was emitted (feeder monitors this).
+        let events = env.events().all();
+        let rslv_count = events
+            .iter()
+            .filter(|(id, topics, _)| {
+                *id == credit_id && topics.len() >= 1 && {
+                    let topic: soroban_sdk::Symbol =
+                        match topics.get(0).unwrap().try_into_val(&env) {
+                            Ok(s) => s,
+                            Err(_) => return false,
+                        };
+                    topic == soroban_sdk::symbol_short!("DsptRslv")
+                }
+            })
+            .count();
+        assert_eq!(rslv_count, 1, "expected exactly one DsptRslv event");
+
+        // Step 4: Feeder corrects tx_stats after re-sync.
+        credit.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128, // corrected realistic value
+                tx_count_30d: 5,
+                avg_counterparties: 2,
+            },
+        );
+
+        // Step 5: Recompute score; it must reflect the corrected input.
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let corrected_score = credit.compute_score(&subject);
+
+        assert!(
+            corrected_score < inflated_score,
+            "score after correction ({}) should be lower than inflated score ({})",
+            corrected_score,
+            inflated_score
+        );
+        assert!(corrected_score >= 300, "score must be >= 300, got {}", corrected_score);
+    }
+
+    /// Subjects cannot file a dispute for an unrecognised input key.
+    #[test]
+    fn test_dispute_invalid_input_key_rejected_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        let bad_key = soroban_sdk::Symbol::new(&env, "bad_key");
+        let reason = soroban_sdk::String::from_str(&env, "test");
+        let result = credit.try_flag_score_input(&subject, &bad_key, &reason);
+        assert_eq!(
+            result,
+            Err(Ok(CreditOracleError::InvalidInputKey)),
+            "expected InvalidInputKey for unrecognised input key"
+        );
+    }
+
+    /// Anti-griefing: re-filing a pending dispute for the same key is blocked.
+    #[test]
+    fn test_dispute_anti_griefing_duplicate_pending_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let reason = soroban_sdk::String::from_str(&env, "Missed repayment was on-time");
+        credit.flag_score_input(&subject, &input_key, &reason);
+
+        let result = credit.try_flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(
+            result,
+            Err(Ok(CreditOracleError::DisputeAlreadyPending)),
+            "expected DisputeAlreadyPending when re-filing a pending dispute"
+        );
+    }
+}
