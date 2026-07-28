@@ -383,7 +383,7 @@ impl IdentityOracle {
     ///
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn set_revocation_registry(
         env: Env,
         registry_id: Address,
@@ -1039,7 +1039,7 @@ impl IdentityOracle {
     /// # Important
     ///
     /// If `None` is returned, `is_verified`, `get_active_vc_count`, and
-    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag —
+    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag â€”
     /// any revocations performed through the `RevocationRegistry` contract
     /// will be **silently ignored**.
     ///
