@@ -279,12 +279,19 @@ impl CreditOracle {
                 .get(&DataKey::FeedersIndex)
                 .unwrap_or(Vec::new(&env));
             feeders.push_back(feeder.clone());
+            let index_key = DataKey::FeedersIndex;
             env.storage()
                 .persistent()
-                .set(&DataKey::FeedersIndex, &feeders);
+                .set(&index_key, &feeders);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.storage().persistent().set(&feeder_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&feeder_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -356,12 +363,19 @@ impl CreditOracle {
                 .get(&DataKey::LendersIndex)
                 .unwrap_or(Vec::new(&env));
             lenders.push_back(lender.clone());
+            let index_key = DataKey::LendersIndex;
             env.storage()
                 .persistent()
-                .set(&DataKey::LendersIndex, &lenders);
+                .set(&index_key, &lenders);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.storage().persistent().set(&lender_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&lender_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -519,11 +533,18 @@ impl CreditOracle {
                     total_repaid: 0,
                 };
                 env.storage().persistent().set(&key, &v2);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
             }
         }
+        let record_key = DataKey::RepaymentRecord(subject);
         env.storage()
             .persistent()
-            .set(&DataKey::RepaymentRecord(subject), &record);
+            .set(&record_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&record_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         increment_repayments_recorded(&env);
         Ok(())
     }
@@ -684,8 +705,9 @@ impl CreditOracle {
             if is_first_computation {
                 increment_subjects_scored(&env);
             }
+            let score_key = DataKey::Score(subject.clone());
             env.storage().persistent().set(
-                &DataKey::Score(subject.clone()),
+                &score_key,
                 &ScoreRecord {
                     score,
                     last_updated: env.ledger().timestamp(),
@@ -697,6 +719,9 @@ impl CreditOracle {
                     stale: false,
                 },
             );
+            env.storage()
+                .persistent()
+                .extend_ttl(&score_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.events()

@@ -183,10 +183,11 @@ fn store_credential_type(
     vc_hash: &BytesN<32>,
     credential_type: Symbol,
 ) {
-    env.storage().persistent().set(
-        &DataKey::VCCredentialType(subject.clone(), vc_hash.clone()),
-        &credential_type,
-    );
+    let key = DataKey::VCCredentialType(subject.clone(), vc_hash.clone());
+    env.storage().persistent().set(&key, &credential_type);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
 /// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
@@ -428,12 +429,19 @@ impl IdentityOracle {
                 .get(&DataKey::IssuersIndex)
                 .unwrap_or(Vec::new(&env));
             issuers.push_back(issuer.clone());
+            let index_key = DataKey::IssuersIndex;
             env.storage()
                 .persistent()
-                .set(&DataKey::IssuersIndex, &issuers);
+                .set(&index_key, &issuers);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.storage().persistent().set(&issuer_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&issuer_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         env.events().publish((symbol_short!("IssReg"),), issuer);
         Ok(())
     }
@@ -588,6 +596,9 @@ impl IdentityOracle {
                 updated.push_back(record);
             }
             env.storage().persistent().set(&key, &updated);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
             if revoked_count > 0 {
                 increment_vcs_revoked(&env, revoked_count);
             }
@@ -725,9 +736,13 @@ impl IdentityOracle {
                 active_count = active_count
                     .checked_sub(1)
                     .expect("active VC count underflow");
+                let active_key = DataKey::ActiveVCCount(subject.clone());
                 env.storage()
                     .persistent()
-                    .set(&DataKey::ActiveVCCount(subject.clone()), &active_count);
+                    .set(&active_key, &active_count);
+                env.storage()
+                    .persistent()
+                    .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
             } else {
                 seed_active_vc_count(&env, &subject);
             }
@@ -802,9 +817,13 @@ impl IdentityOracle {
         }
 
         // 3. Clear cached active VC count
+        let active_key = DataKey::ActiveVCCount(subject.clone());
         env.storage()
             .persistent()
-            .set(&DataKey::ActiveVCCount(subject.clone()), &0u32);
+            .set(&active_key, &0u32);
+        env.storage()
+            .persistent()
+            .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         // 4. Emit event
         env.events()

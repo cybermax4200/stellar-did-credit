@@ -1623,3 +1623,58 @@ mod tests {
             "expected DisputeAlreadyPending when re-filing a pending dispute"
         );
     }
+
+    /// Verifies that persistent storage entries (DID document, VC anchors, revocation status)
+    /// survive a simulated ledger advance of 200,000 ledgers (> initial unextended threshold).
+    #[test]
+    fn test_persistent_storage_ttl_survival_after_ledger_advance() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let id_oracle_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &id_oracle_id);
+
+        let rev_reg_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &rev_reg_id);
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        identity.register_trusted_issuer(&admin, &issuer);
+
+        revocation.initialize(&admin, &id_oracle_id);
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &issuer);
+
+        // 1. Write persistent entries
+        let cid = soroban_sdk::String::from_str(&env, "ipfs://QmPersistentTestDoc");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        revocation.register_revocation(&issuer, &subject, &vc_hash);
+
+        credit.record_repayment(&issuer, &subject, &true, &100u64);
+
+        // 2. Advance ledger sequence by 200,000 ledgers (~11.5 days of ledgers)
+        let jump = 200_000u32;
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // 3. Verify persistent entries survive and remain accessible
+        let retrieved_did = identity.get_did_document(&subject);
+        assert_eq!(retrieved_did, Some(cid));
+
+        let is_rev = revocation.is_revoked(&vc_hash);
+        assert_eq!(is_rev, true);
+
+        let active_count = identity.get_active_vc_count(&subject);
+        assert_eq!(active_count, 0); // Revoked VC => 0 active
+    }
