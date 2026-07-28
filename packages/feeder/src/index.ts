@@ -92,6 +92,94 @@ interface SubjectSyncState {
 }
 
 // ---------------------------------------------------------------------------
+// Validation and error handling helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Checks if an address is a valid Stellar public key (G-address).
+ * Must start with 'G', be 56 characters total, and pass Stellar SDK validation.
+ */
+function isValidStellarAddress(address: string): boolean {
+  if (!address || typeof address !== "string") return false;
+  if (!address.startsWith("G")) return false;
+  if (address.length !== 56) return false;
+
+  // Validate against Stellar SDK
+  try {
+    Keypair.fromPublicKey(address);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if an error is a Horizon "account not found" (404) response.
+ * These errors are permanent and should not be retried.
+ */
+function isAccountNotFoundError(error: unknown): boolean {
+  const err = error as any;
+
+  // Check for Horizon 404 response
+  if (err?.response?.status === 404) return true;
+
+  // Check for Horizon error code in extras
+  if (err?.response?.data?.extras?.result_codes) return true;
+
+  // Check for SDK-specific not-found error messages
+  if (
+    err?.message &&
+    typeof err.message === "string" &&
+    err.message.includes("account") &&
+    err.message.includes("not found")
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+/**
+ * Checks if an error is a transient failure that should be retried.
+ * Includes network timeouts, rate limits (429), and server errors (500/503).
+ */
+function isTransientError(error: unknown): boolean {
+  const err = error as any;
+
+  // Network timeout
+  if (err?.code === "ECONNREFUSED" || err?.code === "ETIMEDOUT") return true;
+
+  // Rate limit
+  if (err?.response?.status === 429) return true;
+
+  // Server errors
+  if (err?.response?.status === 500 || err?.response?.status === 503)
+    return true;
+
+  // General network errors
+  if (err?.message && typeof err.message === "string") {
+    const msg = err.message.toLowerCase();
+    if (
+      msg.includes("timeout") ||
+      msg.includes("econnrefused") ||
+      msg.includes("network")
+    ) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Checks if an error is permanent and should not be retried.
+ * Includes 404s, invalid addresses, and simulation failures.
+ */
+function isPermanentError(error: unknown): boolean {
+  return isAccountNotFoundError(error);
+}
+
+// ---------------------------------------------------------------------------
 // Horizon helpers
 // ---------------------------------------------------------------------------
 
@@ -102,11 +190,19 @@ interface SubjectSyncState {
  * 30-day cutoff. Only native (XLM) payment amounts are included in the volume
  * total; non-native assets are counted toward tx_count and counterparties but
  * not volume, matching the credit-oracle's scoring semantics.
+ *
+ * Returns empty stats if the address is invalid or the account is not found.
  */
 export async function fetchHorizonStats(
   horizonUrl: string,
   address: string,
 ): Promise<TxStats> {
+  // Validate address before making API calls
+  if (!isValidStellarAddress(address)) {
+    console.log(`[feeder] Skipping invalid Stellar address: ${address}`);
+    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+  }
+
   const horizon = new Horizon.Server(horizonUrl);
   const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
 
@@ -152,9 +248,30 @@ export async function fetchHorizonStats(
     }
   }
 
-  let page = await callWithHorizonRateLimit(() =>
-    horizon.payments().forAccount(address).order("desc").limit(200).call(),
-  );
+  let page: any;
+  try {
+    page = await callWithHorizonRateLimit(() =>
+      horizon.payments().forAccount(address).order("desc").limit(200).call(),
+    );
+  } catch (err) {
+    if (isAccountNotFoundError(err)) {
+      console.log(`[feeder] Account not found for ${address}, skipping`);
+      return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+    }
+    if (isTransientError(err)) {
+      throw err;
+    }
+    console.error(
+      `[feeder] Error fetching Horizon stats for ${address}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+  }
+
+  // Handle case where Horizon returns zero records
+  if (!page.records || page.records.length === 0) {
+    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+  }
 
   outer: while (page.records.length > 0) {
     for (const record of page.records) {
@@ -218,6 +335,8 @@ function getSequence(accountData: SorobanRpc.Api.GetAccountResponse): string {
 /**
  * Reads the active (non-revoked) VC count from the identity-oracle.
  * Uses a read-only simulation — no signing or fees required.
+ *
+ * Returns 0 for unknown subjects without throwing.
  */
 export async function getActiveVcCount(
   server: SorobanRpc.Server,
@@ -227,6 +346,14 @@ export async function getActiveVcCount(
   >,
   subjectAddress: string,
 ): Promise<number> {
+  // Validate address before making API calls
+  if (!isValidStellarAddress(subjectAddress)) {
+    console.log(
+      `[feeder] Skipping invalid Stellar address for VC count: ${subjectAddress}`,
+    );
+    return 0;
+  }
+
   const contract = new Contract(config.identityOracleId);
   const sourceAccount = new Account(config.simAccount, "0");
 
@@ -243,13 +370,28 @@ export async function getActiveVcCount(
     .setTimeout(30)
     .build();
 
-  const sim = await server.simulateTransaction(tx);
+  let sim: any;
+  try {
+    sim = await server.simulateTransaction(tx);
+  } catch (err) {
+    console.error(
+      `[feeder] Error simulating get_active_vc_count for ${subjectAddress}:`,
+      err instanceof Error ? err.message : err,
+    );
+    return 0;
+  }
 
   if (SorobanRpc.Api.isSimulationError(sim)) {
-    throw new Error(`get_active_vc_count simulation failed: ${sim.error}`);
+    console.error(
+      `[feeder] get_active_vc_count simulation failed for ${subjectAddress}: ${sim.error}`,
+    );
+    return 0;
   }
   if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-    throw new Error("Unexpected simulation response for get_active_vc_count");
+    console.error(
+      `[feeder] Unexpected simulation response for get_active_vc_count on ${subjectAddress}`,
+    );
+    return 0;
   }
 
   return Number(scValToNative(sim.result!.retval));
@@ -570,13 +712,38 @@ export class Feeder {
   /**
    * Runs one complete feed cycle across all configured subjects.
    *
-   * Checks `signal` before starting each subject. If it's already aborted,
+   * Validates all subject addresses at the start. If it's already aborted,
    * the loop stops and no further subjects are started — subjects already
    * in progress when the signal was raised are left to `feedSubject` to wind
    * down gracefully.
+   *
+   * Logs a summary at the end with succeeded/skipped/failed counts.
    */
   async runCycle(signal?: AbortSignal): Promise<void> {
+    // Validate all subjects at the start of the cycle
+    let validSubjects = this.config.subjects;
+    let invalidCount = 0;
+    const invalidAddresses: string[] = [];
+
     for (const subject of this.config.subjects) {
+      if (!isValidStellarAddress(subject)) {
+        invalidCount++;
+        invalidAddresses.push(subject);
+      }
+    }
+
+    if (invalidCount > 0) {
+      console.warn(
+        `[feeder] Found ${invalidCount} invalid addresses, processing ${this.config.subjects.length - invalidCount} valid subjects`,
+      );
+      validSubjects = this.config.subjects.filter(isValidStellarAddress);
+    }
+
+    let succeeded = 0;
+    let skipped = 0;
+    let failed = 0;
+
+    for (const subject of validSubjects) {
       if (signal?.aborted) {
         console.log(
           `[feeder] cycle aborted — not starting remaining subjects`,
@@ -585,13 +752,25 @@ export class Feeder {
       }
       try {
         await this.feedSubject(subject, signal);
+        succeeded++;
       } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorType = isPermanentError(err) ? "permanent" : "transient";
+        const action = isPermanentError(err) ? "skipped" : "will retry";
         console.error(
-          `[feeder] error syncing ${subject}:`,
-          err instanceof Error ? err.message : err,
+          `[feeder] error syncing ${subject} (${errorType}): ${errorMsg} — ${action}`,
         );
+        if (isPermanentError(err)) {
+          skipped++;
+        } else {
+          failed++;
+        }
       }
     }
+
+    console.log(
+      `[feeder] Cycle complete: ${succeeded} succeeded, ${skipped} skipped, ${failed} failed`,
+    );
   }
 
   /**
@@ -739,6 +918,29 @@ if (require.main === module) {
     process.exit(1);
   }
 
+  // Validate all subjects at startup
+  const validSubjects = subjects.filter(isValidStellarAddress);
+  const invalidSubjects = subjects.filter((s) => !isValidStellarAddress(s));
+
+  if (invalidSubjects.length > 0) {
+    console.warn(
+      `[feeder] Found ${invalidSubjects.length} invalid address(es) in SUBJECTS:`,
+    );
+    for (const invalid of invalidSubjects) {
+      console.warn(`  - ${invalid}`);
+    }
+    console.warn(
+      `[feeder] Processing ${validSubjects.length} valid subject(s)`,
+    );
+  }
+
+  if (validSubjects.length === 0) {
+    console.error(
+      "Error: No valid Stellar addresses found in SUBJECTS. All addresses must start with 'G' and be 56 characters.",
+    );
+    process.exit(1);
+  }
+
   let feederKeypair: Keypair;
   try {
     feederKeypair = Keypair.fromSecret(feederSecret);
@@ -749,7 +951,7 @@ if (require.main === module) {
 
   console.log("[feeder] starting");
   console.log(`  feeder     : ${feederKeypair.publicKey()}`);
-  console.log(`  subjects   : ${subjects.join(", ")}`);
+  console.log(`  subjects   : ${validSubjects.join(", ")}`);
   console.log(`  interval   : ${pollIntervalMs}ms`);
   console.log(`  rpc        : ${rpcUrl}`);
   console.log(`  horizon    : ${horizonUrl}`);
@@ -763,7 +965,7 @@ if (require.main === module) {
     creditOracleId,
     identityOracleId,
     simAccount,
-    subjects,
+    subjects: validSubjects,
     pollIntervalMs,
     maxRetries,
     retryBaseDelayMs,

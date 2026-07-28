@@ -337,3 +337,308 @@ describe("Horizon rate limiting handling", () => {
     consoleWarn.mockRestore();
   });
 });
+
+
+describe("Address validation and error handling", () => {
+  let consoleLogSpy: jest.SpyInstance;
+  let consoleErrorSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+  });
+
+  it("invalid address is detected early and skipped with log message", async () => {
+    const { fetchHorizonStats } = await import("./index");
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      "INVALID_ADDRESS",
+    );
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(0);
+    expect(stats.avgCounterparties).toBe(0);
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "[feeder] Skipping invalid Stellar address: INVALID_ADDRESS",
+    );
+  });
+
+  it("account not found (404) is handled gracefully, not thrown", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockImplementationOnce(() => {
+      const err: any = new Error("Not found");
+      err.response = { status: 404 };
+      throw err;
+    });
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      "GACCOUNT",
+    );
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(0);
+    expect(stats.avgCounterparties).toBe(0);
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "[feeder] Account not found for GACCOUNT, skipping",
+    );
+  });
+
+  it("transient error is re-thrown for retry by withExponentialBackoff", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockImplementationOnce(() => {
+      const err: any = new Error("Network timeout");
+      err.code = "ETIMEDOUT";
+      throw err;
+    });
+
+    // Should throw the transient error, not swallow it
+    await expect(
+      fetchHorizonStats("https://horizon.example", "GADDR"),
+    ).rejects.toThrow();
+  });
+
+  it("empty payments response (zero records) handled correctly", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      "GADDR",
+    );
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(0);
+    expect(stats.avgCounterparties).toBe(0);
+  });
+
+  it("getActiveVcCount returns 0 for unknown subject without throwing", async () => {
+    const { getActiveVcCount } = await import("./index");
+
+    sdk.scValToNative.mockReturnValueOnce(0);
+    mockServerInstance.simulateTransaction.mockResolvedValueOnce({
+      result: { retval: {} },
+    });
+
+    const count = await getActiveVcCount(mockServerInstance as any, config, "GSUBJECT");
+
+    expect(count).toBe(0);
+  });
+
+  it("getActiveVcCount returns 0 on simulation error", async () => {
+    const { getActiveVcCount } = await import("./index");
+
+    mockServerInstance.simulateTransaction.mockResolvedValueOnce({
+      error: "Simulation failed",
+    });
+
+    const count = await getActiveVcCount(mockServerInstance as any, config, "GSUBJECT");
+
+    expect(count).toBe(0);
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringContaining("get_active_vc_count simulation failed"),
+      expect.any(String),
+    );
+  });
+
+  it("invalid VC count address is validated and returns 0", async () => {
+    const { getActiveVcCount } = await import("./index");
+
+    const count = await getActiveVcCount(
+      mockServerInstance as any,
+      config,
+      "INVALID",
+    );
+
+    expect(count).toBe(0);
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Skipping invalid Stellar address"),
+    );
+  });
+});
+
+describe("runCycle error handling and summary", () => {
+  let consoleLogSpy: jest.SpyInstance;
+  let consoleErrorSpy: jest.SpyInstance;
+  let consoleWarnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = jest
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    consoleWarnSpy = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("runCycle completes when some subjects fail", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockImplementationOnce(async () => {
+        // First subject succeeds
+      })
+      .mockImplementationOnce(async () => {
+        // Second subject fails
+        throw new Error("Transient error");
+      });
+
+    await expect(feeder.runCycle()).resolves.toBeUndefined();
+    expect(feedSubjectSpy).toHaveBeenCalledTimes(2);
+
+    feedSubjectSpy.mockRestore();
+  });
+
+  it("runCycle completes when ALL subjects fail", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("All fail"));
+
+    await expect(feeder.runCycle()).resolves.toBeUndefined();
+    expect(feedSubjectSpy).toHaveBeenCalledTimes(2);
+
+    feedSubjectSpy.mockRestore();
+  });
+
+  it("summary log shows correct succeeded/skipped/failed counts", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as any);
+
+    // Mock feedSubject: first succeeds, second fails with permanent error
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockImplementationOnce(async () => {
+        // First subject succeeds
+      })
+      .mockImplementationOnce(async () => {
+        // Second subject fails with 404 (permanent)
+        const err: any = new Error("Account not found");
+        err.response = { status: 404 };
+        throw err;
+      });
+
+    await feeder.runCycle();
+
+    // Should log summary with correct counts
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "[feeder] Cycle complete: 1 succeeded, 1 skipped, 0 failed",
+    );
+
+    feedSubjectSpy.mockRestore();
+  });
+
+  it("validates all addresses at the start of cycle", async () => {
+    const configWithInvalid: FeederConfig = {
+      ...config,
+      subjects: ["GVALID123456789012345678901234567890123456789012345", "INVALID"],
+    };
+    const feeder = new Feeder(configWithInvalid, {
+      publicKey: () => "GFEEDER",
+    } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockResolvedValue(undefined);
+
+    await feeder.runCycle();
+
+    // Should warn about invalid address
+    expect(consoleWarnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("Found 1 invalid"),
+    );
+
+    // Should only call feedSubject for valid address
+    expect(feedSubjectSpy).toHaveBeenCalledTimes(1);
+
+    feedSubjectSpy.mockRestore();
+  });
+
+  it("includes subject address and error type in error logs", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockImplementationOnce(async () => {
+        // Permanent error
+        const err: any = new Error("Account not found");
+        err.response = { status: 404 };
+        throw err;
+      });
+
+    await feeder.runCycle();
+
+    // Should include subject, error type, and action
+    expect(consoleErrorSpy).toHaveBeenCalledWith(
+      expect.stringMatching(/GSUBJECT1.*permanent.*skipped/),
+    );
+
+    feedSubjectSpy.mockRestore();
+  });
+});
+
+describe("Error classification helpers", () => {
+  it("isAccountNotFoundError correctly identifies 404", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    // Mock Horizon to return 404
+    mockHorizonPaymentsCall.mockImplementationOnce(() => {
+      const err: any = new Error("Not found");
+      err.response = { status: 404 };
+      throw err;
+    });
+
+    const consoleLogSpy = jest
+      .spyOn(console, "log")
+      .mockImplementation(() => {});
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      "GADDR",
+    );
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "[feeder] Account not found for GADDR, skipping",
+    );
+
+    consoleLogSpy.mockRestore();
+  });
+
+  it("isTransientError correctly identifies network errors", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    // Mock Horizon to return network timeout
+    mockHorizonPaymentsCall.mockImplementationOnce(() => {
+      const err: any = new Error("Network timeout");
+      err.code = "ETIMEDOUT";
+      throw err;
+    });
+
+    // Should throw (not catch) transient errors
+    await expect(
+      fetchHorizonStats("https://horizon.example", "GADDR"),
+    ).rejects.toThrow("Network timeout");
+  });
+});
