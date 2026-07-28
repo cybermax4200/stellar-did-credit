@@ -32,6 +32,27 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
 
+  ts-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Install SDK dependencies
+        run: pnpm install --frozen-lockfile
+        working-directory: packages/sdk
+
+      - name: Run TypeScript SDK tests
+        run: pnpm test -- --coverage
+        working-directory: packages/sdk
+
   docs:
     runs-on: ubuntu-latest
     steps:
@@ -93,6 +114,27 @@ jobs:
 
       - name: Check Node.js licenses
         run: pnpm run license-check
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check Rust advisories
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Check Node.js dependencies for vulnerabilities
+        run: pnpm audit --audit-level=high
 
   check-wasm-sizes:
     runs-on: ubuntu-latest

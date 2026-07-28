@@ -67,10 +67,7 @@ impl CreditOracleClient {
     }
 
     /// Get pending weights from the credit-oracle.
-    pub fn get_pending_weights(
-        env: &Env,
-        contract_id: &Address,
-    ) -> Option<PendingWeightsRecord> {
+    pub fn get_pending_weights(env: &Env, contract_id: &Address) -> Option<PendingWeightsRecord> {
         env.invoke_contract(
             contract_id,
             &Symbol::new(env, "get_pending_weights"),
@@ -87,5 +84,3 @@ impl CreditOracleClient {
         )
     }
 }
-
-

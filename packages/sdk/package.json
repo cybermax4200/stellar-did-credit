@@ -29,11 +29,25 @@
     "testMatch": [
       "**/*.test.ts"
     ],
+    "collectCoverage": true,
+    "collectCoverageFrom": [
+      "src/**/*.ts",
+      "!src/**/*.test.ts",
+      "!src/**/*.spec.ts"
+    ],
+    "coverageThreshold": {
+      "global": {
+        "branches": 60,
+        "functions": 80,
+        "lines": 80,
+        "statements": 80
+      }
+    },
     "globals": {
       "ts-jest": {
         "diagnostics": false
       }
     }
   },
-  "types": "dist/index.d.ts"
+  "types": "src/index.ts"
 }

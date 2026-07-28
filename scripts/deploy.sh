@@ -11,6 +11,7 @@ DEPLOYMENTS_FILE=${DEPLOYMENTS_FILE:-}
 RESUME=false
 FUND=false
 FRIENDBOT_URL=${FRIENDBOT_URL:-https://friendbot.stellar.org}
+CONFIGURE=false
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -34,12 +35,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--configure]" >&2
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--configure]" >&2 (fix(identity-oracle): document and validate RevocationRegistryId initialization asymmetry)
       exit 1
       ;;
   esac
@@ -293,6 +294,43 @@ else
 fi
 
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Post-deploy configuration (--configure mode)
+#
+# Runs initialization and cross-contract linking after all contracts
+# are deployed.  Requires ADMIN, IDENTITY_ID, CREDIT_ID and
+# REVOCATION_ID environment variables.
+#
+# Optional:
+#   SET_IDENTITY_ORACLE=true  - Also link identity-oracle to credit-oracle
+# ---------------------------------------------------------------------------
+if $CONFIGURE; then
+  if [ -z "${ADMIN:-}" ] || [ -z "${IDENTITY_ID:-}" ] || [ -z "${CREDIT_ID:-}" ] || [ -z "${REVOCATION_ID:-}" ]; then
+    echo "Error: --configure mode requires ADMIN, IDENTITY_ID, CREDIT_ID, and REVOCATION_ID" >&2
+    exit 1
+  fi
+
+  echo "Initializing identity-oracle..."
+  stellar contract invoke --id "$IDENTITY_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
+
+  echo "Initializing credit-oracle..."
+  stellar contract invoke --id "$CREDIT_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
+
+  echo "Initializing revocation-registry..."
+  stellar contract invoke --id "$REVOCATION_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
+
+  echo "Linking revocation-registry to identity-oracle..."
+  stellar contract invoke --id "$IDENTITY_ID" --source "$SOURCE" --network "$NETWORK" -- set_revocation_registry --registry_id "$REVOCATION_ID"
+
+  if [ "${SET_IDENTITY_ORACLE:-false}" = "true" ]; then
+    echo "Linking identity-oracle to credit-oracle..."
+    stellar contract invoke --id "$CREDIT_ID" --source "$SOURCE" --network "$NETWORK" -- set_identity_oracle --identity_oracle_id "$IDENTITY_ID"
+  fi
+
+  echo "Configuration complete."
+  exit 0
+fi
+
 # Atomic JSON output
 #
 # deployments.<network>.json is written exactly once, only after every contract

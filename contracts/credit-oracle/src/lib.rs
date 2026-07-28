@@ -24,8 +24,16 @@ pub enum CreditOracleError {
     InvalidWeights = 5,
     /// No pending admin proposal exists.
     NoPendingAdmin = 6,
+    /// Compute score called too soon — cooldown has not elapsed.
+    ComputeCooldownActive = 7,
+    /// A dispute is already pending for this subject and input key.
+    DisputeAlreadyPending = 8,
+    /// No dispute was found for the given subject and input key.
+    DisputeNotFound = 9,
+    /// The provided input key is not a valid score input name.
+    InvalidInputKey = 10,
     /// The provided identity oracle contract is invalid or did not respond.
-    InvalidIdentityOracle = 7,
+    InvalidIdentityOracle = 11,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -78,6 +86,12 @@ pub enum DataKey {
     FeedersIndex,
     /// Index of all registered lenders
     LendersIndex,
+    /// Storage version for migration tracking
+    StorageVersion,
+    /// Dispute record for a (subject, input_key) pair
+    Dispute(Address, Symbol),
+    /// Index of all disputed input keys for a subject
+    DisputeIndex(Address),
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -165,9 +179,43 @@ pub struct RepaymentRecordV1 {
     /// Total number of repayments recorded.
     pub total_count: u32,
 }
+/// Status of an on-chain score input dispute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    /// Dispute filed; awaiting admin review.
+    Pending,
+    /// Admin accepted the dispute; feeder re-sync requested.
+    Resolved,
+    /// Admin rejected the dispute; input deemed correct.
+    Rejected,
+}
+
+/// A subject's on-chain record disputing a specific score input.
+///
+/// Filed via `flag_score_input`; resolved by the admin via `resolve_dispute`.
+/// The `input_key` is one of `tx_stats`, `repayment`, or `vc_count`.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeRecord {
+    /// The subject who filed the dispute.
+    pub subject: Address,
+    /// Which input is disputed: `tx_stats`, `repayment`, or `vc_count`.
+    pub input_key: Symbol,
+    /// Free-text reason provided by the subject.
+    pub reason: String,
+    /// Ledger sequence number when the dispute was filed.
+    pub filed_at_ledger: u32,
+    /// Current resolution status.
+    pub status: DisputeStatus,
+}
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
+/// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+/// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
+const PERS_TTL_EXTEND: u32 = 518_400;
 
 #[contract]
 pub struct CreditOracle;
@@ -292,7 +340,11 @@ impl CreditOracle {
 
         let mut compacted = Vec::new(&env);
         for addr in ever_registered.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedFeeder(addr.clone()))
+            {
                 compacted.push_back(addr);
             }
         }
@@ -365,7 +417,11 @@ impl CreditOracle {
 
         let mut compacted = Vec::new(&env);
         for addr in ever_registered.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedLender(addr.clone()))
+            {
                 compacted.push_back(addr);
             }
         }
@@ -469,10 +525,7 @@ impl CreditOracle {
     /// and writes use the new layout automatically.
     ///
     /// **Authentication:** only the current admin may call this function.
-    pub fn migrate(
-        env: Env,
-        subjects: soroban_sdk::Vec<Address>,
-    ) -> Result<(), CreditOracleError> {
+    pub fn migrate(env: Env, subjects: soroban_sdk::Vec<Address>) -> Result<(), CreditOracleError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -520,7 +573,10 @@ impl CreditOracle {
     }
 
     /// Compute and store credit score for a user
-    pub fn compute_score(env: Env, subject: Address) -> u32 {
+    pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        // Reject if last computation was within the cooldown window
+        Self::check_compute_cooldown(&env, &subject)?;
+
         let tx_stats: TxStats = env
             .storage()
             .persistent()
@@ -575,6 +631,16 @@ impl CreditOracle {
             .instance()
             .get::<_, Address>(&DataKey::IdentityOracleId)
         {
+            // Check if the subject has deactivated their identity
+            let is_deactivated: bool = env.invoke_contract(
+                &identity_oracle_id,
+                &soroban_sdk::Symbol::new(&env, "is_deactivated"),
+                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+            );
+            if is_deactivated {
+                return MIN_SCORE;
+            }
+
             vc_count = env.invoke_contract::<u32>(
                 &identity_oracle_id,
                 &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
@@ -615,6 +681,7 @@ impl CreditOracle {
 
         let mut previous_score: Option<u32> = None;
         let mut needs_write = true;
+        let mut is_first_computation = true;
         if let Some(prev) = env
             .storage()
             .persistent()
@@ -628,6 +695,7 @@ impl CreditOracle {
                 needs_write = false;
             }
             previous_score = Some(prev.score);
+            is_first_computation = false;
         }
 
         let is_first = !env
@@ -636,8 +704,7 @@ impl CreditOracle {
             .has(&DataKey::Score(subject.clone()));
 
         if needs_write {
-            // Only increment subjects_scored for first-time subjects (no previous score)
-            if previous_score.is_none() {
+            if is_first_computation {
                 increment_subjects_scored(&env);
             }
             env.storage().persistent().set(
@@ -658,7 +725,30 @@ impl CreditOracle {
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
 
-        score
+        Ok(score)
+    }
+
+    /// Check cooldown — reject if the last computation was within the cooldown window.
+    fn check_compute_cooldown(env: &Env, subject: &Address) -> Result<(), CreditOracleError> {
+        let cooldown: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(0);
+
+        if cooldown > 0 {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
+            {
+                let current_ledger = env.ledger().sequence();
+                if current_ledger.saturating_sub(record.computed_at_ledger) < cooldown {
+                    return Err(CreditOracleError::ComputeCooldownActive);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get credit score for a user; returns None if score has not been computed yet.
@@ -876,11 +966,185 @@ impl CreditOracle {
 
         let mut active = Vec::new(&env);
         for feeder in feeders.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedFeeder(feeder.clone()))
+            {
                 active.push_back(feeder);
             }
         }
         active
+    }
+
+    /// Flag a specific score input as potentially incorrect.
+    ///
+    /// The subject authenticates themselves and names which of the three score
+    /// inputs they believe is wrong (`tx_stats`, `repayment`, or `vc_count`),
+    /// providing a free-text reason.
+    ///
+    /// Anti-griefing: only one `Pending` dispute per `(subject, input_key)` is
+    /// allowed at a time.  Filing a second dispute for the same key while the
+    /// first is still pending returns `DisputeAlreadyPending`.
+    ///
+    /// Emits a `DsptFild` event that off-chain feeders and admins can index
+    /// to trigger a review workflow.
+    pub fn flag_score_input(
+        env: Env,
+        subject: Address,
+        input_key: Symbol,
+        reason: String,
+    ) -> Result<(), CreditOracleError> {
+        subject.require_auth();
+
+        // Validate input_key is one of the three recognised score inputs.
+        let key_tx_stats = Symbol::new(&env, "tx_stats");
+        let key_repayment = Symbol::new(&env, "repayment");
+        let key_vc_count = Symbol::new(&env, "vc_count");
+        if input_key != key_tx_stats && input_key != key_repayment && input_key != key_vc_count {
+            return Err(CreditOracleError::InvalidInputKey);
+        }
+
+        let dispute_key = DataKey::Dispute(subject.clone(), input_key.clone());
+
+        // Reject if a Pending dispute already exists for this (subject, input_key).
+        if let Some(existing) = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeRecord>(&dispute_key)
+        {
+            if existing.status == DisputeStatus::Pending {
+                return Err(CreditOracleError::DisputeAlreadyPending);
+            }
+        }
+
+        let record = DisputeRecord {
+            subject: subject.clone(),
+            input_key: input_key.clone(),
+            reason,
+            filed_at_ledger: env.ledger().sequence(),
+            status: DisputeStatus::Pending,
+        };
+
+        env.storage().persistent().set(&dispute_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        // Maintain a per-subject index of disputed keys for `list_disputes`.
+        let index_key = DataKey::DisputeIndex(subject.clone());
+        let mut disputed_keys: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut already_indexed = false;
+        for k in disputed_keys.iter() {
+            if k == input_key {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            disputed_keys.push_back(input_key.clone());
+            env.storage().persistent().set(&index_key, &disputed_keys);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        env.events()
+            .publish((symbol_short!("DsptFild"),), (subject, input_key));
+        Ok(())
+    }
+
+    /// Resolve a pending dispute as admin.
+    ///
+    /// Pass `accepted = true` to mark the dispute `Resolved` — signalling to
+    /// the off-chain feeder that the flagged input should be re-fetched and
+    /// corrected.  Pass `accepted = false` to mark it `Rejected` (the input
+    /// is deemed correct).  After resolution the subject may file a new
+    /// dispute for the same key.
+    ///
+    /// Auth: admin only.
+    pub fn resolve_dispute(
+        env: Env,
+        subject: Address,
+        input_key: Symbol,
+        accepted: bool,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        stored_admin.require_auth();
+
+        let dispute_key = DataKey::Dispute(subject.clone(), input_key.clone());
+        let mut record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(CreditOracleError::DisputeNotFound)?;
+
+        if record.status != DisputeStatus::Pending {
+            return Err(CreditOracleError::DisputeNotFound);
+        }
+
+        record.status = if accepted {
+            DisputeStatus::Resolved
+        } else {
+            DisputeStatus::Rejected
+        };
+
+        env.storage().persistent().set(&dispute_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        if accepted {
+            // DsptRslv signals feeders to re-fetch and correct the flagged input.
+            env.events()
+                .publish((symbol_short!("DsptRslv"),), (subject, input_key));
+        } else {
+            env.events()
+                .publish((symbol_short!("DsptRjct"),), (subject, input_key));
+        }
+        Ok(())
+    }
+
+    /// Get the dispute record for a `(subject, input_key)` pair.
+    ///
+    /// Returns `None` if no dispute has ever been filed for this pair.
+    pub fn get_dispute(env: Env, subject: Address, input_key: Symbol) -> Option<DisputeRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Dispute(subject, input_key))
+    }
+
+    /// List all dispute records for a subject (one per input key, latest status).
+    ///
+    /// Returns an empty vec if the subject has never filed a dispute.
+    pub fn list_disputes(env: Env, subject: Address) -> Vec<DisputeRecord> {
+        let index_key = DataKey::DisputeIndex(subject.clone());
+        let disputed_keys: Vec<Symbol> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut records = Vec::new(&env);
+        for key in disputed_keys.iter() {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, DisputeRecord>(&DataKey::Dispute(subject.clone(), key))
+            {
+                records.push_back(record);
+            }
+        }
+        records
     }
 
     /// Returns all currently registered lender addresses.
@@ -893,7 +1157,11 @@ impl CreditOracle {
 
         let mut active = Vec::new(&env);
         for lender in lenders.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedLender(lender.clone()))
+            {
                 active.push_back(lender);
             }
         }
@@ -1067,12 +1335,15 @@ mod tests {
         // Verify the topic is Symbol("Score") — decode Val back to Symbol for comparison
         assert_eq!(topics.len(), 1, "expected 1 topic element");
         let topic_val = topics.get(0).unwrap();
-        let topic_sym: Symbol = topic_val.try_into_val(&env).expect("topic should be a Symbol");
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
         assert_eq!(topic_sym, symbol_short!("Score"), "expected Score topic");
 
         // Verify the data payload is (subject, score) — decode Val back to typed tuple
-        let (event_subject, event_score): (Address, u32) =
-            data.try_into_val(&env).expect("data should be (Address, u32)");
+        let (event_subject, event_score): (Address, u32) = data
+            .try_into_val(&env)
+            .expect("data should be (Address, u32)");
         assert_eq!(event_subject, subject, "event subject mismatch");
         assert_eq!(event_score, score, "event score mismatch");
     }
@@ -1560,10 +1831,12 @@ mod tests {
         client.compute_score(&subject);
         let record1 = client.get_score(&subject).unwrap();
 
-        // Advance ledger time by 100 seconds
+        // Advance ledger to bypass cooldown
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
-        // Second computation with identical inputs
+        // Second computation with identical inputs — write is skipped
         client.compute_score(&subject);
         let record2 = client.get_score(&subject).unwrap();
 
@@ -1575,7 +1848,9 @@ mod tests {
         client.register_feeder(&admin, &feeder);
         client.set_vc_count(&feeder, &subject, &2);
 
-        // Advance ledger time again
+        // Advance ledger again
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
         // Third computation with changed input
@@ -1659,9 +1934,258 @@ mod tests {
         let stats1 = client.get_protocol_stats();
         assert_eq!(stats1.total_subjects_scored, 1);
 
+        // Advance ledger to bypass cooldown before recomputing
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
         // Second computation with identical inputs — should NOT double count
         client.compute_score(&subject);
         let stats2 = client.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
     }
+
+    // ── Dispute mechanism tests ───────────────────────────────────────────
+
+    #[test]
+    fn test_flag_score_input_stores_pending_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume looks inflated");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.subject, subject);
+        assert_eq!(record.input_key, input_key);
+        assert_eq!(record.status, DisputeStatus::Pending);
+        assert_eq!(record.filed_at_ledger, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_flag_score_input_rejects_invalid_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let bad_key = soroban_sdk::Symbol::new(&env, "bad_input");
+        let reason = soroban_sdk::String::from_str(&env, "test");
+        let result = client.try_flag_score_input(&subject, &bad_key, &reason);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidInputKey)));
+    }
+
+    #[test]
+    fn test_flag_score_input_rejects_duplicate_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let reason = soroban_sdk::String::from_str(&env, "Repayment not recorded");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Second filing with pending status should fail
+        let result = client.try_flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeAlreadyPending)));
+    }
+
+    #[test]
+    fn test_resolve_dispute_accepted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
+        let reason = soroban_sdk::String::from_str(&env, "VC count is wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Resolved);
+    }
+
+    #[test]
+    fn test_resolve_dispute_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Tx volume wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        client.resolve_dispute(&subject, &input_key, &false);
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Rejected);
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_dispute_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let result = client.try_resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
+    }
+
+    #[test]
+    fn test_resolve_already_resolved_dispute_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let reason = soroban_sdk::String::from_str(&env, "test");
+        client.flag_score_input(&subject, &input_key, &reason);
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        // Resolving again should fail
+        let result = client.try_resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
+    }
+
+    #[test]
+    fn test_new_dispute_allowed_after_resolution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "First dispute");
+        client.flag_score_input(&subject, &input_key, &reason);
+        client.resolve_dispute(&subject, &input_key, &false); // rejected
+
+        // After rejection, subject can re-file for the same key
+        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after review");
+        client.flag_score_input(&subject, &input_key, &reason2);
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Pending);
+    }
+
+    #[test]
+    fn test_list_disputes_returns_all_filed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let r = soroban_sdk::String::from_str(&env, "reason");
+        client.flag_score_input(&subject, &soroban_sdk::Symbol::new(&env, "tx_stats"), &r);
+        client.flag_score_input(&subject, &soroban_sdk::Symbol::new(&env, "repayment"), &r);
+
+        let disputes = client.list_disputes(&subject);
+        assert_eq!(disputes.len(), 2);
+    }
+
+    #[test]
+    fn test_list_disputes_empty_for_new_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let disputes = client.list_disputes(&subject);
+        assert_eq!(disputes.len(), 0);
+    }
+
+    #[test]
+    fn test_get_dispute_returns_none_when_no_dispute() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
+        assert!(client.get_dispute(&subject, &input_key).is_none());
+    }
+
+    #[test]
+    fn test_flag_score_input_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "inflated volume");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        let events = env.events().all();
+        let dispute_events: soroban_sdk::Vec<_> = events
+            .iter()
+            .filter(|(id, topics, _)| {
+                *id == contract_id && topics.len() == 1 && {
+                    let topic: soroban_sdk::Symbol = topics
+                        .get(0)
+                        .unwrap()
+                        .try_into_val(&env)
+                        .unwrap();
+                    topic == symbol_short!("DsptFild")
+                }
+            })
+            .collect();
+        assert_eq!(dispute_events.len(), 1, "expected DsptFild event");
+    }
+
 }

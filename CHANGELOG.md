@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `credit-oracle`: on-chain dispute mechanism for score inputs. Subjects can call `flag_score_input(subject, input_key, reason)` to flag a `tx_stats`, `repayment`, or `vc_count` input as incorrect; admins resolve disputes via `resolve_dispute(subject, input_key, accepted)`. Anti-griefing enforced: only one `Pending` dispute per `(subject, input_key)` pair at a time. Emits `DsptFild`, `DsptRslv`, and `DsptRjct` events for off-chain feeder indexing. Read helpers: `get_dispute` and `list_disputes`. Dispute records stored with 30-day TTL (#244)
+- `packages/cli` (`@stellar-did-credit/cli`): new command-line interface with four commands — `anchor-did` (stores a DID document CID on-chain), `get-score` (reads a credit score with formatted table or JSON output), `verify-vc` (checks whether a VC hash is valid and non-revoked), and `compute-score` (submits a score computation transaction and returns the result). Reads contract IDs from environment variables, a `stellar-did-config.json` file, or `deployments.testnet.json`-style config. Built on `commander` with `--help` for every command (#161)
+
+### Fixed
+
+- SDK (`@stellar-did-credit/sdk`): removed duplicate `revokeVC` method that referenced undefined helpers; added missing `SorobanRpc.Server` instance property to the class constructor; fixed `computeScore` to use the class-level server and inline helpers; resolved type error in `waitForTransactionConfirmation` where `GetTransactionStatus` union was compared against string literals (#161)
+
+### Added
+
 - `identity-oracle` and `credit-oracle`: aggregate protocol-level counters stored in instance storage for on-chain operational metrics. Each contract exposes a `get_protocol_stats()` getter that returns a struct with counters updated on every write operation. Identity-oracle tracks `total_dids_anchored`, `total_vcs_anchored`, and `total_vcs_revoked`. Credit-oracle tracks `total_subjects_scored` and `total_repayments_recorded`. Unit tests verify counters increment correctly and do not double-count deduplicated operations (#256)
 - `identity-oracle`: `get_did_document(subject)` — read-only function that returns the anchored DID document CID for a subject, or `None` if no DID is anchored (#229)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `getDIDDocument(subjectAddress)` — fetches the anchored DID document CID from identity-oracle, returning `null` if not set (#229)

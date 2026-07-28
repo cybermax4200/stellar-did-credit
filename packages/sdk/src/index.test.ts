@@ -69,8 +69,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
     setTimeout: jest.fn().mockReturnThis(),
     build: jest.fn().mockReturnValue({ operations: [] }),
   })),
-  nativeToScVal: (value: unknown) => ({ value }),
-  scValToNative: (scVal: { value: unknown }) => scVal.value,
+  nativeToScVal: (value: unknown, _opts?: unknown) => ({ value }),
+  scValToNative: (scVal: { value: unknown }) => (scVal as any)?.value,
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
       getAccount: mockGetAccount,
@@ -79,18 +79,15 @@ jest.mock("@stellar/stellar-sdk", () => ({
       getTransaction: mockGetTransaction,
     })),
     Api: {
-      isSimulationError: (sim: { error?: string }) => Boolean(sim.error),
-      isSimulationSuccess: (sim: { result?: unknown }) => Boolean(sim.result),
+      isSimulationError: (sim: { error?: string }) => Boolean(sim?.error),
+      isSimulationSuccess: (sim: { result?: unknown }) => Boolean(sim?.result),
+      assembleTransaction: jest.fn().mockReturnValue({
+        build: jest.fn().mockReturnValue({
+          sign: jest.fn(),
+        }),
+      }),
     },
   },
-}));
-
-jest.mock("@stellar/stellar-sdk/rpc", () => ({
-  assembleTransaction: jest.fn().mockReturnValue({
-    build: jest.fn().mockReturnValue({
-      sign: jest.fn(),
-    }),
-  }),
 }));
 
 const mockConfig = {
@@ -105,6 +102,10 @@ const mockConfig = {
 
 const subjectAddress =
   "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM";
+
+const subjectKeypair = {
+  publicKey: () => subjectAddress,
+};
 
 const issuerKeypair = {
   publicKey: () => "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
@@ -171,8 +172,8 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("revokeVC", () => {
-    it("calls revoke_vc on the registry", async () => {
+  describe("revokeVC", () => {
+    it("calls revoke on the registry and mark_vc_revoked on identity", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
@@ -209,14 +210,14 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("anchorDID", () => {
+  describe("anchorDID", () => {
     it("throws when simulation returns an explicit error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "anchor_did rejected" });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.anchorDID(subjectAddress as never, "QmExampleCid"),
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
       ).rejects.toThrow("Simulation failed: anchor_did rejected");
       expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
       expect(mockSendTransaction).not.toHaveBeenCalled();
@@ -231,14 +232,28 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.anchorDID(subjectAddress as never, "QmExampleCid"),
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
       ).rejects.toThrow("Transaction submission failed: tx_bad_auth");
       expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
       expect(mockSendTransaction).toHaveBeenCalled();
     });
+
+    it("submits successfully and returns tx hash", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      const result = await sdk.anchorDID(subjectKeypair as never, "QmExampleCid");
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "anchor_did",
+      });
+    });
   });
 
-  describe.skip("issueVC", () => {
+  describe("issueVC", () => {
     it("throws when simulation returns an explicit error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "anchor_vc rejected" });
 
@@ -267,10 +282,35 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
       expect(mockSendTransaction).toHaveBeenCalled();
     });
+
+    it("submits successfully and returns tx hash", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 1);
+
+      const result = await sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash);
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "anchor_vc",
+      });
+    });
+
+    it("rejects non-32-byte credential hashes", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
+      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
   });
 
-  describe.skip("verifyVC", () => {
-    it("test_verifyVC_true_for_valid_hash", async () => {
+  describe("verifyVC", () => {
+    it("returns true for a valid hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: true },
@@ -285,7 +325,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.args).toHaveLength(2);
     });
 
-    it("test_verifyVC_false_for_revoked_hash", async () => {
+    it("returns false for a revoked hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: false },
@@ -307,12 +347,20 @@ describe("StellarDIDCreditSDK", () => {
       ).rejects.toThrow("vcHash must be exactly 32 bytes");
       expect(mockSimulateTransaction).not.toHaveBeenCalled();
     });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "verify error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.verifyVC(subjectAddress, Buffer.alloc(32)),
+      ).rejects.toThrow("Simulation failed: verify error");
+    });
   });
 
-  describe.skip("computeScore", () => {
-    it("test_computeScore_returns_updated_record", async () => {
-      // Verify that computeScore submits compute_score, waits for confirmation,
-      // then returns the updated ScoreRecord from getScore.
+  describe("computeScore", () => {
+    it("returns an updated ScoreRecord after successful compute + confirmation", async () => {
       mockGetAccount.mockResolvedValue({ sequence: "10" });
       mockSendTransaction.mockResolvedValue({
         status: "PENDING",
@@ -320,7 +368,7 @@ describe("StellarDIDCreditSDK", () => {
       });
       mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
       mockSimulateTransaction
-        .mockResolvedValueOnce({ result: { retval: { value: null } } }) // compute_score sim
+        .mockResolvedValueOnce({ result: { retval: { value: null } } })
         .mockResolvedValueOnce({
           result: {
             retval: {
@@ -330,10 +378,13 @@ describe("StellarDIDCreditSDK", () => {
                 vc_count: 2,
                 repayment_rate: 8500,
                 tx_volume_30d: 2_000_000n,
+                previous_score: null,
+                computed_at_ledger: 1000000,
+                stale: false,
               },
             },
           },
-        }); // getScore sim
+        });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const result = await sdk.computeScore(
@@ -341,7 +392,7 @@ describe("StellarDIDCreditSDK", () => {
         subjectAddress,
       );
 
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         score: 558,
         lastUpdated: 1_710_000_000,
         vcCount: 2,
@@ -375,6 +426,9 @@ describe("StellarDIDCreditSDK", () => {
                 vc_count: 3,
                 repayment_rate: 8000,
                 tx_volume_30d: 1_000_000n,
+                previous_score: null,
+                computed_at_ledger: 1000000,
+                stale: false,
               },
             },
           },
@@ -389,7 +443,7 @@ describe("StellarDIDCreditSDK", () => {
       await Promise.resolve();
       await jest.advanceTimersByTimeAsync(1000);
 
-      await expect(computePromise).resolves.toEqual({
+      await expect(computePromise).resolves.toMatchObject({
         score: 612,
         lastUpdated: 1_700_000_000,
         vcCount: 3,
@@ -472,8 +526,8 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe.skip("getVCCount", () => {
-    it("test_getVCCount_returns_active_count", async () => {
+  describe("getVCCount", () => {
+    it("returns active VC count", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: 3 },
@@ -488,7 +542,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.args).toHaveLength(1);
     });
 
-    it("test_getVCCount_returns_zero", async () => {
+    it("returns zero when no active VCs", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: 0 },
@@ -500,6 +554,133 @@ describe("StellarDIDCreditSDK", () => {
 
       expect(result).toBe(0);
       expect(mockLastContractCall?.method).toBe("get_active_vc_count");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getVCCount(subjectAddress)).rejects.toThrow(
+        "Simulation failed: rpc error",
+      );
+    });
+  });
+
+  describe("isVerified", () => {
+    it("returns true when subject has active VCs", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(true);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("returns false when subject has no active VCs", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isVerified(subjectAddress);
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("is_verified");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
+        "Simulation failed: rpc error",
+      );
+    });
+  });
+
+  describe("getWeights", () => {
+    it("returns scoring weights from the credit-oracle", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              vc_weight: 40,
+              tx_weight: 30,
+              repayment_weight: 30,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getWeights();
+
+      expect(result).toEqual({
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      });
+      expect(mockLastContractCall?.method).toBe("get_scoring_weights");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getWeights()).rejects.toThrow(
+        "Simulation failed: rpc error",
+      );
+    });
+  });
+
+  describe("getRegisteredIssuers", () => {
+    it("returns list of registered issuer addresses", async () => {
+      const issuers = ["GISSUER1", "GISSUER2"];
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: issuers },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getRegisteredIssuers();
+
+      expect(result).toEqual(issuers);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
+    });
+
+    it("returns empty array when no issuers registered", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: [] },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getRegisteredIssuers();
+
+      expect(result).toEqual([]);
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "Simulation failed: rpc error",
+      );
     });
   });
 
@@ -528,6 +709,48 @@ describe("StellarDIDCreditSDK", () => {
       expect(result).toBeNull();
     });
 
+    it("returns parsed ScoreRecord from simulation result", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              score: 750,
+              last_updated: 1_700_000_000,
+              vc_count: 5,
+              repayment_rate: 9500,
+              tx_volume_30d: 10_000_000n,
+              previous_score: null,
+              computed_at_ledger: 1234567,
+              stale: false,
+            },
+          },
+        },
+      });
+
+      const result = await sdk.getScore(subjectAddress);
+      expect(result).toMatchObject({
+        score: 750,
+        lastUpdated: 1_700_000_000,
+        vcCount: 5,
+        txVolume30d: 10_000_000n,
+        stale: false,
+      });
+    });
+
+    it("throws on unknown simulation error", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      mockSimulateTransaction.mockResolvedValue({
+        error: "some other error",
+      });
+
+      await expect(sdk.getScore(subjectAddress)).rejects.toThrow(
+        "Simulation failed: some other error",
+      );
+    });
+
     it("exports ScoreNotComputedError class", () => {
       expect(ScoreNotComputedError).toBeDefined();
       const error = new ScoreNotComputedError(subjectAddress);
@@ -538,8 +761,7 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("ProtocolConfig — timeoutSeconds, maxRetries, baseFee", () => {
-    it("test_timeout_applied_to_transaction_builder", async () => {
-      // Arrange: custom timeoutSeconds; provide a valid sim response so getScore completes.
+    it("applies custom timeoutSeconds to TransactionBuilder", async () => {
       const scoreRetval = {
         value: {
           score: 300,
@@ -547,6 +769,9 @@ describe("StellarDIDCreditSDK", () => {
           vc_count: 0,
           repayment_rate: 0,
           tx_volume_30d: 0n,
+          previous_score: null,
+          computed_at_ledger: 0,
+          stale: false,
         },
       };
       mockSimulateTransaction.mockResolvedValue({
@@ -567,11 +792,9 @@ describe("StellarDIDCreditSDK", () => {
       expect(setTimeoutSpy).toHaveBeenCalledWith(60);
     });
 
-    it("test_retry_succeeds_after_n_failures", async () => {
+    it("retries and succeeds after n transient failures", async () => {
       jest.useFakeTimers();
-      // Arrange: first 2 calls return a non-success/non-error response
-      // (simulates a transient RPC glitch), 3rd call succeeds.
-      const TRANSIENT = {}; // neither error nor success
+      const TRANSIENT = {};
       const SUCCESS = {
         result: {
           retval: {
@@ -581,6 +804,9 @@ describe("StellarDIDCreditSDK", () => {
               vc_count: 1,
               repayment_rate: 7000,
               tx_volume_30d: 500_000n,
+              previous_score: null,
+              computed_at_ledger: 0,
+              stale: false,
             },
           },
         },
@@ -593,18 +819,14 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 3 });
       const promise = sdk.getScore(subjectAddress);
 
-      // Advance timers past the two backoff sleeps (500ms + 1000ms)
       await jest.advanceTimersByTimeAsync(2000);
 
       const result = await promise;
       expect(result?.score).toBe(500);
-      // simulateTransaction must have been called 3 times (2 transient + 1 success)
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(3);
     });
 
-    it("test_retry_exhausted_throws_after_maxRetries", async () => {
-      // Use real timers but set maxRetries=0 so there are no sleeps at all —
-      // the loop runs exactly once (attempt 0), fails, and throws immediately.
+    it("throws after maxRetries exhausted with transient responses", async () => {
       const TRANSIENT = {};
       mockSimulateTransaction.mockResolvedValue(TRANSIENT);
 
@@ -612,12 +834,10 @@ describe("StellarDIDCreditSDK", () => {
       await expect(sdk.getScore(subjectAddress)).rejects.toThrow(
         "Simulation returned unexpected response",
       );
-      // maxRetries=0 → 1 total attempt (just attempt 0)
       expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
 
-    it("test_custom_baseFee_forwarded_to_transaction_builder", async () => {
-      // Provide a valid sim response so getScore completes without error.
+    it("forwards custom baseFee to TransactionBuilder", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: {
@@ -627,6 +847,9 @@ describe("StellarDIDCreditSDK", () => {
               vc_count: 0,
               repayment_rate: 0,
               tx_volume_30d: 0n,
+              previous_score: null,
+              computed_at_ledger: 0,
+              stale: false,
             },
           },
         },
@@ -654,11 +877,6 @@ describe("StellarDIDCreditSDK", () => {
 });
 
 describe("contract struct type exports", () => {
-  // These tests double as compile-time assertions: if any interface were not
-  // exported from the package entry point (./index), or if its shape drifted
-  // from the on-chain contract structs, this file would fail to type-check.
-  // The runtime expectations additionally verify the documented field types.
-
   it("exports TxStats with volume30d typed as bigint (Soroban i128)", () => {
     const stats: TxStats = {
       volume30d: 5_000_000_000n,
@@ -681,9 +899,7 @@ describe("contract struct type exports", () => {
     expect(typeof weights.vcWeight).toBe("number");
     expect(typeof weights.txWeight).toBe("number");
     expect(typeof weights.repaymentWeight).toBe("number");
-    expect(weights.vcWeight + weights.txWeight + weights.repaymentWeight).toBe(
-      100,
-    );
+    expect(weights.vcWeight + weights.txWeight + weights.repaymentWeight).toBe(100);
   });
 
   it("exports RepaymentRecord with numeric on-time and total counters", () => {
@@ -740,12 +956,6 @@ describe("contract struct type exports", () => {
 });
 
 describe("test_all_exports_are_defined", () => {
-  // Verifies that every public name from the SDK entry point has a defined
-  // runtime value. TypeScript interfaces (TxStats, ScoringWeights,
-  // RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig) have no runtime
-  // representation — their presence is guaranteed by the `import type` block
-  // at the top of this file, which causes a compile error if any type is
-  // missing from the barrel.
   it("exports MIN_SCORE and MAX_SCORE as defined numbers", () => {
     expect(MIN_SCORE).not.toBeUndefined();
     expect(MAX_SCORE).not.toBeUndefined();
@@ -767,42 +977,12 @@ describe("test_all_exports_are_defined", () => {
   });
 
   it("struct type imports compile without error (TxStats, ScoringWeights, RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig)", () => {
-    // If any of these types were missing from index.ts, TypeScript would
-    // refuse to compile this file, making the test suite fail at build time.
-    const _txStats: TxStats = {
-      volume30d: 0n,
-      txCount30d: 0,
-      avgCounterparties: 0,
-    };
-    const _weights: ScoringWeights = {
-      vcWeight: 40,
-      txWeight: 30,
-      repaymentWeight: 30,
-    };
+    const _txStats: TxStats = { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
+    const _weights: ScoringWeights = { vcWeight: 40, txWeight: 30, repaymentWeight: 30 };
     const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0 };
-    const _vc: VCRecord = {
-      vcHash: Buffer.alloc(32),
-      issuer: "G",
-      anchoredAt: 0,
-      revoked: false,
-    };
-    const _score: ScoreRecord = {
-      score: 300,
-      lastUpdated: 0,
-      vcCount: 0,
-      repaymentRate: 0,
-      txVolume30d: 0n,
-      computedAtLedger: 0,
-      stale: false,
-    };
-    const _config: ProtocolConfig = {
-      identityOracleId: "",
-      creditOracleId: "",
-      revocationRegistryId: "",
-      networkPassphrase: "",
-      rpcUrl: "",
-      simAccount: "",
-    };
+    const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
+    const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, computedAtLedger: 0, stale: false };
+    const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
     expect(_repayment).toBeDefined();

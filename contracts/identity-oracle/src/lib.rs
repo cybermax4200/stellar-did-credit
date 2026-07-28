@@ -161,6 +161,10 @@ pub enum DataKey {
     VCCredentialType(Address, BytesN<32>),
     /// Aggregate protocol-level counters.
     ProtocolStats,
+    /// Whether the subject has voluntarily deactivated their identity.
+    /// When set to `true`, `is_verified` returns `false` and credit scores
+    /// are suppressed. Reversible via `reactivate_identity`.
+    Deactivated(Address),
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -266,6 +270,24 @@ fn increment_vcs_revoked(env: &Env, count: u64) {
     save_protocol_stats(env, &stats);
 }
 
+/// Check whether a VC record should be considered revoked.
+///
+/// Returns `true` if the record has been locally revoked (via
+/// `mark_vc_revoked`) **or** if the configured `RevocationRegistry`
+/// reports the VC hash as revoked.
+///
+/// # Important: Registry Not Configured
+///
+/// If no `RevocationRegistryId` has been configured (via
+/// `set_revocation_registry`), this function silently skips the
+/// cross-contract revocation check.  Only the local `record.revoked`
+/// flag is consulted.  This means revocations performed through the
+/// `RevocationRegistry` contract will be **ignored** until the registry
+/// is linked.
+///
+/// Deployers must ensure the deployment order documented in
+/// `docs/mainnet-deployment.md` is followed to avoid silent
+/// misconfiguration.
 fn is_record_revoked(env: &Env, record: &VCRecord) -> bool {
     if record.revoked {
         return true;
@@ -375,8 +397,15 @@ impl IdentityOracle {
 
     /// Set the revocation registry contract ID used to check global revocations.
     ///
+    /// **Required:** After deploying all three contracts, call this function
+    /// on the identity-oracle with the address of the deployed revocation-registry
+    /// contract. Without this configuration, the identity oracle will silently
+    /// ignore revocations performed through the revocation-registry.
+    ///
     /// When set, `is_verified`, `get_active_vc_count`, and `verify_vc` will
     /// additionally consult the registry before returning results.
+    ///
+    /// See `docs/mainnet-deployment.md` for the required deployment order.
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn validate_revocation_registry(env: Env, registry_id: Address) -> bool {
@@ -748,7 +777,111 @@ impl IdentityOracle {
     }
 
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
+    /// Check if a subject has voluntarily deactivated their identity.
+    pub fn is_deactivated(env: Env, subject: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject))
+            .unwrap_or(false)
+    }
+
+    /// Voluntarily deactivate a subject's identity.
+    ///
+    /// 1. Sets a `Deactivated` flag in storage so `is_verified` returns
+    ///    `false` and credit scoring is suppressed.
+    /// 2. Marks **all** active VC anchors as revoked, making revocation
+    ///    visible to query functions that check the on-chain revoked flag.
+    /// 3. Returns the number of VCs that were transitioned to revoked.
+    ///
+    /// This is **reversible** via `reactivate_identity` (which clears the
+    /// flag but does not restore previously-revoked VCs).
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_identity(env: Env, subject: Address) -> u32 {
+        subject.require_auth();
+
+        // 1. Set the Deactivated flag
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deactivated(subject.clone()), &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Deactivated(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        // 2. Revoke all VCs anchored for this subject
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut updated = Vec::new(&env);
+        let mut revoked_count: u32 = 0;
+        for mut record in anchors.iter() {
+            if !record.revoked {
+                revoked_count += 1;
+            }
+            record.revoked = true;
+            updated.push_back(record);
+        }
+
+        if !anchors.is_empty() {
+            env.storage().persistent().set(&key, &updated);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        if revoked_count > 0 {
+            increment_vcs_revoked(&env, revoked_count as u64);
+        }
+
+        // 3. Clear cached active VC count
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveVCCount(subject.clone()), &0u32);
+
+        // 4. Emit event
+        env.events()
+            .publish((symbol_short!("IdDeact"),), (subject, revoked_count));
+
+        revoked_count
+    }
+
+    /// Re-activate a previously deactivated identity.
+    ///
+    /// Clears the `Deactivated` flag set by `deactivate_identity`. Does
+    /// **not** restore previously-revoked VCs — those remain revoked and
+    /// must be re-anchored by their original issuers.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn reactivate_identity(env: Env, subject: Address) {
+        subject.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Deactivated(subject.clone()));
+
+        env.events()
+            .publish((symbol_short!("IdReact"),), subject);
+    }
+
+    /// Check if a subject has at least one non-revoked verifiable credential anchored.
+    ///
+    /// Returns `false` immediately if the subject has deactivated their
+    /// identity via `deactivate_identity`, regardless of VC count.
     pub fn is_verified(env: Env, subject: Address) -> bool {
+        // Deactivated subjects are never considered verified
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
             .storage()
@@ -936,6 +1069,27 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Returns the currently configured revocation registry contract ID, or
+    /// `None` if no registry has been configured yet.
+    ///
+    /// # Important
+    ///
+    /// If `None` is returned, `is_verified`, `get_active_vc_count`, and
+    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag —
+    /// any revocations performed through the `RevocationRegistry` contract
+    /// will be **silently ignored**.
+    ///
+    /// Deployers must call `set_revocation_registry` after deploying the
+    /// revocation-registry contract to enable cross-contract revocation
+    /// checking.
+    ///
+    /// See `docs/mainnet-deployment.md` for the required deployment order.
+    pub fn get_revocation_registry(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&DataKey::RevocationRegistryId)
+    }
+
     /// Admin-only maintenance: extend instance storage TTL so critical
     /// configuration (Admin, RevocationRegistryId) does not expire on
     /// an idle contract.
@@ -988,10 +1142,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Events},
-        Env, TryIntoVal,
-    };
+    use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -1556,8 +1707,8 @@ mod tests {
         let (event_contract_id, topics, data) = &events.get(0).unwrap();
         assert_eq!(*event_contract_id, contract_id);
         assert_eq!(topics.len(), 1);
-        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let topic_sym: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "Initialized"));
         let event_admin: Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin);
     }
@@ -1637,6 +1788,15 @@ mod tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #1)")]
     fn test_initialize_already_initialized() {
+
+    // -----------------------------------------------------------------------
+    // Revocation Registry configuration tests
+    // -----------------------------------------------------------------------
+
+    /// Verifies that `get_revocation_registry` returns `None` before
+    /// configuration, matching the intended initial state.
+    #[test]
+    fn test_get_revocation_registry_returns_none_after_initialize() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1663,6 +1823,15 @@ mod tests {
 
     #[test]
     fn test_protocol_stats_increments_on_anchor_did() {
+
+        let registry = client.get_revocation_registry();
+        assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
+    }
+
+    /// Verifies that `set_revocation_registry` correctly stores the address
+    /// and `get_revocation_registry` returns it.
+    #[test]
+    fn test_set_revocation_registry_sets_address() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1688,6 +1857,27 @@ mod tests {
 
     #[test]
     fn test_protocol_stats_increments_on_anchor_vc() {
+
+        let registry_id = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Initially None
+        assert!(client.get_revocation_registry().is_none());
+
+        // Set the registry
+        client.set_revocation_registry(&registry_id);
+
+        // Now should return Some
+        let stored = client.get_revocation_registry();
+        assert!(stored.is_some(), "RevocationRegistryId should be Some after set_revocation_registry");
+        assert_eq!(stored.unwrap(), registry_id);
+    }
+
+    /// Verifies that `set_revocation_registry` can update an existing
+    /// registry address to a new one.
+    #[test]
+    fn test_set_revocation_registry_can_update() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1768,6 +1958,153 @@ mod tests {
     }
 
     #[test]
+    fn test_deactivate_identity_sets_flag_and_revokes_vcs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        client.anchor_did(&subject, &cid);
+
+        // Anchor 3 VCs
+        let vc_hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        let vc_hash3 = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash1);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+        client.anchor_vc(&issuer, &subject, &vc_hash3);
+
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 3);
+        assert!(!client.is_deactivated(&subject));
+
+        // Deactivate
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 3);
+
+        // Verify flag is set
+        assert!(client.is_deactivated(&subject));
+
+        // is_verified returns false
+        assert!(!client.is_verified(&subject));
+
+        // Active VC count is 0
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Total VC count unchanged
+        assert_eq!(client.get_total_vc_count(&subject), 3);
+    }
+
+    #[test]
+    fn test_reactivate_identity_clears_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+
+        // Deactivate
+        client.deactivate_identity(&subject);
+        assert!(client.is_deactivated(&subject));
+        assert!(!client.is_verified(&subject));
+
+        // Reactivate
+        client.reactivate_identity(&subject);
+
+        // Flag is cleared
+        assert!(!client.is_deactivated(&subject));
+
+        // is_verified still returns false because VCs were revoked during deactivation
+        assert!(!client.is_verified(&subject));
+
+        // Active VC count is still 0
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_deactivate_reactivate_full_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Initial: verified
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+
+        // Deactivate
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 1);
+        assert!(client.is_deactivated(&subject));
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Reactivate
+        client.reactivate_identity(&subject);
+        assert!(!client.is_deactivated(&subject));
+
+        // VCs are still revoked, so not verified
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Issue a new VC - should become verified again
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
+    fn test_deactivate_identity_with_no_vcs_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+
+        // No VCs at all
+        assert!(!client.is_verified(&subject));
+        assert!(!client.is_deactivated(&subject));
+
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 0);
+        assert!(client.is_deactivated(&subject));
+    }
+
+    #[test]
     fn test_protocol_stats_no_increment_on_dedup_vc() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1791,5 +2128,20 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+}
+
+        let registry_id_1 = Address::generate(&env);
+        let registry_id_2 = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set to first registry
+        client.set_revocation_registry(&registry_id_1);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_1);
+
+        // Update to second registry
+        client.set_revocation_registry(&registry_id_2);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_2);
     }
 }

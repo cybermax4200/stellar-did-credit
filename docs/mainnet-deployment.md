@@ -19,6 +19,47 @@ This guide covers the planning, security, and operational requirements for deplo
 
 ---
 
+## Required deployment order
+
+Deploying the protocol requires **exactly this order** to avoid silent misconfiguration:
+
+1. **Deploy CreditOracle** â€” The credit scoring contract. Sets admin and default scoring weights.
+2. **Deploy IdentityOracle** â€” The identity/credential contract. Sets admin only.
+3. **Deploy RevocationRegistry** â€” The global revocation registry. Sets admin only.
+4. **Call `set_revocation_registry` on IdentityOracle** â€” Pass the deployed RevocationRegistry contract address. **Without this step, the identity oracle will silently ignore all revocations performed through the revocation registry.**
+5. **Call `set_identity_oracle` on CreditOracle** (optional) â€” Pass the deployed IdentityOracle contract address to enable live cross-contract VC count lookups. Without this, CreditOracle falls back to cached VC counts set by a trusted feeder.
+6. **Register issuers, feeders, and lenders** â€” After the admin path has been verified.
+
+### Failure modes when registry is missing
+
+| Scenario | Behavior | Severity |
+|----------|----------|----------|
+| RevocationRegistry deployed but NOT linked via `set_revocation_registry` | `is_verified`, `get_active_vc_count`, and `verify_vc` silently skip cross-contract revocation checks. Registry revocations are **ignored**. | High â€” silent data inconsistency |
+| IdentityOracle used without any revocation mechanism | `mark_vc_revoked` still works for local revocations, but global registry revocations are not checked. | Medium â€” partial revocation support |
+| `set_revocation_registry` called with wrong address | Cross-contract calls fail, causing `is_verified`/`get_active_vc_count`/`verify_vc` to panic on invocation. Call `set_revocation_registry` again with the correct address to fix. | High â€” runtime failures |
+
+### Verification after configuration
+
+After completing the deployment order, verify the configuration:
+
+```bash
+# Check that revocation registry is linked
+stellar contract invoke \
+  --id <IDENTITY_ORACLE_ID> \
+  --network mainnet \
+  -- get_revocation_registry
+# Should return the revocation-registry contract address, not "null"
+
+# Check that identity oracle is linked (optional)
+stellar contract invoke \
+  --id <CREDIT_ORACLE_ID> \
+  --network mainnet \
+  -- get_identity_oracle
+# Should return the identity-oracle contract address, or "null" if not configured
+```
+
+
+
 ## Mainnet deployment workflow
 
 Treat mainnet deployment as a controlled operations exercise. The deployment order below keeps the process auditable and minimizes the chance of an irreversible mistake.
