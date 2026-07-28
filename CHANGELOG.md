@@ -24,11 +24,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root `package.json` exposes a `docs` script that regenerates both Rust and TypeScript API docs in one command (#266)
 - `typedoc.json` workspace-level TypeDoc configuration file (#266)
 - CI `docs` job: runs `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` and `typedoc` to catch doc regressions on every PR (#266)
+- `identity-oracle`: `migrate()` — admin-gated function to upgrade the contract storage layout version (#255)
+- `credit-oracle`: `migrate(subjects)` — admin-gated function to migrate historical user repayment records to version 2 storage layout (#255)
+- `credit-oracle`: `StorageVersion` instance storage key to version-gate storage layout decoding and compatibility (#255)
+- `credit-oracle`: `RepaymentRecordV1` struct to decode legacy repayment records during migration (#255)
+- `credit-oracle`: `test_storage_migration_flow` integration test to verify the upgrade and migration process (#255)
 
 ### Changed
 
 - `identity-oracle`: `deregister_issuer` no longer rebuilds the full `IssuersIndex` vector on every call. `TrustedIssuer(Address)` is now a tombstone flag (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `IssuersIndex` becomes an append-only record of every address ever registered. Deregistration is now a single storage write instead of an O(n) scan + rewrite. `list_issuers()` keeps its public signature and still returns only currently-registered issuers, now by filtering `IssuersIndex` against each entry's `TrustedIssuer` flag. No storage migration is required — both storage keys keep their original value types (#224)
 - TypeScript SDK (`@stellar-did-credit/sdk`): reuse a single `SorobanRpc.Server` instance created in the constructor instead of creating a new server on every method call (#231)
+- `credit-oracle`: `RepaymentRecord` struct layout modified to add `total_repaid` field (#255)
 
 ### Added
 

@@ -1,6 +1,6 @@
 # Contract Upgrade Guide
 
-All three protocol contracts (`identity-oracle`, `credit-oracle`, `revocation-registry`) support in-place WASM hash upgrades via `env.deployer().update_current_contract_wasm()`. This preserves the contract address and all stored state — no migration required.
+All three protocol contracts (`identity-oracle`, `credit-oracle`, `revocation-registry`) support in-place WASM hash upgrades via `env.deployer().update_current_contract_wasm()`. This preserves the contract address and all stored state, but changes to the storage layout between versions require executing a post-upgrade storage migration.
 
 ---
 
@@ -78,3 +78,28 @@ stellar contract invoke \
 - `admin.require_auth()` is enforced — the transaction must be signed by the admin keypair.
 - There is no timelock. For production deployments, consider routing `upgrade` through a multisig or governance contract before calling it directly.
 - Always test upgrades on testnet before applying to mainnet contracts.
+
+---
+
+## Storage Migrations
+
+If an upgrade changes the storage layout of a contract (e.g. adding fields to a struct), you must execute a storage migration immediately after the upgrade:
+
+### Post-Upgrade Migration Flow
+
+1. **Invoke the WASM code upgrade**:
+   (Same as step 3 of the upgrade process).
+
+2. **Call the `migrate` function on the contract**:
+   Call `migrate` to transform the old storage entries to the new layout. For `credit-oracle`, you must provide the list of user addresses (subjects) to migrate.
+
+   ```bash
+   stellar contract invoke \
+     --network testnet \
+     --source <admin-key-name> \
+     --id <CREDIT_ORACLE_ADDRESS> \
+     -- migrate \
+     --subjects '["GD...", "GC..."]'
+   ```
+
+   This function transforms the historical `RepaymentRecord` entries to include the new fields (like `total_repaid` defaulting to 0) and bumps the global storage layout version.

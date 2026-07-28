@@ -104,6 +104,8 @@ pub enum DataKey {
     Paused,
     /// Pending contract admin address for two-step transfer.
     PendingAdmin,
+    /// Version of the storage layout.
+    StorageVersion,
     /// Append-only index of every address ever registered as a trusted
     /// issuer. Entries are never removed on deregistration (that would
     /// require an O(n) rewrite on every `deregister_issuer` call) — a
@@ -174,6 +176,7 @@ fn get_stored_credential_type(env: &Env, subject: &Address, vc_hash: &BytesN<32>
         .unwrap_or(generic_credential_type(env))
 }
 
+#[allow(dead_code)]
 fn store_credential_type(
     env: &Env,
     subject: &Address,
@@ -304,6 +307,7 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
+        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -329,6 +333,23 @@ impl IdentityOracle {
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.storage().instance().set(&DataKey::Paused, &false);
         env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Upgrade the storage layout to the latest version.
+    ///
+    /// Auth: admin only — verified via `require_admin`.
+    pub fn migrate(env: Env) -> Result<(), IdentityOracleError> {
+        require_admin(&env);
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1);
+        if version >= 2 {
+            return Ok(());
+        }
+        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -369,7 +390,13 @@ impl IdentityOracle {
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
         let issuer_key = DataKey::TrustedIssuer(issuer.clone());
-        if !env.storage().persistent().has(&issuer_key) {
+        let is_already_trusted = env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&issuer_key)
+            .unwrap_or(false);
+
+        if !is_already_trusted {
             let mut issuers: Vec<Address> = env
                 .storage()
                 .persistent()

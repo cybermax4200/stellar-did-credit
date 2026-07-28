@@ -47,7 +47,7 @@ A user generates a Stellar keypair. Their public key becomes their DID: `did:ste
 Trusted issuers — KYC providers, payroll platforms, microfinance institutions, mobile money operators — sign JSON-LD credentials attesting to facts about the user (identity verified, income range, previous repayment history). The SHA-256 hash of each credential is anchored on-chain. The credential itself stays off-chain, preserving privacy. See the [Issuer Integration Guide](docs/issuer-guide.md) for the full VC format, hashing process, and a working Node.js example.
 
 **3. Credit score computed on-chain**
-The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed and upgradeable.
+The credit-oracle Soroban contract aggregates anchored VC hashes, on-chain transaction statistics, and repayment records into a composite score from 300 to 850. Any lender, anchor, or verifier can query the score permissionlessly. The scoring weights are governed via the on-chain governance contract (see [docs/governance.md](docs/governance.md)) and upgradeable through a double-timelock flow.
 
 ---
 
@@ -83,7 +83,7 @@ graph TB
 
 ## Contracts
 
-The protocol is composed of three Soroban smart contracts deployed on the Stellar network.
+The protocol is composed of four Soroban smart contracts deployed on the Stellar network.
 
 ### identity-oracle
 
@@ -120,6 +120,24 @@ Computes and stores credit scores based on on-chain data.
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
 | `apply_weights()`                                    | Applies pending weights after timelock expires     |
 | `get_scoring_weights()`                              | Returns current scoring weights                    |
+
+### governance
+
+On-chain proposal creation, weighted voting, and multi-step execution for updating credit-oracle scoring weights. Voting power is assigned by the contract admin (admin-registered voters, not token-weighted). Full documentation: [docs/governance.md](docs/governance.md).
+
+| Function                                                     | Description                                              |
+| ------------------------------------------------------------ | -------------------------------------------------------- |
+| `initialize(admin, credit_oracle, quorum_required)`          | Sets admin, oracle address, and default quorum           |
+| `accept_oracle_admin()`                                       | Accepts credit-oracle admin role (two-step transfer)     |
+| `create_proposal(proposer, weights, voting_period, delay)`   | Creates a weight-update proposal; returns proposal ID    |
+| `vote(voter, proposal_id, vote_for, vote_weight)`            | Casts a weighted vote on an open proposal                |
+| `execute(proposal_id)`                                        | After expiry + delay, queues weights in credit-oracle    |
+| `apply_weights()`                                             | Finalizes queued weights after credit-oracle timelock    |
+| `register_voter(admin, voter, weight)`                       | Admin registers a voter with a weight                    |
+| `update_voter_weight(admin, voter, weight)`                  | Admin updates or deregisters a voter (weight = 0)        |
+| `set_quorum(admin, quorum_required)`                         | Admin sets the default quorum for future proposals       |
+| `get_proposal(proposal_id)`                                  | Returns a proposal by ID                                 |
+| `cancel(canceller, proposal_id, reason)`                     | Emits a cancellation event (stub — no on-chain effect)   |
 
 ### revocation-registry
 
@@ -244,6 +262,7 @@ pnpm build
 cargo test -p identity-oracle
 cargo test -p credit-oracle
 cargo test -p revocation-registry
+cargo test -p governance
 
 # Run integration tests only
 cargo test -p integration-tests
@@ -264,6 +283,8 @@ stellar-did-credit/
 │   │   └── src/lib.rs          # Score computation + repayment history
 │   ├── revocation-registry/
 │   │   └── src/lib.rs          # VC status list
+│   ├── governance/
+│   │   └── src/lib.rs          # On-chain proposals + voting for weight updates
 │   └── tests/
 │       └── src/integration_test.rs  # Cross-contract integration tests
 ├── packages/
@@ -276,6 +297,7 @@ stellar-did-credit/
 ├── docs/
 │   ├── architecture.md         # Full component breakdown
 │   ├── did-spec.md             # DID method specification
+│   ├── governance.md           # Governance contract: reference, integration, security
 │   ├── epoch-model.md          # TTL management, compute cooldown, weight timelock
 │   ├── issuer-guide.md         # Issuer integration guide (VC format, hashing, key management)
 │   ├── scoring-spec.md         # Scoring formula + worked examples
@@ -292,7 +314,7 @@ stellar-did-credit/
 
 ## TypeScript SDK
 
-The `@stellar-did-credit/sdk` package provides a typed client for interacting with all three contracts from a TypeScript application.
+The `@stellar-did-credit/sdk` package provides a typed client for interacting with the core protocol contracts from a TypeScript application. The governance contract can be called through the same generic Soroban RPC client using the function signatures in [docs/governance.md](docs/governance.md).
 
 ````typescript
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
@@ -405,27 +427,28 @@ await feeder.runCycle();
 
 ## Component status
 
-| Component               | Status         | Notes                                |
-| ----------------------- | -------------- | ------------------------------------ |
-| identity-oracle         | ✅ Complete    | All functions implemented and tested |
-| credit-oracle           | ✅ Complete    | Scoring formula live on testnet      |
-| revocation-registry     | ✅ Complete    | Batch revocation supported           |
-| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
-| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
-| CLI tool                | 📋 Planned     |                                      |
-| Cross-contract vc_count | 📋 Planned     |                                      |
-| ZK proof layer          | 📋 Research    |                                      |
-| Governance contract     | 📋 Planned     |                                      |
+| Component               | Status         | Notes                                                                |
+| ----------------------- | -------------- | -------------------------------------------------------------------- |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                 |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                      |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                           |
+| governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
+| TypeScript SDK          | 🚧 In progress | `getScore` done, governance helpers and rest open                    |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                  |
+| CLI tool                | 📋 Planned     |                                                                      |
+| Cross-contract vc_count | 📋 Planned     |                                                                      |
+| ZK proof layer          | 📋 Research    |                                                                      |
+| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future |
 
 ---
 
 ## Roadmap
 
 **Phase 1 — Foundation (current)**
-Three core contracts deployed on testnet. TypeScript SDK for score reading. Passing CI.
+Four core contracts deployed on testnet. Governance contract live with admin-registered voters. TypeScript SDK for score reading. Passing CI.
 
 **Phase 2 — SDK & tooling (contributors)**
-Full TypeScript SDK with DID creation, VC issuance, and revocation. CLI tool for developers.
+Full TypeScript SDK with DID creation, VC issuance, revocation, and governance client helpers. CLI tool for developers.
 
 **Phase 3 — Cross-contract integration**
 credit-oracle reads `vc_count` directly from identity-oracle via cross-contract call. Score freshness enforcement.
@@ -433,8 +456,8 @@ credit-oracle reads `vc_count` directly from identity-oracle via cross-contract 
 **Phase 4 — Privacy layer**
 ZK proof circuit for selective score disclosure — prove "score > 650" without revealing the exact number or underlying credentials. Design document: [docs/zk-proof-design.md](docs/zk-proof-design.md).
 
-**Phase 5 — Governance**
-DAO contract for scoring weight upgrades. Token-weighted voting. Timelock on changes.
+**Phase 5 — Tokenized governance (future)**
+Token-weighted voting (SEP-41), stake delegation, and full DAO tooling. Replaces the current admin-registered voter model.
 
 **Phase 6 — Mainnet**
 Security audit. Mainnet deployment. Issuer onboarding program.
@@ -481,6 +504,7 @@ Full setup and guidelines: [CONTRIBUTING.md](CONTRIBUTING.md)
 - [Stellar Laboratory](https://laboratory.stellar.org)
 - [Stellar Expert (Testnet Explorer)](https://stellar.expert/explorer/testnet)
 - [Project Architecture](docs/architecture.md)
+- [Governance Contract Reference](docs/governance.md)
 - [Scoring Specification](docs/scoring-spec.md)
 - [Epoch Model (TTL, cooldown, timelock)](docs/epoch-model.md)
 - [DID Method Specification](docs/did-spec.md)

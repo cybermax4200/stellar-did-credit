@@ -3,7 +3,7 @@
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
 //! update the credit-oracle's scoring weights through a community vote.
-use credit_oracle::{CreditOracleClient, ScoringWeights};
+use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
 };
@@ -343,9 +343,8 @@ impl Governance {
                 .get(&DataKey::CreditOracle)
                 .expect("no credit oracle");
 
-            let client = CreditOracleClient::new(&env, &credit_oracle_addr);
             // Use propose_weights to start the timelock, not update_weights which bypasses it
-            client.propose_weights(&proposal.proposed_weights);
+            CreditOracleClient::propose_weights(&env, &credit_oracle_addr, &proposal.proposed_weights);
         }
 
         proposal.executed = true;
@@ -371,8 +370,7 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .ok_or(GovernanceError::NotAuthorized)?;
 
-        let client = CreditOracleClient::new(&env, &credit_oracle_addr);
-        client.apply_weights();
+        CreditOracleClient::apply_weights(&env, &credit_oracle_addr);
 
         env.events()
             .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
@@ -398,8 +396,7 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .ok_or(GovernanceError::NotAuthorized)?;
 
-        let client = CreditOracleClient::new(&env, &credit_oracle_addr);
-        client.accept_admin(&env.current_contract_address());
+        CreditOracleClient::accept_admin(&env, &credit_oracle_addr, &env.current_contract_address());
         Ok(())
     }
 
@@ -906,11 +903,17 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.executed);
 
-        // Verify weights were applied
+        // Verify weights are pending (execute queues them, does not apply immediately)
         let active_weights = credit_oracle_client.get_scoring_weights();
-        assert_eq!(active_weights.vc_weight, 50);
-        assert_eq!(active_weights.tx_weight, 20);
-        assert_eq!(active_weights.repayment_weight, 30);
+        assert_eq!(active_weights.vc_weight, 40, "weights should not change until apply_weights after timelock");
+
+        // Verify pending weights exist
+        let pending = credit_oracle_client.get_pending_weights();
+        assert!(pending.is_some());
+        let pending_record = pending.unwrap();
+        assert_eq!(pending_record.weights.vc_weight, 50);
+        assert_eq!(pending_record.weights.tx_weight, 20);
+        assert_eq!(pending_record.weights.repayment_weight, 30);
     }
 
     #[test]
