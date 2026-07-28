@@ -952,7 +952,10 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Events},
+        Env, TryIntoVal,
+    };
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -1497,7 +1500,7 @@ mod tests {
     }
 
     #[test]
-    fn test_initialize_sets_admin() {
+    fn test_initialize_sets_admin_and_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1510,6 +1513,17 @@ mod tests {
             env.storage().instance().get(&DataKey::Admin).unwrap()
         });
         assert_eq!(stored, admin);
+
+        // Verify Init event was emitted
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one Init event");
+        let (event_contract_id, topics, data) = &events.get(0).unwrap();
+        assert_eq!(*event_contract_id, contract_id);
+        assert_eq!(topics.len(), 1);
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: Address = data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_admin, admin);
     }
 
     #[test]

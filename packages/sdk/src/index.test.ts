@@ -347,6 +347,7 @@ describe("StellarDIDCreditSDK", () => {
         vcCount: 2,
         repaymentRate: 8500,
         txVolume30d: 2_000_000n,
+        stale: false,
       });
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
       expect(mockGetTransaction).toHaveBeenCalledWith("tx-compute-hash");
@@ -394,6 +395,7 @@ describe("StellarDIDCreditSDK", () => {
         vcCount: 3,
         repaymentRate: 8000,
         txVolume30d: 1_000_000n,
+        stale: false,
       });
       expect(mockGetTransaction).toHaveBeenCalledTimes(2);
       expect(mockLastContractCall?.method).toBe("get_score");
@@ -715,6 +717,8 @@ describe("contract struct type exports", () => {
       vcCount: 3,
       repaymentRate: 8000,
       txVolume30d: 1_000_000n,
+      computedAtLedger: 1234567,
+      stale: false,
     };
 
     const config: ProtocolConfig = {
@@ -788,6 +792,8 @@ describe("test_all_exports_are_defined", () => {
       vcCount: 0,
       repaymentRate: 0,
       txVolume30d: 0n,
+      computedAtLedger: 0,
+      stale: false,
     };
     const _config: ProtocolConfig = {
       identityOracleId: "",

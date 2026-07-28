@@ -1,4 +1,5 @@
 #![no_std]
+pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, Symbol,
@@ -69,13 +70,15 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
-    /// Last ledger sequence when a subject's score was computed
-    LastComputed(Address),
-    /// Credential-type multiplier in basis points (100 = 1×).
-    CredentialTypeWeight(Symbol),
-    /// Monotonically increasing storage layout version. Absent means V1.
-    StorageVersion,
+    /// Index of all registered feeders
+    FeedersIndex,
+    /// Index of all registered lenders
+    LendersIndex,
 }
+
+/// Number of ledgers after which a score is considered stale.
+/// Roughly 30 days at 5-second ledgers (~86,400 ledgers).
+const STALE_LEDGER_AGE: u32 = 86_400;
 
 /// Credit score record with metadata
 #[contracttype]
@@ -83,7 +86,7 @@ pub enum DataKey {
 pub struct ScoreRecord {
     /// Credit score value
     pub score: u32,
-    /// Timestamp of last update
+    /// Timestamp of last update (Unix seconds)
     pub last_updated: u64,
     /// Number of verified credentials
     pub vc_count: u32,
@@ -93,6 +96,15 @@ pub struct ScoreRecord {
     pub tx_volume_30d: i128,
     /// Previous credit score, if one exists
     pub previous_score: Option<u32>,
+    /// Ledger sequence number when this score was last computed.
+    /// Consumers can compare this against the current ledger sequence
+    /// to determine freshness without relying solely on wall-clock time.
+    pub computed_at_ledger: u32,
+    /// Whether the stored score is considered stale based on
+    /// `STALE_LEDGER_AGE`. Computed at read time in `get_score` by
+    /// comparing `computed_at_ledger` against the current ledger
+    /// sequence. Always `false` for a freshly computed score.
+    pub stale: bool,
 }
 
 /// Transaction statistics for a user
@@ -107,32 +119,7 @@ pub struct TxStats {
     pub avg_counterparties: u32,
 }
 
-/// Weights used in credit score calculation
-#[contracttype]
-#[derive(Clone)]
-pub struct ScoringWeights {
-    /// Weight for verified credentials component
-    pub vc_weight: u32,
-    /// Weight for transaction history component
-    pub tx_weight: u32,
-    /// Weight for repayment history component
-    pub repayment_weight: u32,
-}
-
-/// Pending weights proposal with timelock
-#[contracttype]
-#[derive(Clone)]
-pub struct PendingWeightsRecord {
-    /// Proposed weights
-    pub weights: ScoringWeights,
-    /// Ledger number when these weights become effective
-    pub effective_ledger: u32,
-}
-
-/// Internal repayment counters for a subject.
-///
-/// Used to compute the repayment score component (0–100 based on on-time rate).
-/// Replaces [`RepaymentRecordV1`]; use `migrate` to upgrade existing storage.
+/// Internal repayment counters for a subject
 #[contracttype]
 #[derive(Clone)]
 pub struct RepaymentRecord {
@@ -169,9 +156,7 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 }
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ProtocolStats, stats);
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -237,9 +222,21 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
+        if !env.storage().persistent().has(&feeder_key) {
+            let mut feeders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            feeders.push_back(feeder.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::FeedersIndex, &feeders);
+        }
+
+        env.storage().persistent().set(&feeder_key, &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -262,6 +259,23 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeedersIndex, &compacted);
+
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
@@ -281,9 +295,21 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedLender(lender.clone()), &true);
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
+        if !env.storage().persistent().has(&lender_key) {
+            let mut lenders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LendersIndex)
+                .unwrap_or(Vec::new(&env));
+            lenders.push_back(lender.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::LendersIndex, &lenders);
+        }
+
+        env.storage().persistent().set(&lender_key, &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -306,6 +332,23 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::LendersIndex, &compacted);
+
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
     }
@@ -426,8 +469,9 @@ impl CreditOracle {
             }
         }
         env.storage()
-            .instance()
-            .set(&DataKey::StorageVersion, &2u32);
+            .persistent()
+            .set(&DataKey::RepaymentRecord(subject), &record);
+        increment_repayments_recorded(&env);
         Ok(())
     }
 
@@ -569,7 +613,8 @@ impl CreditOracle {
             .has(&DataKey::Score(subject.clone()));
 
         if needs_write {
-            if is_first {
+            // Only increment subjects_scored for first-time subjects (no previous score)
+            if previous_score.is_none() {
                 increment_subjects_scored(&env);
             }
             env.storage().persistent().set(
@@ -581,6 +626,8 @@ impl CreditOracle {
                     repayment_rate,
                     tx_volume_30d: tx_stats.volume_30d,
                     previous_score,
+                    computed_at_ledger: env.ledger().sequence(),
+                    stale: false,
                 },
             );
         }
@@ -591,9 +638,22 @@ impl CreditOracle {
         score
     }
 
-    /// Get credit score for a user; returns None if score has not been computed yet
+    /// Get credit score for a user; returns None if score has not been computed yet.
+    ///
+    /// The returned `ScoreRecord` includes a `stale` flag computed
+    /// at read time by comparing `computed_at_ledger` against the
+    /// current ledger sequence. A score is considered stale when the
+    /// ledger delta exceeds `STALE_LEDGER_AGE` (~30 days).
     pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
-        env.storage().persistent().get(&DataKey::Score(subject))
+        env.storage()
+            .persistent()
+            .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
+            .map(|mut record| {
+                let current_ledger = env.ledger().sequence();
+                record.stale =
+                    current_ledger.saturating_sub(record.computed_at_ledger) > STALE_LEDGER_AGE;
+                record
+            })
     }
 
     /// Propose new scoring weights with timelock
@@ -778,6 +838,40 @@ impl CreditOracle {
     /// on-chain operational metrics without requiring an external indexer.
     pub fn get_protocol_stats(env: Env) -> ProtocolStats {
         load_protocol_stats(&env)
+    }
+
+    /// Returns all currently registered feeder addresses.
+    pub fn list_feeders(env: Env) -> Vec<Address> {
+        let feeders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for feeder in feeders.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+                active.push_back(feeder);
+            }
+        }
+        active
+    }
+
+    /// Returns all currently registered lender addresses.
+    pub fn list_lenders(env: Env) -> Vec<Address> {
+        let lenders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for lender in lenders.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+                active.push_back(lender);
+            }
+        }
+        active
     }
 }
 
@@ -1545,4 +1639,3 @@ mod tests {
         assert_eq!(stats2.total_subjects_scored, 1);
     }
 }
-

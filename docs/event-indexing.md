@@ -6,7 +6,26 @@ This guide describes the on-chain events emitted by the `stellar-did-credit` con
 
 Soroban events are structured as a topic vector and a data payload. By convention, the first topic is a symbol representing the event name.
 
+### 0. Common Events
+
+#### Initialized
+
+All three contracts (`identity-oracle`, `credit-oracle`, `revocation-registry`) emit an `Initialized` event during their `initialize` function. This event is emitted exactly once per contract, immediately after the admin address is stored.
+
+* **Topic:** `[Symbol("Initialized")]`
+* **Data:** `admin: Address`
+* **Emitted When:** The contract is initialized with an administrator address.
+* **feeder Action:** None (metadata tracking).
+
+---
+
 ### 1. Identity Oracle Events
+
+#### Initialized
+* **Topic:** `[Symbol("Initialized")]`
+* **Data:** `admin: Address`
+* **Emitted When:** The contract is initialized with an admin address.
+* **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### DIDAnch
 * **Topic:** `[Symbol("DIDAnch")]`
@@ -34,6 +53,12 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 ---
 
 ### 2. Revocation Registry Events
+
+#### Initialized
+* **Topic:** `[Symbol("Initialized")]`
+* **Data:** `admin: Address`
+* **Emitted When:** The contract is initialized with an admin address.
+* **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### Revoked
 * **Topic:** `[Symbol("Revoked")]`

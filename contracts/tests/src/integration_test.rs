@@ -8,10 +8,62 @@ mod tests {
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
-        contract, contractimpl,
-        testutils::{Address as _, Ledger as _},
-        BytesN, Env, String,
+        symbol_short,
+        testutils::{Address as _, Events, Ledger as _},
+        BytesN, Env, String, Symbol, TryIntoVal, Val,
     };
+
+    #[test]
+    fn test_initialize_emits_init_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        // Initialize identity-oracle and verify Init event
+        identity.initialize(&admin);
+        let events = env.events().all();
+        let id_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == identity_id).collect();
+        assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
+        let (_, topics, data) = &id_events[0];
+        assert_eq!(topics.len(), 1);
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
+
+        // Initialize credit-oracle and verify Initialized event
+        credit.initialize(&admin);
+        let events = env.events().all();
+        let credit_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == credit_id).collect();
+        assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
+        let (_, topics, data) = &credit_events[0];
+        assert_eq!(topics.len(), 1);
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
+
+        // Initialize revocation-registry and verify Initialized event
+        revocation.initialize(&admin);
+        let events = env.events().all();
+        let rev_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == revocation_id).collect();
+        assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
+        let (_, topics, data) = &rev_events[0];
+        assert_eq!(topics.len(), 1);
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
+    }
 
     #[test]
     fn test_full_protocol_flow() {
@@ -187,7 +239,7 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let initial_score = credit.compute_score(&subject);
-        assert!(initial_score > 300);
+        assert!(initial_score > 300, "expected initial_score > 300, got {}", initial_score);
 
         // 2. Revoke the VC on identity-oracle
         identity.mark_vc_revoked(&issuer, &subject, &vc_hash);
@@ -329,7 +381,7 @@ mod tests {
             vc_hashes.push_back(vc_hash);
         }
 
-        // 5. Assert is_verified is true (5 active VCs)
+// 5. Assert is_verified is true (5 active VCs)
         assert!(identity.is_verified(&subject));
 
         // 6. Assert get_total_vc_count returns 5
@@ -712,18 +764,18 @@ mod tests {
         // 1) Two-step admin transfer on `credit`: admin -> new_admin
         let new_admin = soroban_sdk::Address::generate(&env);
         // Propose new admin (signed by current admin)
-        credit.propose_new_admin(&new_admin);
+        let _ = credit.propose_new_admin(&new_admin);
         // Accept as new admin
-        credit.accept_admin(&new_admin);
+        let _ = credit.accept_admin(&new_admin);
 
         // Verify admin changed by exercising an admin-only call using `new_admin`
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&new_admin, &feeder);
+        let _ = credit.register_feeder(&new_admin, &feeder);
 
         // 2) Transfer oracle admin to governance contract
-        credit.propose_new_admin(&gov_id);
+        let _ = credit.propose_new_admin(&gov_id);
         // Governance accepts the oracle admin on its behalf
-        gov.accept_oracle_admin();
+        let _ = gov.accept_oracle_admin();
 
         // 3) Governance proposal lifecycle: create -> vote -> execute -> apply
         let proposed_weights = ScoringWeights {
@@ -741,7 +793,7 @@ mod tests {
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200i128);
 
-        gov.vote(&voter, &proposal_id, &true, &200i128);
+        let _ = gov.vote(&voter, &proposal_id, &true, &200i128);
 
         // Advance ledger past voting expiry
         env.ledger().with_mut(|l| {
@@ -749,7 +801,7 @@ mod tests {
         });
 
         // Execute proposal (governance is now credit admin and will propose weights)
-        gov.execute(&proposal_id);
+        let _ = gov.execute(&proposal_id);
 
         // Advance ledger to pass credit-oracle timelock and apply the proposed weights
         let jump = 100_000u32;
