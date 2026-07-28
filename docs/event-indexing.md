@@ -10,10 +10,10 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 
 #### Initialized
 
-All three contracts (`identity-oracle`, `credit-oracle`, `revocation-registry`) emit an `Initialized` event during their `initialize` function. This event is emitted exactly once per contract, immediately after the admin address is stored.
+The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit an `Initialized` event during their `initialize` function. The `governance` contract also emits one — see the Governance section below. In all cases the event is emitted exactly once per contract, immediately after the admin address and target wiring is stored.
 
 * **Topic:** `[Symbol("Initialized")]`
-* **Data:** `admin: Address`
+* **Data:** `admin: Address` (governance uses `(admin: Address, credit_oracle: Address)` — see below)
 * **Emitted When:** The contract is initialized with an administrator address.
 * **feeder Action:** None (metadata tracking).
 
@@ -114,6 +114,12 @@ All three contracts (`identity-oracle`, `credit-oracle`, `revocation-registry`) 
 ---
 
 ### 4. Governance Events
+
+#### Initialized
+* **Topic:** `[Symbol("Initialized")]`
+* **Data:** `(admin: Address, credit_oracle: Address)`
+* **Emitted When:** The governance contract is initialized with an admin address and the credit-oracle it will govern. The admin address must be passed in by the caller (matches the `initialize` parameter); `credit_oracle` is also passed in at init time and must match the address stored under `DataKey::CreditOracle`.
+* **Note:** The data format differs from the other contracts because governance's `initialize` signature includes the credit-oracle target. The identity-oracle address is not currently stored by governance (a specific follow-up to issue #39 would make this consistent — for now governance is the only contract that emits more than just the admin on init). Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### ProposalCreated
 * **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`

@@ -5,7 +5,7 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
 };
 
 /// Error types for the governance contract.
@@ -59,6 +59,21 @@ pub enum DataKey {
     VoteWeightUsed(u64, Address),
 }
 
+/// Instance-storage TTL bump constants.
+///
+/// Instance entries are bumped to ~30 days on initialize so the
+/// critical configuration (`Admin`, `CreditOracle`,
+/// `QuorumRequired`, `NextProposalId`) does not expire on an idle
+/// governance contract.
+///
+/// Threshold (5,000 ledgers) and extend amount (500,000 ledgers)
+/// match `identity-oracle`'s `INSTANCE_BUMP_*` constants — borrowed
+/// pattern from the security TTL-survival fix (PR #456) so storage
+/// survives the same default Soroban instance TTL even when no
+/// proposals are being created/voted on.
+const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
 #[contracttype]
 #[derive(Clone)]
 /// An on-chain governance proposal for updating credit-oracle scoring weights.
@@ -97,6 +112,20 @@ impl Governance {
     /// Sets the administrator, credit-oracle address, and default quorum required
     /// for proposals. `quorum_required` must be greater than zero.
     ///
+    /// Emits an `Initialized` event with the admin and the credit-oracle
+    /// target address — indexers use this to detect deployments before the
+    /// first admin action. The event is documented in
+    /// `docs/event-indexing.md`.
+    ///
+    /// **Note on payload scope:** Issue #302 originally listed both
+    /// `credit-oracle` and `identity-oracle` as "target contracts" to include.
+    /// Identity-oracle is **not** currently stored by governance (its wiring
+    /// is a follow-up to issue #39), so only `credit_oracle` is emitted in the
+    /// event payload today. Once governance learns about identity-oracle (via
+    /// a dedicated setter, mirroring `set_quorum`), the payload should be
+    /// extended to include it — see `docs/event-indexing.md` for the
+    /// documented schema.
+    ///
     /// Auth: `admin` must sign the transaction.
     pub fn initialize(
         env: Env,
@@ -121,6 +150,17 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+
+        // Issue #302: emit an Initialized event so off-chain indexers can
+        // observe governance deployment before the first admin action.
+        // Data tuple includes the admin and the credit-oracle target so
+        // indexers can record the contract's wiring.
+        env.events()
+            .publish((Symbol::new(&env, "Initialized"),), (admin, credit_oracle));
+
         Ok(())
     }
 

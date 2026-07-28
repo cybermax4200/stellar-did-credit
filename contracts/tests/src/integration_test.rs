@@ -63,6 +63,40 @@ mod tests {
         assert_eq!(topic2, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
+
+        // Issue #302: governance contract must also emit an Initialized event
+        // with the admin and credit-oracle target addresses so off-chain
+        // indexers can detect deployments before the first admin action.
+        let gov_id = env.register_contract(None, Governance);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        gov.initialize(&admin, &credit_id, &100i128);
+
+        let events = env.events().all();
+        let gov_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == gov_id).collect();
+        assert_eq!(
+            gov_events.len(),
+            1,
+            "governance contract should emit exactly 1 event on initialize"
+        );
+        let (_, topics, data) = &gov_events[0];
+        assert_eq!(topics.len(), 1, "topic count mismatch for governance Initialized");
+        let gov_topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(
+            gov_topic,
+            Symbol::new(&env, "Initialized"),
+            "governance Initialized event topic mismatch"
+        );
+
+        let event_payload: (soroban_sdk::Address, soroban_sdk::Address) =
+            data.clone().try_into_val(&env).unwrap();
+        assert_eq!(
+            event_payload.0, admin,
+            "governance Initialized event admin mismatch"
+        );
+        assert_eq!(
+            event_payload.1, credit_id,
+            "governance Initialized event credit_oracle mismatch"
+        );
     }
 
     #[test]
