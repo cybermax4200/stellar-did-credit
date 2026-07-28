@@ -127,6 +127,14 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "computed_at_ledger"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_updated"
                       },
                       "val": {
@@ -155,6 +163,14 @@
                       },
                       "val": {
                         "u32": 388
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stale"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {

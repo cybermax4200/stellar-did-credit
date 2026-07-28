@@ -95,6 +95,9 @@
                 },
                 {
                   "u32": 100
+                },
+                {
+                  "u32": 0
                 }
               ]
             }
@@ -330,6 +333,14 @@
                       },
                       "val": {
                         "bool": false
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "execution_delay_ledgers"
+                      },
+                      "val": {
+                        "u32": 0
                       }
                     },
                     {

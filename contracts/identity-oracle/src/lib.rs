@@ -135,6 +135,10 @@ pub enum DataKey {
     VCCredentialType(Address, BytesN<32>),
     /// Aggregate protocol-level counters.
     ProtocolStats,
+    /// Whether the subject has voluntarily deactivated their identity.
+    /// When set to `true`, `is_verified` returns `false` and credit scores
+    /// are suppressed. Reversible via `reactivate_identity`.
+    Deactivated(Address),
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -685,7 +689,111 @@ impl IdentityOracle {
     }
 
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
+    /// Check if a subject has voluntarily deactivated their identity.
+    pub fn is_deactivated(env: Env, subject: Address) -> bool {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject))
+            .unwrap_or(false)
+    }
+
+    /// Voluntarily deactivate a subject's identity.
+    ///
+    /// 1. Sets a `Deactivated` flag in storage so `is_verified` returns
+    ///    `false` and credit scoring is suppressed.
+    /// 2. Marks **all** active VC anchors as revoked, making revocation
+    ///    visible to query functions that check the on-chain revoked flag.
+    /// 3. Returns the number of VCs that were transitioned to revoked.
+    ///
+    /// This is **reversible** via `reactivate_identity` (which clears the
+    /// flag but does not restore previously-revoked VCs).
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_identity(env: Env, subject: Address) -> u32 {
+        subject.require_auth();
+
+        // 1. Set the Deactivated flag
+        env.storage()
+            .persistent()
+            .set(&DataKey::Deactivated(subject.clone()), &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&DataKey::Deactivated(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        // 2. Revoke all VCs anchored for this subject
+        let key = DataKey::VCAnchors(subject.clone());
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut updated = Vec::new(&env);
+        let mut revoked_count: u32 = 0;
+        for mut record in anchors.iter() {
+            if !record.revoked {
+                revoked_count += 1;
+            }
+            record.revoked = true;
+            updated.push_back(record);
+        }
+
+        if !anchors.is_empty() {
+            env.storage().persistent().set(&key, &updated);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        if revoked_count > 0 {
+            increment_vcs_revoked(&env, revoked_count as u64);
+        }
+
+        // 3. Clear cached active VC count
+        env.storage()
+            .persistent()
+            .set(&DataKey::ActiveVCCount(subject.clone()), &0u32);
+
+        // 4. Emit event
+        env.events()
+            .publish((symbol_short!("IdDeact"),), (subject, revoked_count));
+
+        revoked_count
+    }
+
+    /// Re-activate a previously deactivated identity.
+    ///
+    /// Clears the `Deactivated` flag set by `deactivate_identity`. Does
+    /// **not** restore previously-revoked VCs — those remain revoked and
+    /// must be re-anchored by their original issuers.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn reactivate_identity(env: Env, subject: Address) {
+        subject.require_auth();
+
+        env.storage()
+            .persistent()
+            .remove(&DataKey::Deactivated(subject.clone()));
+
+        env.events()
+            .publish((symbol_short!("IdReact"),), subject);
+    }
+
+    /// Check if a subject has at least one non-revoked verifiable credential anchored.
+    ///
+    /// Returns `false` immediately if the subject has deactivated their
+    /// identity via `deactivate_identity`, regardless of VC count.
     pub fn is_verified(env: Env, subject: Address) -> bool {
+        // Deactivated subjects are never considered verified
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
         let key = DataKey::VCAnchors(subject);
         let anchors: Vec<VCRecord> = env
             .storage()
@@ -925,7 +1033,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -1490,11 +1598,9 @@ mod tests {
         let (event_contract_id, topics, data) = &events.get(0).unwrap();
         assert_eq!(*event_contract_id, contract_id);
         assert_eq!(topics.len(), 1);
-        assert_eq!(
-            topics.get(0).unwrap(),
-            soroban_sdk::Val::from(Symbol::new(&env, "Initialized")),
-        );
-        let event_admin: Address = data.clone().unwrap();
+        let topic_sym: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_sym, Symbol::new(&env, "Initialized"));
+        let event_admin: Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin);
     }
 
@@ -1701,6 +1807,153 @@ mod tests {
         assert_eq!(stats.total_dids_anchored, 1);
         assert_eq!(stats.total_vcs_anchored, 2);
         assert_eq!(stats.total_vcs_revoked, 2);
+    }
+
+    #[test]
+    fn test_deactivate_identity_sets_flag_and_revokes_vcs() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        client.anchor_did(&subject, &cid);
+
+        // Anchor 3 VCs
+        let vc_hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        let vc_hash3 = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash1);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+        client.anchor_vc(&issuer, &subject, &vc_hash3);
+
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 3);
+        assert!(!client.is_deactivated(&subject));
+
+        // Deactivate
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 3);
+
+        // Verify flag is set
+        assert!(client.is_deactivated(&subject));
+
+        // is_verified returns false
+        assert!(!client.is_verified(&subject));
+
+        // Active VC count is 0
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Total VC count unchanged
+        assert_eq!(client.get_total_vc_count(&subject), 3);
+    }
+
+    #[test]
+    fn test_reactivate_identity_clears_flag() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+
+        // Deactivate
+        client.deactivate_identity(&subject);
+        assert!(client.is_deactivated(&subject));
+        assert!(!client.is_verified(&subject));
+
+        // Reactivate
+        client.reactivate_identity(&subject);
+
+        // Flag is cleared
+        assert!(!client.is_deactivated(&subject));
+
+        // is_verified still returns false because VCs were revoked during deactivation
+        assert!(!client.is_verified(&subject));
+
+        // Active VC count is still 0
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_deactivate_reactivate_full_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Initial: verified
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+
+        // Deactivate
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 1);
+        assert!(client.is_deactivated(&subject));
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Reactivate
+        client.reactivate_identity(&subject);
+        assert!(!client.is_deactivated(&subject));
+
+        // VCs are still revoked, so not verified
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+
+        // Issue a new VC - should become verified again
+        let vc_hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash2);
+        assert!(client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
+    fn test_deactivate_identity_with_no_vcs_returns_zero() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+
+        // No VCs at all
+        assert!(!client.is_verified(&subject));
+        assert!(!client.is_deactivated(&subject));
+
+        let revoked = client.deactivate_identity(&subject);
+        assert_eq!(revoked, 0);
+        assert!(client.is_deactivated(&subject));
     }
 
     #[test]
