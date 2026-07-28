@@ -8,7 +8,7 @@
 extern crate std;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, String, Symbol, Vec,
+    IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,7 +49,29 @@ fn ensure_not_paused(env: &Env) -> Result<(), IdentityOracleError> {
     } else {
         Ok(())
     }
-} // ── Persistent TTL constants ─────────────────────────────────────
+}
+
+fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+where
+    T: TryFromVal<Env, Val>,
+{
+    matches!(
+        env.try_invoke_contract::<T, soroban_sdk::InvokeError>(contract_id, &func, args),
+        Ok(Ok(_))
+    )
+}
+
+fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
+    let dummy_hash = BytesN::from_array(env, &[0u8; 32]);
+    validate_contract_function::<bool>(
+        env,
+        registry_id,
+        Symbol::new(env, "is_revoked"),
+        soroban_sdk::vec![env, dummy_hash.into_val(env)],
+    )
+}
+
+// ── Persistent TTL constants ─────────────────────────────────────
   // Persistent entries are extended to ~30 days on every write.
   //
   // Threshold: if remaining TTL drops below this, extend.
@@ -78,6 +100,8 @@ pub enum IdentityOracleError {
     VCNotFound = 7,
     /// The contract is currently paused and cannot accept writes.
     ContractPaused = 8,
+    /// The provided revocation registry contract is invalid or did not respond.
+    InvalidRevocationRegistry = 9,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -384,25 +408,37 @@ impl IdentityOracle {
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     ///
     /// Auth: admin only — verified via `require_admin`.
+    pub fn validate_revocation_registry(env: Env, registry_id: Address) -> bool {
+        validate_revocation_registry_ref(&env, &registry_id)
+    }
+
     pub fn set_revocation_registry(
         env: Env,
         registry_id: Address,
     ) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
+        if !validate_revocation_registry_ref(&env, &registry_id) {
+            return Err(IdentityOracleError::InvalidRevocationRegistry);
+        }
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.storage()
-            .instance()
-            .set(&DataKey::RevocationRegistryId, &registry_id);
 
-        env.invoke_contract::<()>(
+        match env.try_invoke_contract::<(), soroban_sdk::InvokeError>(
             &registry_id,
             &soroban_sdk::Symbol::new(&env, "set_identity_oracle"),
             soroban_sdk::vec![&env, env.current_contract_address().into_val(&env)],
-        );
-        Ok(())
+        ) {
+            Ok(Ok(())) => {
+                env.storage()
+                    .instance()
+                    .set(&DataKey::RevocationRegistryId, &registry_id);
+                Ok(())
+            }
+            _ => Err(IdentityOracleError::InvalidRevocationRegistry),
+        }
     }
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.

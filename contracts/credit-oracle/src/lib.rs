@@ -2,7 +2,7 @@
 pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, String, Symbol, Vec,
+    IntoVal, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -32,6 +32,8 @@ pub enum CreditOracleError {
     DisputeNotFound = 9,
     /// The provided input key is not a valid score input name.
     InvalidInputKey = 10,
+    /// The provided identity oracle contract is invalid or did not respond.
+    InvalidIdentityOracle = 11,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -54,6 +56,8 @@ pub enum DataKey {
     Admin,
     /// Pending contract admin address for two-step transfer
     PendingAdmin,
+    /// Storage layout version.
+    StorageVersion,
     /// Global configuration
     Config,
     /// Trusted feeder address authorized to update transaction stats
@@ -125,6 +129,26 @@ pub fn compute_score_pure(
 /// Number of ledgers after which a score is considered stale.
 /// Roughly 30 days at 5-second ledgers (~86,400 ledgers).
 const STALE_LEDGER_AGE: u32 = 86_400;
+
+fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+where
+    T: TryFromVal<Env, Val>,
+{
+    matches!(
+        env.try_invoke_contract::<T, soroban_sdk::InvokeError>(contract_id, &func, args),
+        Ok(Ok(_))
+    )
+}
+
+fn validate_identity_oracle_ref(env: &Env, identity_oracle_id: &Address) -> bool {
+    let dummy_subject = env.current_contract_address();
+    validate_contract_function::<u32>(
+        env,
+        identity_oracle_id,
+        Symbol::new(env, "get_active_vc_count"),
+        soroban_sdk::vec![env, dummy_subject.clone().into_val(env)],
+    )
+}
 
 /// Credit score record with metadata
 #[contracttype]
@@ -543,6 +567,9 @@ impl CreditOracle {
                 env.storage().persistent().set(&key, &v2);
             }
         }
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -845,6 +872,9 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+        if !validate_identity_oracle_ref(&env, &identity_oracle_id) {
+            return Err(CreditOracleError::InvalidIdentityOracle);
+        }
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
