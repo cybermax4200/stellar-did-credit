@@ -69,6 +69,10 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
+    /// Index of all registered feeders
+    FeedersIndex,
+    /// Index of all registered lenders
+    LendersIndex,
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -215,9 +219,21 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedFeeder(feeder.clone()), &true);
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
+        if !env.storage().persistent().has(&feeder_key) {
+            let mut feeders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            feeders.push_back(feeder.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::FeedersIndex, &feeders);
+        }
+
+        env.storage().persistent().set(&feeder_key, &true);
         env.events().publish((symbol_short!("FdrReg"),), feeder);
         Ok(())
     }
@@ -240,6 +256,23 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedFeeder(feeder.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::FeedersIndex, &compacted);
+
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
@@ -259,9 +292,21 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage()
-            .persistent()
-            .set(&DataKey::TrustedLender(lender.clone()), &true);
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
+        if !env.storage().persistent().has(&lender_key) {
+            let mut lenders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LendersIndex)
+                .unwrap_or(Vec::new(&env));
+            lenders.push_back(lender.clone());
+            env.storage()
+                .persistent()
+                .set(&DataKey::LendersIndex, &lenders);
+        }
+
+        env.storage().persistent().set(&lender_key, &true);
         env.events().publish((symbol_short!("LndReg"),), lender);
         Ok(())
     }
@@ -284,6 +329,23 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .remove(&DataKey::TrustedLender(lender.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for addr in ever_registered.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage()
+            .persistent()
+            .set(&DataKey::LendersIndex, &compacted);
+
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
     }
@@ -671,6 +733,40 @@ impl CreditOracle {
     /// on-chain operational metrics without requiring an external indexer.
     pub fn get_protocol_stats(env: Env) -> ProtocolStats {
         load_protocol_stats(&env)
+    }
+
+    /// Returns all currently registered feeder addresses.
+    pub fn list_feeders(env: Env) -> Vec<Address> {
+        let feeders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for feeder in feeders.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+                active.push_back(feeder);
+            }
+        }
+        active
+    }
+
+    /// Returns all currently registered lender addresses.
+    pub fn list_lenders(env: Env) -> Vec<Address> {
+        let lenders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut active = Vec::new(&env);
+        for lender in lenders.iter() {
+            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+                active.push_back(lender);
+            }
+        }
+        active
     }
 }
 
