@@ -845,4 +845,79 @@ mod tests {
             assert!(client.is_revoked(&vc_hash));
         }
     }
+
+    // ── Fuzz / Property-based tests ───────────────────────────────────────
+
+    /// State-machine fuzz: random sequences of state-altering operations
+    /// should never panic and should maintain key invariants.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn proptest_state_transitions_safe(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    // 0: revoke
+                    Just(0u8),
+                    // 1: batch_revoke (0-10 hashes)
+                    Just(1u8),
+                    // 2: pause
+                    Just(2u8),
+                    // 3: unpause
+                    Just(3u8),
+                    // 4: propose_new_admin
+                    Just(4u8),
+                    // 5: maintain_storage
+                    Just(5u8),
+                ],
+                0..=30,
+            ),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, RevocationRegistry);
+            let client = RevocationRegistryClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let issuer = Address::generate(&env);
+            let subject = Address::generate(&env);
+            client.initialize(&admin);
+
+            for (i, op) in ops.iter().enumerate() {
+                match op {
+                    0 => {
+                        let hash = BytesN::from_array(&env, &[i as u8; 32]);
+                        let _ = client.try_revoke(&issuer, &subject, &hash);
+                    }
+                    1 => {
+                        let mut batch = Vec::new(&env);
+                        for j in 0..(i % 5 + 1) {
+                            let h = BytesN::from_array(&env, &[(i * 5 + j) as u8; 32]);
+                            batch.push_back(h);
+                        }
+                        let _ = client.try_batch_revoke(&issuer, &batch);
+                    }
+                    2 => { let _ = client.try_pause(); }
+                    3 => { let _ = client.try_unpause(); }
+                    4 => {
+                        let new_admin = Address::generate(&env);
+                        let _ = client.try_propose_new_admin(&new_admin);
+                    }
+                    5 => { let _ = client.try_maintain_storage(); }
+                    _ => {}
+                }
+            }
+
+            // Invariant: Admin is always set
+            let stored_admin: Address = env.as_contract(&contract_id, || {
+                env.storage().instance().get(&RevocationKey::Admin).unwrap()
+            });
+            prop_assert_eq!(stored_admin, admin);
+
+            // Invariant: Reentrancy lock is never left set
+            let lock_present: bool = env.as_contract(&contract_id, || {
+                env.storage().instance().has(&RevocationKey::ReentrancyLock)
+            });
+            prop_assert!(!lock_present, "reentrancy lock leaked");
+        }
+    }
 }

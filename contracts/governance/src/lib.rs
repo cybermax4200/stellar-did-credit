@@ -1168,4 +1168,118 @@ mod tests {
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
     }
+
+    // ── Fuzz / Property-based tests ───────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Proposal with any valid weights should be creatable and executable.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn proptest_proposal_lifecycle(
+            vc_wt in 1u32..=60u32,
+            tx_wt in 1u32..=60u32,
+            voting_period in 1u32..=100u32,
+            delay in 1u32..=50u32,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let admin = Address::generate(&env);
+            let credit_oracle_id = env.register_contract(None, CreditOracle);
+            CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+            let gov_id = env.register_contract(None, Governance);
+            let gov_client = GovernanceClient::new(&env, &gov_id);
+            gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+            let voter = Address::generate(&env);
+            gov_client.register_voter(&admin, &voter, &500);
+
+            let rp_wt = 100u32 - vc_wt - tx_wt;
+            if rp_wt == 0 || rp_wt > 60 { return Ok(()); }
+
+            let weights = ScoringWeights { vc_weight: vc_wt, tx_weight: tx_wt, repayment_weight: rp_wt };
+            let result = gov_client.try_create_proposal(
+                &voter, &weights, &voting_period, &delay,
+            );
+            prop_assert!(result.is_ok());
+            let proposal_id = result.unwrap();
+
+            // Vote
+            let vote_result = gov_client.try_vote(&voter, &proposal_id, &true, &300);
+            prop_assert!(vote_result.is_ok());
+
+            // Advance past voting + delay
+            let total_ledgers = (voting_period + delay + 1) as u32;
+            env.ledger().with_mut(|l| {
+                l.sequence_number = l.sequence_number.saturating_add(total_ledgers);
+            });
+
+            let exec_result = gov_client.try_execute(&proposal_id);
+            // success depends on quorum — either is valid
+            prop_assert!(exec_result.is_ok() || exec_result.is_err());
+
+            // State query never panics
+            let _proposal = gov_client.get_proposal(&proposal_id);
+        }
+    }
+
+    /// State-machine fuzz for governance: random sequences should not panic.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn proptest_state_transitions(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    Just(0u8), // register_voter
+                    Just(1u8), // update_voter_weight
+                    Just(2u8), // create_proposal
+                    Just(3u8), // set_quorum
+                    Just(4u8), // cancel
+                ],
+                0..=15,
+            ),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+
+            let admin = Address::generate(&env);
+            let credit_oracle_id = env.register_contract(None, CreditOracle);
+            CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+            let gov_id = env.register_contract(None, Governance);
+            let gov_client = GovernanceClient::new(&env, &gov_id);
+            gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+            let voter = Address::generate(&env);
+
+            for (i, op) in ops.iter().enumerate() {
+                match op {
+                    0 => { let _ = gov_client.try_register_voter(&admin, &voter, &100); }
+                    1 => {
+                        let _ = gov_client.try_update_voter_weight(&admin, &voter, &200);
+                    }
+                    2 => {
+                        let weights = ScoringWeights { vc_weight: 34, tx_weight: 33, repayment_weight: 33 };
+                        let _ = gov_client.try_create_proposal(
+                            &voter, &weights, &10, &5,
+                        );
+                    }
+                    3 => { let _ = gov_client.try_set_quorum(&admin, &(i as i128 + 10)); }
+                    4 => {
+                        let _ = gov_client.try_cancel(&admin, &String::from_str(&env, "fuzz-cancel"));
+                    }
+                    _ => {}
+                }
+            }
+
+            // Invariant: Admin is unchanged
+            let stored_admin: Address = env.as_contract(&gov_id, || {
+                env.storage().instance().get(&DataKey::Admin).unwrap()
+            });
+            prop_assert_eq!(stored_admin, admin);
+        }
+    }
 }

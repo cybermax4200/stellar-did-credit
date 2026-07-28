@@ -1728,4 +1728,121 @@ mod tests {
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
     }
+
+    // ── Fuzz / Property-based tests ───────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Random DID anchoring with arbitrary CID strings should never panic.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+        #[test]
+        fn proptest_anchor_did_never_panics(
+            cid_suffix in "[a-zA-Z0-9_-]{0,64}",
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, IdentityOracle);
+            let client = IdentityOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let subject = Address::generate(&env);
+            let cid = String::from_str(&env, &format!("ipfs://{}", cid_suffix));
+            let result = client.try_anchor_did(&subject, &cid);
+            prop_assert!(result.is_ok());
+            prop_assert!(client.has_did(&subject));
+            prop_assert_eq!(client.resolve_did(&subject), cid);
+        }
+    }
+
+    /// State-machine fuzz: random sequences of state-altering operations
+    /// should leave the contract in a consistent state.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+        #[test]
+        fn proptest_state_transitions(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    // 0: pause
+                    Just(0u8),
+                    // 1: unpause
+                    Just(1u8),
+                    // 2: register issuer
+                    Just(2u8),
+                    // 3: deregister issuer
+                    Just(3u8),
+                    // 4: anchor VC
+                    Just(4u8),
+                    // 5: mark VC revoked
+                    Just(5u8),
+                    // 6: deactivate DID
+                    Just(6u8),
+                    // 7: anchor DID
+                    Just(7u8),
+                ],
+                0..=20,
+            ),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, IdentityOracle);
+            let client = IdentityOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            let issuer = Address::generate(&env);
+            let subject = Address::generate(&env);
+
+            client.initialize(&admin);
+
+            let mut did_anchored = false;
+            let mut vc_anchored = false;
+
+            for op in ops {
+                match op {
+                    0 => { let _ = client.try_pause(); }
+                    1 => { let _ = client.try_unpause(); }
+                    2 => { let _ = client.try_register_issuer(&issuer); }
+                    3 => { let _ = client.try_deregister_issuer(&issuer); }
+                    4 => {
+                        let hash = BytesN::from_array(&env, &[op; 32]);
+                        let _ = client.try_anchor_vc(&issuer, &subject, &hash);
+                        vc_anchored = true;
+                    }
+                    5 => {
+                        let hash = BytesN::from_array(&env, &[4u8; 32]);
+                        let _ = client.try_mark_vc_revoked(&issuer, &subject, &hash);
+                    }
+                    6 => { let _ = client.try_deactivate_did(&subject); }
+                    7 => {
+                        let cid = String::from_str(&env, "ipfs://QmFuzz");
+                        let _ = client.try_anchor_did(&subject, &cid);
+                        did_anchored = true;
+                    }
+                    _ => {}
+                }
+            }
+
+            // Invariants:
+            // 1. Admin is always set
+            let stored_admin: Address = env.as_contract(&contract_id, || {
+                env.storage().instance().get(&DataKey::Admin).unwrap()
+            });
+            prop_assert_eq!(stored_admin, admin);
+
+            // 2. Protocol stats are non-negative
+            let stats = client.get_protocol_stats();
+            prop_assert!(stats.total_dids_anchored >= 0);
+            prop_assert!(stats.total_vcs_anchored >= 0);
+            prop_assert!(stats.total_vcs_revoked >= 0);
+
+            // 3. If we anchored a DID, it should be resolvable
+            if did_anchored {
+                prop_assert!(client.has_did(&subject));
+                // Deactivation may have cleared it, but that's fine
+            }
+        }
+    }
 }
