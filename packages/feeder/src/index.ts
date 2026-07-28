@@ -602,16 +602,16 @@ export class Feeder {
 
     // Check whether on-chain data has changed since the last sync.
     const lastState = this.syncState.get(subjectAddress);
-    if (lastState) {
-      if (
-        lastState.vcCount === vcCount &&
-        lastState.volume30d === stats.volume30d &&
-        lastState.txCount30d === stats.txCount30d &&
-        lastState.avgCounterparties === stats.avgCounterparties
-      ) {
-        console.log(`[feeder] ${subjectAddress} — unchanged, skipping`);
-        return;
-      }
+    const vcCountChanged = !lastState || lastState.vcCount !== vcCount;
+    const statsChanged =
+      !lastState ||
+      lastState.volume30d !== stats.volume30d ||
+      lastState.txCount30d !== stats.txCount30d ||
+      lastState.avgCounterparties !== stats.avgCounterparties;
+
+    if (!vcCountChanged && !statsChanged) {
+      console.log(`[feeder] ${subjectAddress} — unchanged, skipping`);
+      return;
     }
 
     console.log(`[feeder] syncing ${subjectAddress}`);
@@ -637,6 +637,8 @@ export class Feeder {
     // Step 3: submit set_vc_count (skip if cross-contract is configured)
     if (identityOracleConfigured) {
       console.log(`  skipping set_vc_count (cross-contract lookup configured)`);
+    } else if (!vcCountChanged) {
+      console.log(`  skipping set_vc_count (unchanged)`);
     } else {
       const vcCountTxHash = await withExponentialBackoff(
         `set_vc_count(${subjectAddress})`,
@@ -672,31 +674,35 @@ export class Feeder {
     }
 
     // Step 4: submit update_tx_stats
-    const statsTxHash = await withExponentialBackoff(
-      `update_tx_stats(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () =>
-        submitOperation(
-          this.server,
-          this.config.networkPassphrase,
-          this.feederKeypair,
-          creditContract.call(
-            "update_tx_stats",
-            new Address(feederAddress).toScVal(),
-            new Address(subjectAddress).toScVal(),
-            txStatsToScVal(stats),
+    if (!statsChanged) {
+      console.log(`  skipping update_tx_stats (unchanged)`);
+    } else {
+      const statsTxHash = await withExponentialBackoff(
+        `update_tx_stats(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          submitOperation(
+            this.server,
+            this.config.networkPassphrase,
+            this.feederKeypair,
+            creditContract.call(
+              "update_tx_stats",
+              new Address(feederAddress).toScVal(),
+              new Address(subjectAddress).toScVal(),
+              txStatsToScVal(stats),
+            ),
           ),
-        ),
-    );
-    console.log(`  update_tx_stats tx = ${statsTxHash}`);
+      );
+      console.log(`  update_tx_stats tx = ${statsTxHash}`);
 
-    await withExponentialBackoff(
-      `wait_update_tx_stats_confirmation(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () => waitForConfirmation(this.server, statsTxHash),
-    );
+      await withExponentialBackoff(
+        `wait_update_tx_stats_confirmation(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () => waitForConfirmation(this.server, statsTxHash),
+      );
+    }
 
     console.log(`  done`);
 
