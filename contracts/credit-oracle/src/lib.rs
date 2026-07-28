@@ -24,6 +24,8 @@ pub enum CreditOracleError {
     InvalidWeights = 5,
     /// No pending admin proposal exists.
     NoPendingAdmin = 6,
+    /// Compute score called too soon — cooldown has not elapsed.
+    ComputeCooldownActive = 7,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -268,7 +270,11 @@ impl CreditOracle {
 
         let mut compacted = Vec::new(&env);
         for addr in ever_registered.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedFeeder(addr.clone()))
+            {
                 compacted.push_back(addr);
             }
         }
@@ -341,7 +347,11 @@ impl CreditOracle {
 
         let mut compacted = Vec::new(&env);
         for addr in ever_registered.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedLender(addr.clone()))
+            {
                 compacted.push_back(addr);
             }
         }
@@ -445,10 +455,7 @@ impl CreditOracle {
     /// and writes use the new layout automatically.
     ///
     /// **Authentication:** only the current admin may call this function.
-    pub fn migrate(
-        env: Env,
-        subjects: soroban_sdk::Vec<Address>,
-    ) -> Result<(), CreditOracleError> {
+    pub fn migrate(env: Env, subjects: soroban_sdk::Vec<Address>) -> Result<(), CreditOracleError> {
         let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
         admin.require_auth();
 
@@ -497,7 +504,10 @@ impl CreditOracle {
     }
 
     /// Compute and store credit score for a user
-    pub fn compute_score(env: Env, subject: Address) -> u32 {
+    pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        // Reject if last computation was within the cooldown window
+        Self::check_compute_cooldown(&env, &subject)?;
+
         let tx_stats: TxStats = env
             .storage()
             .persistent()
@@ -635,7 +645,30 @@ impl CreditOracle {
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
 
-        score
+        Ok(score)
+    }
+
+    /// Check cooldown — reject if the last computation was within the cooldown window.
+    fn check_compute_cooldown(env: &Env, subject: &Address) -> Result<(), CreditOracleError> {
+        let cooldown: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(0);
+
+        if cooldown > 0 {
+            if let Some(record) = env
+                .storage()
+                .persistent()
+                .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
+            {
+                let current_ledger = env.ledger().sequence();
+                if current_ledger.saturating_sub(record.computed_at_ledger) < cooldown {
+                    return Err(CreditOracleError::ComputeCooldownActive);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get credit score for a user; returns None if score has not been computed yet.
@@ -850,7 +883,11 @@ impl CreditOracle {
 
         let mut active = Vec::new(&env);
         for feeder in feeders.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedFeeder(feeder.clone()))
+            {
                 active.push_back(feeder);
             }
         }
@@ -867,7 +904,11 @@ impl CreditOracle {
 
         let mut active = Vec::new(&env);
         for lender in lenders.iter() {
-            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+            if env
+                .storage()
+                .persistent()
+                .has(&DataKey::TrustedLender(lender.clone()))
+            {
                 active.push_back(lender);
             }
         }
@@ -1041,12 +1082,15 @@ mod tests {
         // Verify the topic is Symbol("Score") — decode Val back to Symbol for comparison
         assert_eq!(topics.len(), 1, "expected 1 topic element");
         let topic_val = topics.get(0).unwrap();
-        let topic_sym: Symbol = topic_val.try_into_val(&env).expect("topic should be a Symbol");
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
         assert_eq!(topic_sym, symbol_short!("Score"), "expected Score topic");
 
         // Verify the data payload is (subject, score) — decode Val back to typed tuple
-        let (event_subject, event_score): (Address, u32) =
-            data.try_into_val(&env).expect("data should be (Address, u32)");
+        let (event_subject, event_score): (Address, u32) = data
+            .try_into_val(&env)
+            .expect("data should be (Address, u32)");
         assert_eq!(event_subject, subject, "event subject mismatch");
         assert_eq!(event_score, score, "event score mismatch");
     }
@@ -1534,10 +1578,12 @@ mod tests {
         client.compute_score(&subject);
         let record1 = client.get_score(&subject).unwrap();
 
-        // Advance ledger time by 100 seconds
+        // Advance ledger to bypass cooldown
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
-        // Second computation with identical inputs
+        // Second computation with identical inputs — write is skipped
         client.compute_score(&subject);
         let record2 = client.get_score(&subject).unwrap();
 
@@ -1549,7 +1595,9 @@ mod tests {
         client.register_feeder(&admin, &feeder);
         client.set_vc_count(&feeder, &subject, &2);
 
-        // Advance ledger time again
+        // Advance ledger again
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
         // Third computation with changed input
@@ -1632,6 +1680,10 @@ mod tests {
         client.compute_score(&subject);
         let stats1 = client.get_protocol_stats();
         assert_eq!(stats1.total_subjects_scored, 1);
+
+        // Advance ledger to bypass cooldown before recomputing
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
 
         // Second computation with identical inputs — should NOT double count
         client.compute_score(&subject);

@@ -344,7 +344,11 @@ impl Governance {
                 .expect("no credit oracle");
 
             // Use propose_weights to start the timelock, not update_weights which bypasses it
-            CreditOracleClient::propose_weights(&env, &credit_oracle_addr, &proposal.proposed_weights);
+            CreditOracleClient::propose_weights(
+                &env,
+                &credit_oracle_addr,
+                &proposal.proposed_weights,
+            );
         }
 
         proposal.executed = true;
@@ -396,7 +400,11 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .ok_or(GovernanceError::NotAuthorized)?;
 
-        CreditOracleClient::accept_admin(&env, &credit_oracle_addr, &env.current_contract_address());
+        CreditOracleClient::accept_admin(
+            &env,
+            &credit_oracle_addr,
+            &env.current_contract_address(),
+        );
         Ok(())
     }
 
@@ -905,7 +913,10 @@ mod tests {
 
         // Verify weights are pending (execute queues them, does not apply immediately)
         let active_weights = credit_oracle_client.get_scoring_weights();
-        assert_eq!(active_weights.vc_weight, 40, "weights should not change until apply_weights after timelock");
+        assert_eq!(
+            active_weights.vc_weight, 40,
+            "weights should not change until apply_weights after timelock"
+        );
 
         // Verify pending weights exist
         let pending = credit_oracle_client.get_pending_weights();

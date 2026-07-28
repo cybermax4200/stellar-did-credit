@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, DataKey, RepaymentRecord, RepaymentRecordV1,
-        ScoringWeights, TxStats,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, RepaymentRecord,
+        RepaymentRecordV1, ScoringWeights, TxStats,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
@@ -971,6 +971,10 @@ mod tests {
         let stats2 = credit.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
 
+        // Advance ledger to bypass cooldown
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
         // Compute score again for same subject — should NOT double count
         credit.compute_score(&subject);
         let stats3 = credit.get_protocol_stats();
@@ -1159,6 +1163,150 @@ mod tests {
         assert_eq!(rec1_v2_updated.on_time_count, 3);
         assert_eq!(rec1_v2_updated.total_count, 4);
         assert_eq!(rec1_v2_updated.total_repaid, 5000);
+    }
+
+    // ── Compute-score cooldown tests ──────────────────────────────────────
+
+    /// cooldown = 1 (default): second call within the same ledger is rejected.
+    #[test]
+    fn test_compute_score_cooldown_rejects_same_ledger() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        // First call succeeds
+        credit.compute_score(&subject);
+
+        // Second call in the same ledger is rejected by cooldown
+        let result = credit.try_compute_score(&subject);
+        assert_eq!(
+            result,
+            Err(Ok(credit_oracle::CreditOracleError::ComputeCooldownActive))
+        );
+    }
+
+    /// cooldown = 0: two compute_score calls within the same ledger both succeed.
+    #[test]
+    fn test_compute_score_no_cooldown_allows_same_ledger() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        // Override cooldown to 0
+        env.as_contract(&credit_id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::ComputeCooldownLedgers, &0u32);
+        });
+
+        let score1 = credit.compute_score(&subject);
+        let score2 = credit.compute_score(&subject);
+
+        // Both calls succeed and return identical scores (no input changed)
+        assert_eq!(score1, score2);
+    }
+
+    /// Verify computed_at_ledger is updated after every successful write.
+    #[test]
+    fn test_compute_score_updates_last_computed_ledger() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        // First computation
+        credit.compute_score(&subject);
+        let record1 = credit.get_score(&subject).unwrap();
+        assert_eq!(
+            record1.computed_at_ledger,
+            env.ledger().sequence(),
+            "first computed_at_ledger should match current ledger"
+        );
+
+        // Advance ledger and change an input so a write actually occurs
+        let feeder = soroban_sdk::Address::generate(&env);
+        credit.register_feeder(&admin, &feeder);
+        credit.set_vc_count(&feeder, &subject, &3);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        // Second computation — write occurs because VC count changed
+        credit.compute_score(&subject);
+        let record2 = credit.get_score(&subject).unwrap();
+        assert_eq!(
+            record2.computed_at_ledger,
+            env.ledger().sequence(),
+            "second computed_at_ledger should match updated ledger"
+        );
+        assert!(
+            record2.computed_at_ledger > record1.computed_at_ledger,
+            "computed_at_ledger should increase after recomputation"
+        );
+    }
+
+    /// Deterministic scoring: identical inputs produce identical scores.
+    #[test]
+    fn test_compute_score_deterministic() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let subject_a = soroban_sdk::Address::generate(&env);
+        let subject_b = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // Identical setup for both subjects
+        for subject in [&subject_a, &subject_b] {
+            credit.set_vc_count(&feeder, subject, &2);
+            credit.update_tx_stats(
+                &feeder,
+                subject,
+                &TxStats {
+                    volume_30d: 1_000_000_000i128,
+                    tx_count_30d: 50,
+                    avg_counterparties: 10,
+                },
+            );
+            for _ in 0..8 {
+                credit.record_repayment(&lender, subject, &1000, &true);
+            }
+            for _ in 0..2 {
+                credit.record_repayment(&lender, subject, &1000, &false);
+            }
+        }
+
+        let score_a = credit.compute_score(&subject_a);
+        let score_b = credit.compute_score(&subject_b);
+
+        assert_eq!(
+            score_a, score_b,
+            "deterministic scoring: identical inputs must produce identical scores"
+        );
     }
 }
 
