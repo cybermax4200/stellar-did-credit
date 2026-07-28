@@ -1678,3 +1678,40 @@ mod tests {
         let active_count = identity.get_active_vc_count(&subject);
         assert_eq!(active_count, 0); // Revoked VC => 0 active
     }
+
+    /// Verifies that calling anchor_vc twice with the same vc_hash by the same issuer
+    /// for the same subject is a no-op and results in a VC count of 1.
+    #[test]
+    fn test_anchor_vc_duplicate_hash_same_issuer_is_noop_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let id_oracle_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &id_oracle_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer1 = soroban_sdk::Address::generate(&env);
+        let issuer2 = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        identity.register_trusted_issuer(&admin, &issuer1);
+        identity.register_trusted_issuer(&admin, &issuer2);
+
+        let vc_hash = soroban_sdk::BytesN::from_array(&env, &[99u8; 32]);
+
+        // First anchor by issuer1
+        identity.anchor_vc(&issuer1, &subject, &vc_hash);
+
+        // Second anchor with same hash by same issuer1 should be no-op
+        identity.anchor_vc(&issuer1, &subject, &vc_hash);
+
+        assert_eq!(identity.get_total_vc_count(&subject), 1);
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+
+        // Anchor with same hash by different issuer2 should succeed
+        identity.anchor_vc(&issuer2, &subject, &vc_hash);
+
+        assert_eq!(identity.get_total_vc_count(&subject), 2);
+        assert_eq!(identity.get_active_vc_count(&subject), 2);
+    }
