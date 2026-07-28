@@ -35,5 +35,5 @@
       }
     }
   },
-  "types": "dist/index.d.ts"
+  "types": "src/index.ts"
 }

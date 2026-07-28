@@ -19,6 +19,7 @@ A decentralized identity and credit scoring protocol built on Stellar. Users own
 - [Project structure](#project-structure)
 - [TypeScript SDK](#typescript-sdk)
 - [Feeder](#feeder)
+- [CLI](#cli)
 - [Roadmap](#roadmap)
 - [Security](#security)
 - [Contributing](#contributing)
@@ -412,10 +413,169 @@ await feeder.runCycle();
 | revocation-registry     | ✅ Complete    | Batch revocation supported           |
 | TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
 | Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
-| CLI tool                | 📋 Planned     |                                      |
+| CLI tool                | ✅ Complete    | `packages/cli`                       |
 | Cross-contract vc_count | 📋 Planned     |                                      |
 | ZK proof layer          | 📋 Research    |                                      |
 | Governance contract     | 📋 Planned     |                                      |
+
+---
+
+---
+
+## CLI
+
+The `@stellar-did-credit/cli` package provides a command-line interface for interacting with the protocol contracts directly from your terminal.
+
+### Installation
+
+```bash
+# From the repo root
+pnpm install
+
+# Run via ts-node
+cd packages/cli
+npx ts-node src/index.ts --help
+```
+
+Or add a shell alias for convenience:
+
+```bash
+alias stellar-did="npx ts-node $(pwd)/packages/cli/src/index.ts"
+```
+
+### Configuration
+
+Contract IDs are loaded from (in order of precedence):
+
+1. **Environment variables** (highest priority)
+2. **Config file** — `stellar-did-config.json` or `.stellar-did-rc.json` in the current working directory or `$HOME`
+3. **Built-in defaults** — Stellar testnet
+
+#### Environment variables
+
+| Variable                 | Description                              |
+| ------------------------ | ---------------------------------------- |
+| `IDENTITY_ORACLE_ID`     | identity-oracle contract address         |
+| `CREDIT_ORACLE_ID`       | credit-oracle contract address           |
+| `REVOCATION_REGISTRY_ID` | revocation-registry contract address     |
+| `NETWORK_PASSPHRASE`     | Stellar network passphrase (default: testnet) |
+| `RPC_URL`                | Soroban RPC endpoint (default: testnet)  |
+| `SIM_ACCOUNT`            | Funded account for read-only simulations |
+
+#### Config file
+
+Create a `stellar-did-config.json` file:
+
+```json
+{
+  "identityOracleId": "C...",
+  "creditOracleId": "C...",
+  "revocationRegistryId": "C...",
+  "networkPassphrase": "Test SDF Network ; September 2015",
+  "rpcUrl": "https://soroban-testnet.stellar.org"
+}
+```
+
+You can also use a `deployments.testnet.json`-style file with a `contracts` block:
+
+```json
+{
+  "contracts": {
+    "identity-oracle": "C...",
+    "credit-oracle": "C...",
+    "revocation-registry": "C..."
+  }
+}
+```
+
+### Commands
+
+#### `anchor-did` — Anchor a DID document
+
+Stores the IPFS CID of a DID document on-chain in the identity-oracle contract.
+
+```bash
+stellar-did anchor-did <subject-secret> <did-doc-cid>
+
+# Example
+stellar-did anchor-did YOUR_STELLAR_SECRET_KEY QmExampleCid123
+```
+
+**Output:**
+```
+Anchoring DID for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
+  DID Doc CID: QmExampleCid123
+
+Success!
+  Transaction: abc123def456...
+  Explorer:    https://stellar.expert/explorer/testnet/tx/abc123def456...
+```
+
+#### `get-score` — Fetch a credit score
+
+Reads the on-chain credit score for a subject address (read-only, no fees).
+
+```bash
+stellar-did get-score <subject-address>
+
+# Example
+stellar-did get-score GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# JSON output
+stellar-did get-score --json GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+```
+
+**Output:**
+```
+Fetching credit score for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
+
+┌─────────────────────────────────────┐
+│  Credit Score: 612                  │
+├─────────────────────────────────────┤
+│  VC Count:                       3  │
+│  Repayment Rate:            8000 bps│
+│  TX Volume (30d):    1000.0000000 XLM│
+│  Previous Score:               558  │
+│  Computed at Ledger:       1234567  │
+│  Last Updated:      2026-07-01T00...│
+│  Stale:                      false  │
+└─────────────────────────────────────┘
+```
+
+#### `verify-vc` — Verify a credential
+
+Checks whether a specific verifiable credential hash is valid and non-revoked on-chain (read-only, no fees).
+
+```bash
+stellar-did verify-vc <subject-address> <vc-hash>
+
+# Example
+stellar-did verify-vc GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+```
+
+**Output:**
+```
+Verifying VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
+  VC Hash: a1b2c3d4...
+
+✅ VC is VALID and non-revoked on-chain.
+```
+
+#### `compute-score` — Compute a credit score
+
+Submits a transaction to compute and persist a credit score on-chain. Requires a funded keypair to pay transaction fees.
+
+```bash
+stellar-did compute-score <payer-secret> <subject-address>
+
+# Example
+stellar-did compute-score YOUR_STELLAR_SECRET_KEY GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# JSON output
+stellar-did compute-score --json YOUR_STELLAR_SECRET_KEY G...
+```
+
+**Output:** (same format as `get-score`)
 
 ---
 

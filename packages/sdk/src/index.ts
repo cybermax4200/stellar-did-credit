@@ -2,7 +2,6 @@ import {
   Contract,
   SorobanRpc,
   TransactionBuilder,
-  Networks,
   BASE_FEE,
   Account,
   scValToNative,
@@ -65,7 +64,11 @@ export interface ProtocolConfig {
 }
 
 export class StellarDIDCreditSDK {
-  constructor(private config: ProtocolConfig) {}
+  private server: SorobanRpc.Server;
+
+  constructor(private config: ProtocolConfig) {
+    this.server = new SorobanRpc.Server(this.config.rpcUrl);
+  }
 
   /**
    * Anchor a DID document on-chain by storing its IPFS CID.
@@ -207,82 +210,6 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * Revoke a verifiable credential on-chain.
-   *
-   * Submits a single signed transaction that calls `revoke` on the revocation-registry
-   * contract and `mark_vc_revoked` on the identity-oracle contract. Requires the issuer
-   * keypair to authorize both operations.
-   *
-   * @param issuerKeypair - Stellar keypair of the credential issuer
-   * @param subjectAddress - Stellar G... address of the credential subject
-   * @param vcHash - SHA-256 hash of the verifiable credential to revoke
-   * @returns Transaction hash on successful submission
-   */
-  async revokeVC(
-    issuerKeypair: Keypair,
-    subjectAddress: string,
-    vcHash: Buffer,
-  ): Promise<string> {
-    if (vcHash.length !== 32) {
-      throw new Error("vcHash must be exactly 32 bytes");
-    }
-
-    const revocationContract = new Contract(this.config.revocationRegistryId);
-    const identityContract = new Contract(this.config.identityOracleId);
-
-    const publicKey = issuerKeypair.publicKey();
-
-    const accountData = await this.server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
-
-    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
-    const issuerScVal = new Address(publicKey).toScVal();
-
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: this.config.baseFee ?? BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        revocationContract.call(
-          "revoke",
-          issuerScVal,
-          new Address(subjectAddress).toScVal(),
-          hashScVal,
-        ),
-      )
-      .addOperation(
-        identityContract.call(
-          "mark_vc_revoked",
-          issuerScVal,
-          new Address(subjectAddress).toScVal(),
-          hashScVal,
-        ),
-      )
-      .setTimeout(this.config.timeoutSeconds ?? 30)
-      .build();
-
-    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
-
-    if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
-    }
-
-    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error("Simulation returned unexpected response");
-    }
-
-    const preparedTx = assembleTransaction(tx, sim).build();
-    preparedTx.sign(issuerKeypair);
-
-    const result = await this.server.sendTransaction(preparedTx);
-    if (result.status !== "PENDING") {
-      throw new Error(`Transaction failed: ${result.errorResult}`);
-    }
-
-    return result.hash;
-  }
-
-  /**
    * Compute and persist a subject's credit score, then return the stored ScoreRecord.
    *
    * Submits a signed transaction to the credit-oracle contract, waits for ledger
@@ -307,7 +234,7 @@ export class StellarDIDCreditSDK {
     const publicKey = payerKeypair.publicKey();
 
     const accountData = await this.server.getAccount(publicKey);
-    const sourceAccount = new Account(publicKey, getSequence(accountData));
+    const sourceAccount = new Account(publicKey, (accountData as any).sequence);
 
     const tx = new TransactionBuilder(sourceAccount, {
           fee: this.config.baseFee ?? BASE_FEE,
@@ -319,7 +246,7 @@ export class StellarDIDCreditSDK {
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
-    const sim = await simulateWithRetry(this.server, tx, this.config.maxRetries ?? 3);
+    const sim = await this.server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.toLowerCase().includes("cooldown")) {
@@ -332,7 +259,10 @@ export class StellarDIDCreditSDK {
       throw new Error("Simulation returned unexpected response");
     }
 
-    const preparedTx = assembleTransaction(tx, sim).build();
+    const preparedTx = (SorobanRpc.Api as any).assembleTransaction(
+      tx,
+      sim,
+    ).build();
     preparedTx.sign(payerKeypair);
 
     const response = await this.server.sendTransaction(preparedTx);
@@ -641,7 +571,9 @@ async function waitForTransactionConfirmation(
   for (let attempt = 0; attempt < attempts; attempt++) {
     const result = await server.getTransaction(txHash);
 
-    switch (result.status) {
+    const status = result.status as string;
+
+    switch (status) {
       case "SUCCESS":
         return;
       case "FAILED": {
