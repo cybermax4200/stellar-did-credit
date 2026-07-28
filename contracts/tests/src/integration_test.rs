@@ -1,14 +1,14 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, DataKey, RepaymentRecord, RepaymentRecordV1,
-        ScoringWeights, TxStats,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, RepaymentRecord,
+        RepaymentRecordV1, ScoringWeights, TxStats,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
-    use identity_oracle::{IdentityOracle, IdentityOracleClient};
+    use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
-        symbol_short,
+        contract, contractimpl, symbol_short,
         testutils::{Address as _, Events, Ledger as _},
         BytesN, Env, String, Symbol, TryIntoVal, Val,
     };
@@ -260,6 +260,48 @@ mod tests {
             new_score,
             initial_score
         );
+    }
+
+    #[test]
+    fn test_set_identity_oracle_rejects_invalid_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let bad_address = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let result = credit.try_set_identity_oracle(&admin, &bad_address);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidIdentityOracle)));
+    }
+
+    #[test]
+    fn test_set_revocation_registry_rejects_invalid_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let bad_address = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        let result = identity.try_set_revocation_registry(&bad_address);
+        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidRevocationRegistry)));
     }
 
     #[test]
