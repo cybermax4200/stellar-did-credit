@@ -925,7 +925,10 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::Address as _, Env};
+    use soroban_sdk::{
+        testutils::{Address as _, Events},
+        Env, TryIntoVal,
+    };
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -1490,11 +1493,9 @@ mod tests {
         let (event_contract_id, topics, data) = &events.get(0).unwrap();
         assert_eq!(*event_contract_id, contract_id);
         assert_eq!(topics.len(), 1);
-        assert_eq!(
-            topics.get(0).unwrap(),
-            soroban_sdk::Val::from(Symbol::new(&env, "Initialized")),
-        );
-        let event_admin: Address = data.clone().unwrap();
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin);
     }
 

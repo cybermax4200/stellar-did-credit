@@ -8,7 +8,8 @@ crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 soroban-sdk = { workspace = true }
-credit-oracle = { path = "../credit-oracle" }
+credit-oracle-types = { path = "../credit-oracle-types" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+credit-oracle = { path = "../credit-oracle" }

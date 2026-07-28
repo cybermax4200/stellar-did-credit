@@ -2,6 +2,7 @@
 members = [
   "contracts/identity-oracle",
   "contracts/credit-oracle",
+  "contracts/credit-oracle-types",
   "contracts/revocation-registry",
   "contracts/tests",
   "contracts/governance",

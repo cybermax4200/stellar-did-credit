@@ -292,8 +292,16 @@ dependencies = [
 name = "credit-oracle"
 version = "0.1.0"
 dependencies = [
+ "credit-oracle-types",
  "identity-oracle",
  "proptest",
+ "soroban-sdk",
+]
+
+[[package]]
+name = "credit-oracle-types"
+version = "0.1.0"
+dependencies = [
  "soroban-sdk",
 ]
 
@@ -697,6 +705,7 @@ name = "governance"
 version = "0.1.0"
 dependencies = [
  "credit-oracle",
+ "credit-oracle-types",
  "soroban-sdk",
 ]
 

@@ -1,4 +1,5 @@
 #![no_std]
+pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal,
@@ -112,28 +113,6 @@ pub struct TxStats {
     pub tx_count_30d: u32,
     /// Average number of counterparties
     pub avg_counterparties: u32,
-}
-
-/// Weights used in credit score calculation
-#[contracttype]
-#[derive(Clone)]
-pub struct ScoringWeights {
-    /// Weight for verified credentials component
-    pub vc_weight: u32,
-    /// Weight for transaction history component
-    pub tx_weight: u32,
-    /// Weight for repayment history component
-    pub repayment_weight: u32,
-}
-
-/// Pending weights proposal with timelock
-#[contracttype]
-#[derive(Clone)]
-pub struct PendingWeightsRecord {
-    /// Proposed weights
-    pub weights: ScoringWeights,
-    /// Ledger number when these weights become effective
-    pub effective_ledger: u32,
 }
 
 /// Internal repayment counters for a subject
@@ -340,6 +319,7 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .set(&DataKey::RepaymentRecord(subject), &record);
+        increment_repayments_recorded(&env);
         Ok(())
     }
 
@@ -453,6 +433,10 @@ impl CreditOracle {
         }
 
         if needs_write {
+            // Only increment subjects_scored for first-time subjects (no previous score)
+            if previous_score.is_none() {
+                increment_subjects_scored(&env);
+            }
             env.storage().persistent().set(
                 &DataKey::Score(subject.clone()),
                 &ScoreRecord {
