@@ -636,7 +636,7 @@ mod tests {
         assert_eq!(list2.get(0).unwrap(), hash_d);
     }
 
-    /// Integration test for governance execution timelock:
+    /// Integration test for the governance-to-credit-oracle execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
     #[test]
