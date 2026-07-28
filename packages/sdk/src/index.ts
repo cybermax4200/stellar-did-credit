@@ -143,7 +143,7 @@ export class StellarDIDCreditSDK {
    *
    * @param issuerKeypair - Stellar keypair of the credential issuer
    * @param subjectAddress - Stellar G... address of the credential subject
-   * @param vcHash - SHA-256 hash of the verifiable credential
+   * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
    * @returns Transaction hash on successful submission
    */
   async issueVC(
@@ -151,6 +151,10 @@ export class StellarDIDCreditSDK {
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const contract = new Contract(this.config.identityOracleId);
 
@@ -398,7 +402,7 @@ export class StellarDIDCreditSDK {
    *
    * @param issuerKeypair - Stellar keypair of the credential issuer
    * @param subjectAddress - Stellar G... address of the credential subject
-   * @param vcHash - SHA-256 hash of the verifiable credential
+   * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
    * @returns Transaction hash on successful submission
    */
   async revokeVC(
@@ -406,6 +410,10 @@ export class StellarDIDCreditSDK {
     subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const registryContract = new Contract(this.config.revocationRegistryId);
     const identityContract = new Contract(this.config.identityOracleId);
@@ -511,6 +519,176 @@ export class StellarDIDCreditSDK {
     }
 
     return scValToNative(resultScVal) as boolean;
+  }
+
+  /**
+   * Verify whether a subject has a matching active verifiable credential anchor.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the credential subject
+   * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
+   * @returns true if the subject has an active, non-revoked VC with the given hash
+   */
+  async verifyVC(subjectAddress: string, vcHash: Buffer): Promise<boolean> {
+    if (vcHash.length !== 32) {
+      throw new Error("vcHash must be exactly 32 bytes");
+    }
+
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "verify_vc",
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as boolean;
+  }
+
+  /**
+   * Returns the number of active (non-revoked) verifiable credentials for a subject.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns The count of active non-revoked VCs
+   */
+  async getVCCount(subjectAddress: string): Promise<number> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_active_vc_count", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as number;
+  }
+
+  /**
+   * Fetch the scoring weights currently configured on the credit-oracle contract.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns The current ScoringWeights configuration
+   */
+  async getWeights(): Promise<ScoringWeights> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_scoring_weights"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseScoringWeights(resultScVal);
+  }
+
+  /**
+   * Returns the list of all currently registered (non-deregistered) trusted issuers.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @returns Array of Stellar G... addresses of registered issuers
+   */
+  async getRegisteredIssuers(): Promise<string[]> {
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("list_issuers"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    return (native as unknown[]).map((addr) => String(addr));
   }
 }
 
