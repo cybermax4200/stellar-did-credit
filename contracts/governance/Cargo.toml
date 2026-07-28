@@ -12,3 +12,4 @@ credit-oracle = { path = "../credit-oracle" }
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+proptest = "1"

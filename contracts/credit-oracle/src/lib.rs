@@ -1343,4 +1343,136 @@ mod tests {
         let stats2 = client.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
     }
+
+    // ── Fuzz / Property-based tests ───────────────────────────────────────
+
+    use proptest::prelude::*;
+
+    /// Score should always be in [300, 850] for any valid scoring weights.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
+        #[test]
+        fn proptest_score_range(
+            volume in 0i128..=1_000_000_000i128,
+            tx_count in 0u32..=10_000u32,
+            on_time in 0u32..=100u32,
+            total in 1u32..=100u32,
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let feeder = Address::generate(&env);
+            client.register_feeder(&admin, &feeder);
+
+            let lender = Address::generate(&env);
+            client.register_lender(&admin, &lender);
+
+            let subject = Address::generate(&env);
+
+            // Seed various stats that influence score
+            let _ = client.try_update_tx_stats(
+                &feeder, &subject,
+                &TxStats { volume_30d: volume, tx_count_30d: tx_count, avg_counterparties: 1 },
+            );
+            let _ = client.try_record_repayment(
+                &lender, &subject, &100_000_000, &(on_time > 0),
+            );
+
+            let result = client.try_compute_score(&subject);
+            if result.is_ok() {
+                let score = client.get_score(&subject);
+                prop_assert!(
+                    score.score >= 300 && score.score <= 850,
+                    "score {} out of [300, 850]",
+                    score.score,
+                );
+            }
+        }
+    }
+
+    /// State-machine fuzz: random sequences of operations should maintain
+    /// core invariants.
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+        #[test]
+        fn proptest_state_transitions(
+            ops in proptest::collection::vec(
+                prop_oneof![
+                    Just(0u8), // register_feeder
+                    Just(1u8), // deregister_feeder
+                    Just(2u8), // register_lender
+                    Just(3u8), // deregister_lender
+                    Just(4u8), // update_tx_stats
+                    Just(5u8), // record_repayment
+                    Just(6u8), // compute_score
+                    Just(7u8), // propose_weights
+                ],
+                0..=20,
+            ),
+        ) {
+            let env = Env::default();
+            env.mock_all_auths();
+            let contract_id = env.register_contract(None, CreditOracle);
+            let client = CreditOracleClient::new(&env, &contract_id);
+
+            let admin = Address::generate(&env);
+            client.initialize(&admin);
+
+            let feeder = Address::generate(&env);
+            let lender = Address::generate(&env);
+            let subject = Address::generate(&env);
+
+            for op in ops {
+                match op {
+                    0 => { let _ = client.try_register_feeder(&admin, &feeder); }
+                    1 => { let _ = client.try_deregister_feeder(&admin, &feeder); }
+                    2 => { let _ = client.try_register_lender(&admin, &lender); }
+                    3 => { let _ = client.try_deregister_lender(&admin, &lender); }
+                    4 => {
+                        let _ = client.try_update_tx_stats(
+                            &feeder, &subject,
+                            &TxStats { volume_30d: 1_000_000, tx_count_30d: 10, avg_counterparties: 2 },
+                        );
+                    }
+                    5 => {
+                        let _ = client.try_record_repayment(&lender, &subject, &100_000_000, &true);
+                    }
+                    6 => { let _ = client.try_compute_score(&subject); }
+                    7 => {
+                        let _ = client.try_propose_weights(
+                            &ScoringWeights { vc_weight: 34, tx_weight: 33, repayment_weight: 33 },
+                        );
+                    }
+                    _ => {}
+                }
+            }
+
+            // Invariants:
+            // 1. Admin is unchanged
+            let stored_admin: Address = env.as_contract(&contract_id, || {
+                env.storage().instance().get(&DataKey::Admin).unwrap()
+            });
+            prop_assert_eq!(stored_admin, admin);
+
+            // 2. Weights always sum to 100 (if set)
+            let config: ScoringWeights = env.as_contract(&contract_id, || {
+                env.storage().instance().get(&DataKey::Config).unwrap()
+            });
+            prop_assert_eq!(
+                config.vc_weight + config.tx_weight + config.repayment_weight,
+                100u32,
+                "scoring weights must sum to 100",
+            );
+
+            // 3. Protocol stats are non-negative
+            let stats = client.get_protocol_stats();
+            prop_assert!(stats.total_subjects_scored >= 0);
+            prop_assert!(stats.total_repayments_recorded >= 0);
+        }
+    }
 }
