@@ -1623,4 +1623,3 @@ mod tests {
             "expected DisputeAlreadyPending when re-filing a pending dispute"
         );
     }
-}
