@@ -232,3 +232,30 @@ By anchoring the DID to a Stellar address, the identity is permanently linked to
 ## 6. Reference Implementation
 
 The canonical implementation of the anchor contract is located in `contracts/identity-oracle/`.
+
+
+## 7. CID Format Constraints
+
+The `anchor_did` function on the `identity-oracle` contract accepts IPFS Content Identifiers (CIDs) with the following prefix formats:
+
+### 7.1 Accepted Formats
+
+| Prefix | Type | Example |
+|--------|------|---------|
+| `ipfs://` | Protocol-prefixed CID | `ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym` |
+| `bafy` | CIDv1 (multibase base32) | `bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4` |
+| `Qm` | CIDv0 (base58btc) | `QmVocdeKSNbd9jkc3pDjq9FdAVLpiHrfQFwcJMgB7aXZi3` |
+
+### 7.2 Validation Rules
+
+- CID strings must be at least 7 characters long
+- CIDs starting with `ipfs://` are accepted after the prefix (e.g. `ipfs://Qm...` or `ipfs://bafy...`)
+- CIDs starting with `bafy` (CIDv1 in base32) are accepted directly
+- CIDs starting with `Qm` (CIDv0 in base58btc) are accepted directly
+- Any other format returns `InvalidCID` error
+
+### 7.3 Recommendations
+
+- **Prefer CIDv1 (`bafy...`)** for new documents — it supports multiple codecs and hashes
+- Use `ipfs://` prefix for gateway-agnostic resolution
+- CIDv0 (`Qm...`) is supported for backward compatibility with existing IPFS content
