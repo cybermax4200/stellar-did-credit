@@ -66,12 +66,21 @@ The cooldown can be configured by the contract admin using `update_compute_coold
 | **Testnet** | `100` (~8 minutes) | Balances testing convenience with realistic network conditions. |
 | **Mainnet** | `17280` (~24 hours) | Prevents spam, reduces fees, and aligns with typical score update frequencies. |
 
-### Other methods (coming soon)
+### SDK Method Status Table
 
-- `anchorDID(subjectKeypair, didDocCid)` — anchor a DID document CID on-chain
-- `issueVC(issuerKeypair, subjectAddress, vcHash)` — anchor a verifiable credential
-- `verifyVC(subjectAddress, vcHash)` — check if a specific VC is valid
-- `isVerified(subjectAddress)` — check if a subject has any active VC
+| Method | Status | Description |
+|--------|--------|-------------|
+| `getScore` | ✅ Implemented | Read persisted score record from credit-oracle |
+| `computeScore` | ✅ Implemented | Compute and persist subject credit score on-chain |
+| `anchorDID` | ✅ Implemented | Anchor a DID document IPFS CID on-chain |
+| `issueVC` | ✅ Implemented | Anchor a verifiable credential for a subject |
+| `revokeVC` | ✅ Implemented | Revoke a verifiable credential by hash |
+| `getDIDDocument` | ✅ Implemented | Fetch anchored DID document CID for a subject |
+| `isVerified` | ✅ Implemented | Check if a subject has active (non-revoked) VCs |
+| `verifyVC` | ✅ Implemented | Verify whether a subject has a specific active VC hash |
+| `getVCCount` | ✅ Implemented | Fetch count of active VCs for a subject |
+| `getWeights` | ✅ Implemented | Fetch contract scoring weight configuration |
+| `getRegisteredIssuers` | ✅ Implemented | List all registered trusted credential issuers |
 
 ## Error handling
 
