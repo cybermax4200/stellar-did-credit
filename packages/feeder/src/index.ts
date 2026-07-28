@@ -80,6 +80,17 @@ export interface TxStats {
   avgCounterparties: number;
 }
 
+/**
+ * Per-subject snapshot of the last synced state.
+ * Used to detect changes between cycles so only modified subjects are re-synced.
+ */
+interface SubjectSyncState {
+  vcCount: number;
+  volume30d: bigint;
+  txCount30d: number;
+  avgCounterparties: number;
+}
+
 // ---------------------------------------------------------------------------
 // Horizon helpers
 // ---------------------------------------------------------------------------
@@ -370,6 +381,8 @@ export async function waitForConfirmation(
  */
 export class Feeder {
   private server: SorobanRpc.Server;
+  /** Tracks the last-synced state per subject to avoid redundant syncs. */
+  private syncState = new Map<string, SubjectSyncState>();
 
   constructor(
     private config: FeederConfig,
@@ -418,8 +431,6 @@ export class Feeder {
    * further steps are started — the subject may end up partially synced.
    */
   async feedSubject(subjectAddress: string, signal?: AbortSignal): Promise<void> {
-    console.log(`[feeder] syncing ${subjectAddress}`);
-
     const maxRetries = this.config.maxRetries ?? 3;
     const retryBaseDelayMs = this.config.retryBaseDelayMs ?? 1_000;
 
@@ -430,7 +441,6 @@ export class Feeder {
       retryBaseDelayMs,
       () => getActiveVcCount(this.server, this.config, subjectAddress),
     );
-    console.log(`  vc_count          = ${vcCount}`);
     if (signal?.aborted) {
       console.log(`[feeder] ${subjectAddress} — aborted after vc_count read`);
       return;
@@ -443,16 +453,33 @@ export class Feeder {
       retryBaseDelayMs,
       () => fetchHorizonStats(this.config.horizonUrl, subjectAddress),
     );
+    if (signal?.aborted) {
+      console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
+      return;
+    }
+
+    // Check whether on-chain data has changed since the last sync.
+    const lastState = this.syncState.get(subjectAddress);
+    if (lastState) {
+      if (
+        lastState.vcCount === vcCount &&
+        lastState.volume30d === stats.volume30d &&
+        lastState.txCount30d === stats.txCount30d &&
+        lastState.avgCounterparties === stats.avgCounterparties
+      ) {
+        console.log(`[feeder] ${subjectAddress} — unchanged, skipping`);
+        return;
+      }
+    }
+
+    console.log(`[feeder] syncing ${subjectAddress}`);
+    console.log(`  vc_count          = ${vcCount}`);
     console.log(
       `  volume_30d        = ${stats.volume30d} stroops` +
         ` (${Number(stats.volume30d) / 10_000_000} XLM)`,
     );
     console.log(`  tx_count_30d      = ${stats.txCount30d}`);
     console.log(`  avg_counterparties = ${stats.avgCounterparties}`);
-    if (signal?.aborted) {
-      console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
-      return;
-    }
 
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
@@ -530,6 +557,14 @@ export class Feeder {
     );
 
     console.log(`  done`);
+
+    // Update the sync state so the next cycle can detect changes.
+    this.syncState.set(subjectAddress, {
+      vcCount,
+      volume30d: stats.volume30d,
+      txCount30d: stats.txCount30d,
+      avgCounterparties: stats.avgCounterparties,
+    });
   }
 
   /**

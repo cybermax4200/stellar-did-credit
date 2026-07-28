@@ -1,13 +1,16 @@
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, ScoringWeights, TxStats};
+    use credit_oracle::{
+        CreditOracle, CreditOracleClient, DataKey, RepaymentRecord, RepaymentRecordV1,
+        ScoringWeights, TxStats,
+    };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
         symbol_short,
-        testutils::{Address as _, Ledger as _},
-        BytesN, Env, String, Symbol, Val,
+        testutils::{Address as _, Events, Ledger as _},
+        BytesN, Env, String, Symbol, TryIntoVal, Val,
     };
 
     #[test]
@@ -32,8 +35,9 @@ mod tests {
         assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
-        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
 
         // Initialize credit-oracle and verify Initialized event
@@ -43,8 +47,9 @@ mod tests {
         assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
-        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
 
         // Initialize revocation-registry and verify Initialized event
@@ -54,8 +59,9 @@ mod tests {
         assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
-        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        let topic_symbol: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic_symbol, Symbol::new(&env, "Initialized"));
+        let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
     }
 
@@ -161,7 +167,7 @@ mod tests {
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
         // Configure credit-oracle to call identity-oracle directly
-        credit.set_identity_oracle(&identity_id);
+        credit.set_identity_oracle(&admin, &identity_id);
 
         // Do not set cached VcCount; compute_score should read identity-oracle
         let score_live = credit.compute_score(&subject);
@@ -497,7 +503,7 @@ mod tests {
         }
 
         // Configure credit-oracle to use cross-contract VC count lookup
-        credit.set_identity_oracle(&identity_id);
+        credit.set_identity_oracle(&admin, &identity_id);
 
         // Compute initial score (3 active VCs)
         let initial_score = credit.compute_score(&subject);
@@ -701,6 +707,25 @@ mod tests {
             "proposal must be executed after timelock"
         );
 
+        // Verify weights are NOT changed immediately (timelock in effect)
+        let weights_after_execute = credit.get_scoring_weights();
+        assert_eq!(weights_after_execute.vc_weight, 40); // Still default
+
+        // Advance ledger past timelock (~24 hours = 17,280 ledgers)
+        let jump = 17_280 + 2;
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // Apply weights after timelock
+        gov.apply_weights();
+
         // Verify weights were applied to the credit oracle
         let weights = credit.get_scoring_weights();
         assert_eq!(weights.vc_weight, 50);
@@ -734,23 +759,23 @@ mod tests {
 
         // Wire identity <-> revocation and credit <-> identity
         identity.set_revocation_registry(&revocation_id);
-        credit.set_identity_oracle(&identity_id).unwrap();
+        credit.set_identity_oracle(&admin, &identity_id);
 
         // 1) Two-step admin transfer on `credit`: admin -> new_admin
         let new_admin = soroban_sdk::Address::generate(&env);
         // Propose new admin (signed by current admin)
-        credit.propose_new_admin(&new_admin).unwrap();
+        let _ = credit.propose_new_admin(&new_admin);
         // Accept as new admin
-        credit.accept_admin(&new_admin).unwrap();
+        let _ = credit.accept_admin(&new_admin);
 
         // Verify admin changed by exercising an admin-only call using `new_admin`
         let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_feeder(&new_admin, &feeder).unwrap();
+        let _ = credit.register_feeder(&new_admin, &feeder);
 
         // 2) Transfer oracle admin to governance contract
-        credit.propose_new_admin(&gov_id).unwrap();
+        let _ = credit.propose_new_admin(&gov_id);
         // Governance accepts the oracle admin on its behalf
-        gov.accept_oracle_admin().unwrap();
+        let _ = gov.accept_oracle_admin();
 
         // 3) Governance proposal lifecycle: create -> vote -> execute -> apply
         let proposed_weights = ScoringWeights {
@@ -768,7 +793,7 @@ mod tests {
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200i128);
 
-        gov.vote(&voter, &proposal_id, &true, &200i128).unwrap();
+        let _ = gov.vote(&voter, &proposal_id, &true, &200i128);
 
         // Advance ledger past voting expiry
         env.ledger().with_mut(|l| {
@@ -776,7 +801,7 @@ mod tests {
         });
 
         // Execute proposal (governance is now credit admin and will propose weights)
-        gov.execute(&proposal_id).unwrap();
+        let _ = gov.execute(&proposal_id);
 
         // Advance ledger to pass credit-oracle timelock and apply the proposed weights
         let jump = 100_000u32;
@@ -1012,5 +1037,127 @@ mod tests {
         let record2 = credit.get_score(&subject).unwrap();
         assert_eq!(record2.previous_score, Some(first_score));
         assert_eq!(record2.score, second_score);
+    }
+
+    #[contract]
+    pub struct CreditOracleV1Mock;
+
+    #[contractimpl]
+    impl CreditOracleV1Mock {
+        pub fn initialize(env: Env, admin: soroban_sdk::Address) {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+            let default_weights = ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            };
+            env.storage()
+                .instance()
+                .set(&DataKey::Config, &default_weights);
+            env.storage().instance().set(
+                &DataKey::ComputeCooldownLedgers,
+                &1u32,
+            );
+        }
+
+        pub fn register_lender(env: Env, lender: soroban_sdk::Address) {
+            env.storage().persistent().set(&DataKey::TrustedLender(lender), &true);
+        }
+
+        pub fn record_repayment(
+            env: Env,
+            _lender: soroban_sdk::Address,
+            subject: soroban_sdk::Address,
+            on_time: bool,
+        ) {
+            let mut record = env
+                .storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap_or(RepaymentRecordV1 {
+                    on_time_count: 0,
+                    total_count: 0,
+                });
+            if on_time {
+                record.on_time_count += 1;
+            }
+            record.total_count += 1;
+            env.storage()
+                .persistent()
+                .set(&DataKey::RepaymentRecord(subject), &record);
+        }
+    }
+
+    #[test]
+    fn test_storage_migration_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CreditOracleV1Mock);
+        let client_v1 = CreditOracleV1MockClient::new(&env, &contract_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        client_v1.initialize(&admin);
+
+        let lender = soroban_sdk::Address::generate(&env);
+        client_v1.register_lender(&lender);
+
+        let subject1 = soroban_sdk::Address::generate(&env);
+        let subject2 = soroban_sdk::Address::generate(&env);
+
+        client_v1.record_repayment(&lender, &subject1, &true);
+        client_v1.record_repayment(&lender, &subject1, &false);
+        client_v1.record_repayment(&lender, &subject2, &true);
+
+        let rec1_v1: RepaymentRecordV1 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(rec1_v1.on_time_count, 1);
+        assert_eq!(rec1_v1.total_count, 2);
+
+        env.register_contract(Some(&contract_id), CreditOracle);
+        let client_v2 = CreditOracleClient::new(&env, &contract_id);
+
+        let score1_before = client_v2.compute_score(&subject1);
+        assert!(score1_before > 300);
+
+        client_v2.record_repayment(&lender, &subject1, &1000i128, &true);
+        let rec1_v1_updated: RepaymentRecordV1 = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(rec1_v1_updated.on_time_count, 2);
+        assert_eq!(rec1_v1_updated.total_count, 3);
+
+        let mut subjects = soroban_sdk::Vec::new(&env);
+        subjects.push_back(subject1.clone());
+        subjects.push_back(subject2.clone());
+        client_v2.migrate(&subjects);
+
+        let rec1_v2: RepaymentRecord = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(rec1_v2.on_time_count, 2);
+        assert_eq!(rec1_v2.total_count, 3);
+        assert_eq!(rec1_v2.total_repaid, 0);
+
+        client_v2.record_repayment(&lender, &subject1, &5000i128, &true);
+        let rec1_v2_updated: RepaymentRecord = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(rec1_v2_updated.on_time_count, 3);
+        assert_eq!(rec1_v2_updated.total_count, 4);
+        assert_eq!(rec1_v2_updated.total_repaid, 5000);
     }
 }

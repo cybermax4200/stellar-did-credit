@@ -35,10 +35,10 @@ mod tests {
         identity.register_issuer(&issuer);
 
         let feeder = Address::generate(&env);
-        credit.register_feeder(&feeder);
+        credit.register_feeder(&admin, &feeder);
 
         let lender = Address::generate(&env);
-        credit.register_lender(&lender);
+        credit.register_lender(&admin, &lender);
 
         let subject = Address::generate(&env);
 

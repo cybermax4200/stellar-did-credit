@@ -748,7 +748,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Error(Contract, 1)")]
+    #[should_panic(expected = "Error(Contract, #1)")]
     fn test_initialize_already_initialized() {
         let env = Env::default();
         env.mock_all_auths();
