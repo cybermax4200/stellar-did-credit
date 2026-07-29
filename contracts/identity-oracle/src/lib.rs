@@ -929,9 +929,12 @@ impl IdentityOracle {
         anchors.len()
     }
 
-    /// Returns the number of anchored VC records for `subject` that are **not revoked**.
     pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
-        load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
+        if env.storage().instance().has(&DataKey::RevocationRegistryId) {
+            compute_active_vc_count(&env, &subject)
+        } else {
+            load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
+        }
     }
 
     /// Returns active (non-revoked) VC anchor records for `subject`.

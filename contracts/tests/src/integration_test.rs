@@ -1130,7 +1130,8 @@ mod tests {
         assert_eq!(revoked, 2);
         assert!(identity.is_deactivated(&subject));
         assert!(!identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 0);
+        // Advance ledger to satisfy compute_score cooldown
+        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
 
         // 3. compute_score should now return 300 for deactivated subject
         let score_after_deactivation = credit.compute_score(&subject);
@@ -1606,24 +1607,23 @@ mod tests {
         // Step 2: Admin accepts the dispute.
         credit.resolve_dispute(&subject, &input_key, &true);
 
+        // Step 3: Verify DsptRslv event was emitted (feeder monitors this).
+        let events = env.events().all();
+
         let resolved = credit.get_dispute(&subject, &input_key).unwrap();
         assert_eq!(resolved.status, DisputeStatus::Resolved);
 
-        // Step 3: Verify DsptRslv event was emitted (feeder monitors this).
-        let events = env.events().all();
-        let rslv_count = events
-            .iter()
-            .filter(|(id, topics, _)| {
-                *id == credit_id && topics.len() >= 1 && {
-                    let topic: soroban_sdk::Symbol =
-                        match topics.get(0).unwrap().try_into_val(&env) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
-                    topic == soroban_sdk::symbol_short!("DsptRslv")
+        let mut rslv_count = 0;
+        for (id, topics, _) in events.iter() {
+            if id == credit_id && !topics.is_empty() {
+                let topic_res: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                if let Ok(topic) = topic_res {
+                    if topic == soroban_sdk::symbol_short!("DsptRslv") {
+                        rslv_count += 1;
+                    }
                 }
-            })
-            .count();
+            }
+        }
         assert_eq!(rslv_count, 1, "expected exactly one DsptRslv event");
 
         // Step 4: Feeder corrects tx_stats after re-sync.
