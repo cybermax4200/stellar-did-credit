@@ -288,7 +288,11 @@ export class StellarDIDCreditSDK {
       throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
     }
 
-    await waitForTransactionConfirmation(this.server, response.hash);
+    await waitForTransactionConfirmation(
+      this.server,
+      response.hash,
+      "computeScore",
+    );
 
     try {
       const score = await this.getScore(subjectAddress);
@@ -406,14 +410,17 @@ export class StellarDIDCreditSDK {
   /**
    * Revoke a verifiable credential by its hash.
    *
-   * Submits a signed transaction that calls both the revocation-registry contract
-   * to mark the hash as revoked, and the identity-oracle contract to update the
-   * VC record status.
+   * Submits one Soroban operation to the revocation-registry. The registry calls
+   * `mark_vc_revoked` on the identity-oracle in the same contract invocation.
+   * Soroban transactions execute atomically, so a failure in either contract
+   * discards every state change made by the invocation.
+   *
+   * @see https://developers.stellar.org/docs/learn/fundamentals/contract-development/contract-interactions/transaction-simulation
    *
    * @param issuerKeypair - Stellar keypair of the credential issuer
    * @param subjectAddress - Stellar G... address of the credential subject
    * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
-   * @returns Transaction hash on successful submission
+   * @returns Transaction hash after successful ledger confirmation
    */
   async revokeVC(
     issuerKeypair: any,
@@ -426,7 +433,6 @@ export class StellarDIDCreditSDK {
 
     const server = new SorobanRpc.Server(this.config.rpcUrl);
     const registryContract = new Contract(this.config.revocationRegistryId);
-    const identityContract = new Contract(this.config.identityOracleId);
 
     const publicKey =
       issuerKeypair.publicKey instanceof Function
@@ -448,13 +454,6 @@ export class StellarDIDCreditSDK {
         registryContract.call(
           "revoke",
           new Address(publicKey).toScVal(),
-          hashScVal,
-        ),
-      )
-      .addOperation(
-        identityContract.call(
-          "mark_vc_revoked",
-          new Address(publicKey).toScVal(),
           new Address(subjectAddress).toScVal(),
           hashScVal,
         ),
@@ -466,11 +465,15 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw new Error(
+        `revokeVC simulation failed; no revocation state was changed: ${sim.error}`,
+      );
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error("Simulation returned unexpected response");
+      throw new Error(
+        "revokeVC simulation returned an unexpected response; no revocation state was changed",
+      );
     }
 
     // Apply simulation result and prepare the transaction
@@ -484,7 +487,18 @@ export class StellarDIDCreditSDK {
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
+      throw new Error(
+        `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
+      );
+    }
+
+    try {
+      await waitForTransactionConfirmation(server, response.hash, "revokeVC");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      throw new Error(
+        `revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes: ${message}`,
+      );
     }
 
     return response.hash;
@@ -753,6 +767,7 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
 async function waitForTransactionConfirmation(
   server: SorobanRpc.Server,
   txHash: string,
+  operationName: string,
   attempts = 20,
   delayMs = 1000,
 ): Promise<void> {
@@ -767,7 +782,7 @@ async function waitForTransactionConfirmation(
       case "FAILED": {
         const errorDetails = JSON.stringify(result);
         throw new Error(
-          `computeScore transaction failed for ${txHash}: ${errorDetails}`,
+          `${operationName} transaction failed for ${txHash}: ${errorDetails}`,
         );
       }
       case "NOT_FOUND":
@@ -782,7 +797,7 @@ async function waitForTransactionConfirmation(
   }
 
   throw new Error(
-    `Timed out waiting for computeScore transaction confirmation: ${txHash}`,
+    `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
   );
 }
 

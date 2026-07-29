@@ -245,7 +245,12 @@ try {
 }
 ```
 
-The `revokeVC` method handles the two-contract flow automatically. If the transaction fails, the entire operation is reverted.
+The SDK submits one Soroban operation to `revocation-registry.revoke`; the registry
+then calls `identity-oracle.mark_vc_revoked` within the same invocation. Soroban
+transactions execute atomically, so a contract error discards all state changes.
+`revokeVC` waits for final transaction confirmation and throws a descriptive error
+if either contract fails. See Stellar's
+[transaction simulation and atomicity documentation](https://developers.stellar.org/docs/learn/fundamentals/contract-development/contract-interactions/transaction-simulation).
 
 ---
 

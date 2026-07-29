@@ -355,6 +355,7 @@ mod tests {
 
         // Link identity-oracle to revocation-registry
         identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
 
         let issuer = soroban_sdk::Address::generate(&env);
         identity.register_issuer(&issuer);
@@ -378,6 +379,42 @@ mod tests {
         // Also verify that is_verified and get_active_vc_count correctly reflect the revocation
         assert!(!identity.is_verified(&subject));
         assert_eq!(identity.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_revoke_unknown_vc_rolls_back_registry_state() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        revocation.set_identity_oracle(&identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        let unknown_hash = BytesN::from_array(&env, &[124u8; 32]);
+
+        assert!(!revocation.is_revoked(&unknown_hash));
+        assert!(
+            revocation
+                .try_revoke(&issuer, &subject, &unknown_hash)
+                .is_err(),
+            "identity-oracle must reject an unknown VC"
+        );
+
+        assert!(
+            !revocation.is_revoked(&unknown_hash),
+            "the failed identity-oracle callback must roll back registry state"
+        );
+        assert_eq!(revocation.get_revocation_count(&issuer), 0);
+        assert_eq!(revocation.list_revoked(&issuer, &0, &10).len(), 0);
     }
 
     #[test]

@@ -173,7 +173,8 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("revokeVC", () => {
-    it("calls revoke on the registry and mark_vc_revoked on identity", async () => {
+    it("calls the registry once and waits for the atomic revocation to succeed", async () => {
+      mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
@@ -186,17 +187,13 @@ describe("StellarDIDCreditSDK", () => {
       expect(result).toBe("mock-tx-hash");
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
       expect(mockSendTransaction).toHaveBeenCalled();
-      expect(mockContractCalls).toHaveLength(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("mock-tx-hash");
+      expect(mockContractCalls).toHaveLength(1);
       expect(mockContractCalls[0]).toMatchObject({
         contractId: mockConfig.revocationRegistryId,
         method: "revoke",
       });
-      expect(mockContractCalls[0]?.args).toHaveLength(2);
-      expect(mockContractCalls[1]).toMatchObject({
-        contractId: mockConfig.identityOracleId,
-        method: "mark_vc_revoked",
-      });
-      expect(mockContractCalls[1]?.args).toHaveLength(3);
+      expect(mockContractCalls[0]?.args).toHaveLength(3);
     });
 
     it("rejects non-32-byte credential hashes", async () => {
@@ -207,6 +204,46 @@ describe("StellarDIDCreditSDK", () => {
       ).rejects.toThrow("vcHash must be exactly 32 bytes");
       expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("reports simulation failures before changing either contract", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #4)",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(
+          issuerKeypair as never,
+          subjectAddress,
+          Buffer.alloc(32, 4),
+        ),
+      ).rejects.toThrow(
+        "revokeVC simulation failed; no revocation state was changed: Error(Contract, #4)",
+      );
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("reports a confirmed contract failure as an atomic rollback", async () => {
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "failed-revoke-hash",
+      });
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "Error(Contract, #4)",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(
+          issuerKeypair as never,
+          subjectAddress,
+          Buffer.alloc(32, 4),
+        ),
+      ).rejects.toThrow(
+        "revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes",
+      );
     });
   });
 
