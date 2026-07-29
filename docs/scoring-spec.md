@@ -12,6 +12,7 @@ The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`
 | `volume_30d`                    | Feeder via `update_tx_stats`  | `TxStats(subject).volume_30d`         |
 | `avg_counterparties`            | Feeder via `update_tx_stats`  | `TxStats(subject).avg_counterparties` |
 | `on_time_count` / `total_count` | Lender via `record_repayment` | `RepaymentRecord(subject)`            |
+| `total_repaid`                  | Lender via `record_repayment` | `RepaymentRecord(subject)`            |
 
 All inputs default to zero if never set. A subject with no history always scores exactly 300.
 
@@ -40,14 +41,21 @@ tx_score          = min(volume_score + counterparty_bonus, 100)
 
 > **Important:** The counterparty bonus is a sub-component of `tx_score`. It is multiplied by `tx_weight` in the composite calculation (Step 2). If `tx_weight` is set to 0, the counterparty bonus contributes **nothing** to the final score, even with 100+ counterparties. Integrators who want to disable volume-based scoring while preserving network-diversity signals should be aware of this coupling.
 
-**Repayment score** — rewards on-time repayment rate as a percentage:
+**Repayment score** — rewards both on-time repayment rate and repayment volume.
+The volume sub-score gives 1 point per 100,000,000 stroops (1 XLM), capped at
+100, so repayment size can influence scoring without making the repayment
+component unbounded:
 
 ```
-repay_score = 0                                   if total_count = 0
-repay_score = (on_time_count × 10000 ÷ total_count) ÷ 100   [integer division]
+repayment_rate_score   = 0                                                if total_count = 0
+repayment_rate_score   = (on_time_count × 10000 ÷ total_count) ÷ 100      [integer division]
+repayment_volume_score = min(total_repaid ÷ 100_000_000, 100)             [integer division]
+repay_score            = (repayment_rate_score + repayment_volume_score) ÷ 2
 ```
 
-This gives a value of 0–100 representing the repayment percentage (e.g. 80% on-time → 80).
+This gives a value of 0–100 where repayment timing and repayment amount each
+contribute half of the repayment component. Negative repayment amounts are
+clamped to zero for scoring.
 
 ### Step 2: Weighted composite (0–100)
 
@@ -99,50 +107,56 @@ score = clamp(MIN_SCORE + 0×550÷100, MIN_SCORE, MAX_SCORE) = MIN_SCORE
 
 ---
 
-### Example 2: 3 VCs, moderate volume, 80% repayment → score ~613
+### Example 2: 3 VCs, moderate volume, 80% repayment → score ~569
 
 | Input           | Value                          |
 | --------------- | ------------------------------ |
 | vc_count        | 3                              |
 | volume_30d      | 3,000,000,000 stroops (30 XLM) |
 | on_time / total | 8 / 10                         |
+| total_repaid    | 3,000,000,000 stroops (30 XLM) |
 
 **Calculation:**
 
 ```
 vc_score    = min(3 × 20, 100) = min(60, 100) = 60
 tx_score    = min(3_000_000_000 ÷ 100_000_000, 100) = min(30, 100) = 30
-repay_score = (8 × 10000 ÷ 10) ÷ 100 = 8000 ÷ 100 = 80
+repayment_rate_score   = (8 × 10000 ÷ 10) ÷ 100 = 8000 ÷ 100 = 80
+repayment_volume_score = min(3_000_000_000 ÷ 100_000_000, 100) = 30
+repay_score            = (80 + 30) ÷ 2 = 55
 
-composite = (60×40 + 30×30 + 80×30) ÷ 100
-          = (2400 + 900 + 2400) ÷ 100
-          = 5700 ÷ 100
-          = 57
+composite = (60×40 + 30×30 + 55×30) ÷ 100
+          = (2400 + 900 + 1650) ÷ 100
+          = 4950 ÷ 100
+          = 49
 
-score = clamp(300 + 57×550÷100, 300, 850)
-      = clamp(300 + 31350÷100, 300, 850)
-      = clamp(300 + 313, 300, 850)
-      = 613
+score = clamp(300 + 49×550÷100, 300, 850)
+      = clamp(300 + 26950÷100, 300, 850)
+      = clamp(300 + 269, 300, 850)
+      = 569
 ```
 
-**Result: 613** — a solid mid-range score reflecting real but moderate credit activity.
+**Result: 569** — a mid-range score reflecting real but moderate credit activity and repayment volume.
 
 ---
 
 ### Example 3: 5 VCs, high volume, 100% repayment → score ~817
 
-| Input           | Value                          |
-| --------------- | ------------------------------ |
-| vc_count        | 5                              |
-| volume_30d      | 8,000,000,000 stroops (80 XLM) |
-| on_time / total | 20 / 20                        |
+| Input           | Value                            |
+| --------------- | -------------------------------- |
+| vc_count        | 5                                |
+| volume_30d      | 8,000,000,000 stroops (80 XLM)   |
+| on_time / total | 20 / 20                          |
+| total_repaid    | 10,000,000,000 stroops (100 XLM) |
 
 **Calculation:**
 
 ```
 vc_score    = min(5 × 20, 100) = min(100, 100) = 100
 tx_score    = min(8_000_000_000 ÷ 100_000_000, 100) = min(80, 100) = 80
-repay_score = (20 × 10000 ÷ 20) ÷ 100 = 10000 ÷ 100 = 100
+repayment_rate_score   = (20 × 10000 ÷ 20) ÷ 100 = 10000 ÷ 100 = 100
+repayment_volume_score = min(10_000_000_000 ÷ 100_000_000, 100) = 100
+repay_score            = (100 + 100) ÷ 2 = 100
 
 composite = (100×40 + 80×30 + 100×30) ÷ 100
           = (4000 + 2400 + 3000) ÷ 100
@@ -155,7 +169,7 @@ score = clamp(300 + 94×550÷100, 300, 850)
       = 817
 ```
 
-**Result: 817** — near the ceiling. Reaching 850 requires a perfect composite of 100, which needs ≥5 VCs, ≥100 XLM volume, and 100% repayment rate.
+**Result: 817** — near the ceiling. Reaching 850 requires a perfect composite of 100, which needs ≥5 VCs, enough transaction volume and counterparty diversity to reach a `tx_score` of 100, 100% repayment rate, and ≥100 XLM total repayment volume.
 
 ---
 
@@ -193,14 +207,15 @@ composite = (0×40 + 0×30 + 100×30) ÷ 100 = 30
 score = 300 + 30×550÷100 = 300 + 165 = 465
 ```
 
-A subject with perfect repayment history but no feeder data is capped at **465**. This is intentional — the protocol requires active data submission to unlock higher scores.
+A subject with perfect repayment history and capped repayment volume but no feeder data is capped at **465**. This is intentional — the protocol requires active data submission to unlock higher scores.
 
 ### Integer division truncation
 
 All arithmetic uses integer (floor) division, matching Soroban's `u32`/`i128` semantics. This means:
 
-- A repayment rate of 9/10 = 90% gives `repay_score = 90`, not 90.0
+- A repayment rate of 9/10 = 90% gives `repayment_rate_score = 90`, not 90.0
 - A volume of 150,000,000 stroops gives `tx_score = 1`, not 1.5
-- A composite of 57.3 gives `score = 300 + 57×550÷100 = 613`, not 614
+- A total repayment volume of 150,000,000 stroops gives `repayment_volume_score = 1`, not 1.5
+- A composite of 49.5 gives `score = 300 + 49×550÷100 = 569`, not 572
 
 Consumers should be aware that two subjects with slightly different inputs may receive the same score due to truncation.

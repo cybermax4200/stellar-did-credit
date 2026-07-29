@@ -100,6 +100,36 @@ mod tests {
     }
 
     #[test]
+    fn test_record_repayment_accumulates_total_repaid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_lender(&admin, &lender);
+
+        credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
+        credit.record_repayment(&lender, &subject, &250_000_000i128, &false);
+
+        let record: RepaymentRecord = env.as_contract(&credit_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(subject.clone()))
+                .unwrap()
+        });
+
+        assert_eq!(record.on_time_count, 1);
+        assert_eq!(record.total_count, 2);
+        assert_eq!(record.total_repaid, 350_000_000);
+    }
+
+    #[test]
     fn test_full_protocol_flow() {
         // 1. Create Env with mock_all_auths
         let env = Env::default();

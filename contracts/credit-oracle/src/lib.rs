@@ -107,6 +107,7 @@ pub fn compute_score_pure(
     avg_counterparties: u32,
     on_time_count: u32,
     total_count: u32,
+    total_repaid: i128,
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
@@ -115,11 +116,13 @@ pub fn compute_score_pure(
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
     let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
     let tx_score = (volume_score + counterparty_bonus).min(100);
-    let repay_score = (on_time_count as u128)
+    let repayment_rate_score = (on_time_count as u128)
         .saturating_mul(10_000)
         .checked_div(total_count as u128)
         .map(|r| r / 100)
         .unwrap_or(0);
+    let repayment_volume_score = ((total_repaid / 100_000_000i128).max(0) as u128).min(100);
+    let repay_score = (repayment_rate_score + repayment_volume_score) / 2;
     let composite = (vc_score * vc_weight as u128
         + tx_score * tx_weight as u128
         + repay_score * repayment_weight as u128)
@@ -510,7 +513,7 @@ impl CreditOracle {
         env: Env,
         lender: Address,
         subject: Address,
-        _amount: i128,
+        amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
         lender.require_auth();
@@ -559,7 +562,7 @@ impl CreditOracle {
                 record.on_time_count = record.on_time_count.saturating_add(1);
             }
             record.total_count = record.total_count.saturating_add(1);
-            record.total_repaid = record.total_repaid.saturating_add(_amount);
+            record.total_repaid = record.total_repaid.saturating_add(amount);
             env.storage()
                 .persistent()
                 .set(&DataKey::RepaymentRecord(subject), &record);
@@ -812,6 +815,7 @@ impl CreditOracle {
             tx_stats.avg_counterparties,
             repayment.on_time_count,
             repayment.total_count,
+            repayment.total_repaid,
             weights.vc_weight,
             weights.tx_weight,
             weights.repayment_weight,
@@ -1566,6 +1570,34 @@ mod tests {
 
         let score = client.compute_score(&subject);
         assert!(score > MIN_SCORE);
+    }
+
+    #[test]
+    fn test_repayment_amount_affects_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let small_subject = Address::generate(&env);
+        let large_subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &small_subject, &1, &true);
+        client.record_repayment(&lender, &large_subject, &10_000_000_000, &true);
+
+        let small_score = client.compute_score(&small_subject);
+        let large_score = client.compute_score(&large_subject);
+
+        assert!(
+            large_score > small_score,
+            "expected larger repayment score ({}) > tiny repayment score ({})",
+            large_score,
+            small_score
+        );
     }
 
     #[test]
@@ -2379,7 +2411,7 @@ mod tests {
         client.anchor_vc(&feeder, &user, &vc4, &Some(unreg));
 
         let score = client.compute_score(&user);
-        let expected = compute_score_pure(90, 0, 0, 0, 0, 40, 30, 30);
+        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30);
         assert_eq!(score, expected);
 
         let record = client.get_score(&user).unwrap();

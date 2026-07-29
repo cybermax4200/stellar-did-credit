@@ -43,6 +43,7 @@ export interface ScoringWeights {
 export interface RepaymentRecord {
   onTimeCount: number;
   totalCount: number;
+  totalRepaid: bigint;
 }
 export interface VCRecord {
   vcHash: Buffer;

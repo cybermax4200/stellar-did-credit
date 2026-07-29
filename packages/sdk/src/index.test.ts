@@ -964,14 +964,16 @@ describe("contract struct type exports", () => {
     expect(weights.vcWeight + weights.txWeight + weights.repaymentWeight).toBe(100);
   });
 
-  it("exports RepaymentRecord with numeric on-time and total counters", () => {
+  it("exports RepaymentRecord with counters and total repayment volume", () => {
     const record: RepaymentRecord = {
       onTimeCount: 8,
       totalCount: 10,
+      totalRepaid: 50_000_000_000n,
     };
 
     expect(typeof record.onTimeCount).toBe("number");
     expect(typeof record.totalCount).toBe("number");
+    expect(typeof record.totalRepaid).toBe("bigint");
   });
 
   it("exports VCRecord with a 32-byte hash, issuer, timestamp and revoked flag", () => {
@@ -1042,7 +1044,7 @@ describe("test_all_exports_are_defined", () => {
   it("struct type imports compile without error (TxStats, ScoringWeights, RepaymentRecord, VCRecord, ScoreRecord, ProtocolConfig)", () => {
     const _txStats: TxStats = { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
     const _weights: ScoringWeights = { vcWeight: 40, txWeight: 30, repaymentWeight: 30 };
-    const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0 };
+    const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0, totalRepaid: 0n };
     const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
     const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, previousScore: null, computedAtLedger: 0, stale: false };
     const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
