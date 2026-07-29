@@ -7,7 +7,7 @@ fuzz_target!(|data: &[u8]| {
         return;
     }
 
-    let vc_count = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+    let vc_points = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
     let volume_30d = i128::from_le_bytes([
         data[4], data[5], data[6], data[7], data[8], data[9], data[10], data[11],
         data[12], data[13], data[14], data[15], data[16], data[17], data[18], data[19],
@@ -20,7 +20,7 @@ fuzz_target!(|data: &[u8]| {
     let repayment_weight = u32::from_le_bytes([data[40], data[41], data[42], data[43]]);
 
     let score = credit_oracle::compute_score_pure(
-        vc_count,
+        vc_points,
         volume_30d,
         avg_counterparties,
         on_time_count,
@@ -32,14 +32,14 @@ fuzz_target!(|data: &[u8]| {
 
     assert!(
         score >= 300,
-        "score {} is below MIN_SCORE 300: vc_count={} volume_30d={} counterparties={} on_time={} total={} vc_w={} tx_w={} repay_w={}",
-        score, vc_count, volume_30d, avg_counterparties, on_time_count, total_count,
+        "score {} is below MIN_SCORE 300: vc_points={} volume_30d={} counterparties={} on_time={} total={} vc_w={} tx_w={} repay_w={}",
+        score, vc_points, volume_30d, avg_counterparties, on_time_count, total_count,
         vc_weight, tx_weight, repayment_weight,
     );
     assert!(
         score <= 850,
-        "score {} is above MAX_SCORE 850: vc_count={} volume_30d={} counterparties={} on_time={} total={} vc_w={} tx_w={} repay_w={}",
-        score, vc_count, volume_30d, avg_counterparties, on_time_count, total_count,
+        "score {} is above MAX_SCORE 850: vc_points={} volume_30d={} counterparties={} on_time={} total={} vc_w={} tx_w={} repay_w={}",
+        score, vc_points, volume_30d, avg_counterparties, on_time_count, total_count,
         vc_weight, tx_weight, repayment_weight,
     );
 });

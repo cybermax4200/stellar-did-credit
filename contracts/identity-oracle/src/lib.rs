@@ -1807,15 +1807,6 @@ mod tests {
     #[test]
     #[should_panic(expected = "Error(Contract, #1)")]
     fn test_initialize_already_initialized() {
-
-    // -----------------------------------------------------------------------
-    // Revocation Registry configuration tests
-    // -----------------------------------------------------------------------
-
-    /// Verifies that `get_revocation_registry` returns `None` before
-    /// configuration, matching the intended initial state.
-    #[test]
-    fn test_get_revocation_registry_returns_none_after_initialize() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1827,6 +1818,10 @@ mod tests {
         let admin2 = Address::generate(&env);
         client.initialize(&admin2);
     }
+
+    // -----------------------------------------------------------------------
+    // Revocation Registry configuration tests
+    // -----------------------------------------------------------------------
 
     #[test]
     fn test_protocol_stats_default_zero() {
@@ -1842,6 +1837,35 @@ mod tests {
 
     #[test]
     fn test_protocol_stats_increments_on_anchor_did() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDIDStats");
+        client.anchor_did(&subject, &cid);
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 1);
+    }
+
+    /// Verifies that `get_revocation_registry` returns `None` before
+    /// configuration, matching the intended initial state.
+    #[test]
+    fn test_get_revocation_registry_returns_none_after_initialize() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
 
         let registry = client.get_revocation_registry();
         assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
@@ -2148,8 +2172,15 @@ mod tests {
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
     }
-}
 
+    #[test]
+    fn test_set_revocation_registry_updates_existing() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
         let registry_id_1 = Address::generate(&env);
         let registry_id_2 = Address::generate(&env);
 

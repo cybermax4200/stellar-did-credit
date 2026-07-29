@@ -2,7 +2,7 @@
 pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, Symbol, TryFromVal, Val, Vec,
+    IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -60,6 +60,8 @@ pub enum DataKey {
     StorageVersion,
     /// Global configuration
     Config,
+    /// Registered weight for a VC credential type (default 100 when unset)
+    VcWeight(Symbol),
     /// Trusted feeder address authorized to update transaction stats
     TrustedFeeder(Address),
     /// Trusted lender address authorized to record repayments
@@ -72,6 +74,8 @@ pub enum DataKey {
     Score(Address),
     /// Cached VC count for a user
     VcCount(Address),
+    /// Stored VC list per user with type tags
+    VcList(Address),
     /// Pending weights awaiting timelock
     PendingWeights,
     /// Ledger number when pending weights become effective
@@ -86,8 +90,6 @@ pub enum DataKey {
     FeedersIndex,
     /// Index of all registered lenders
     LendersIndex,
-    /// Storage version for migration tracking
-    StorageVersion,
     /// Dispute record for a (subject, input_key) pair
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
@@ -100,7 +102,7 @@ pub enum DataKey {
 /// suitable for fuzz testing and property-based testing.
 /// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
 pub fn compute_score_pure(
-    vc_count: u32,
+    vc_points: u32,
     volume_30d: i128,
     avg_counterparties: u32,
     on_time_count: u32,
@@ -109,7 +111,7 @@ pub fn compute_score_pure(
     tx_weight: u32,
     repayment_weight: u32,
 ) -> u32 {
-    let vc_score = (vc_count.saturating_mul(20)).min(100) as u128;
+    let vc_score = (vc_points).min(100) as u128;
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
     let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
     let tx_score = (volume_score + counterparty_bonus).min(100);
@@ -211,6 +213,17 @@ pub struct RepaymentRecordV1 {
     /// Total number of repayments recorded.
     pub total_count: u32,
 }
+/// A verifiable credential entry stored per-user with an optional type tag.
+#[contracttype]
+#[derive(Clone)]
+pub struct VcEntry {
+    /// VC hash (e.g., SHA-256 of the off-chain VC document).
+    pub vc_id: BytesN<32>,
+    /// Optional credential type label (e.g., "kyc", "employment").
+    /// `None` defaults to weight 100.
+    pub vc_type: Option<Symbol>,
+}
+
 /// Status of an on-chain score input dispute.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -584,7 +597,6 @@ impl CreditOracle {
                     .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
             }
         }
-        let record_key = DataKey::RepaymentRecord(subject);
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
@@ -610,6 +622,98 @@ impl CreditOracle {
             .persistent()
             .set(&DataKey::VcCount(subject), &count);
         Ok(())
+    }
+
+    /// Register a weight for a VC credential type.
+    ///
+    /// When `compute_score` processes a VC, its type weight (in basis points)
+    /// determines how many score points that VC contributes:
+    ///   `points = 20 × weight / 100`
+    /// Default weight for unregistered types (or VCs with no type) is 100 (1×).
+    ///
+    /// Auth: admin only.
+    pub fn set_vc_type_weight(
+        env: Env,
+        admin: Address,
+        type_name: Symbol,
+        weight: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VcWeight(type_name.clone()), &weight);
+        env.events()
+            .publish((symbol_short!("VcWtSet"),), (type_name, weight));
+        Ok(())
+    }
+
+    /// Return the registered weight for a credential type (default 100).
+    pub fn get_vc_type_weight(env: Env, type_name: Symbol) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::VcWeight(type_name))
+            .unwrap_or(100u32)
+    }
+
+    /// Anchor a verifiable credential for a user with an optional type tag.
+    ///
+    /// The `vc_type` can later be looked up by `compute_score` to apply
+    /// per-type weights.  Duplicate `vc_id`s are silently ignored.
+    ///
+    /// Auth: registered feeder.
+    pub fn anchor_vc(
+        env: Env,
+        feeder: Address,
+        user: Address,
+        vc_id: BytesN<32>,
+        vc_type: Option<Symbol>,
+    ) -> Result<(), CreditOracleError> {
+        feeder.require_auth();
+        if !env
+            .storage()
+            .persistent()
+            .has(&DataKey::TrustedFeeder(feeder.clone()))
+        {
+            return Err(CreditOracleError::FeederNotRegistered);
+        }
+        let list_key = DataKey::VcList(user.clone());
+        let mut list: Vec<VcEntry> = env
+            .storage()
+            .persistent()
+            .get(&list_key)
+            .unwrap_or(Vec::new(&env));
+        for entry in list.iter() {
+            if entry.vc_id == vc_id {
+                return Ok(());
+            }
+        }
+        list.push_back(VcEntry {
+            vc_id,
+            vc_type: vc_type.clone(),
+        });
+        env.storage().persistent().set(&list_key, &list);
+        env.storage()
+            .persistent()
+            .extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.events()
+            .publish((symbol_short!("VcAnchCr"),), (user, vc_type));
+        Ok(())
+    }
+
+    /// Return the stored VC list for a user.
+    pub fn get_vc_list(env: Env, user: Address) -> Vec<VcEntry> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VcList(user))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Compute and store credit score for a user
@@ -659,19 +763,12 @@ impl CreditOracle {
                 })
         };
 
-        let mut vc_count: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::VcCount(subject.clone()))
-            .unwrap_or(0u32);
-
-        // Cross-contract lookup takes precedence if configured
+        // Check deactivation if identity-oracle is configured
         if let Some(identity_oracle_id) = env
             .storage()
             .instance()
             .get::<_, Address>(&DataKey::IdentityOracleId)
         {
-            // Check if the subject has deactivated their identity
             let is_deactivated: bool = env.invoke_contract(
                 &identity_oracle_id,
                 &soroban_sdk::Symbol::new(&env, "is_deactivated"),
@@ -680,18 +777,35 @@ impl CreditOracle {
             if is_deactivated {
                 return Ok(MIN_SCORE);
             }
-
-            vc_count = env.invoke_contract::<u32>(
-                &identity_oracle_id,
-                &soroban_sdk::Symbol::new(&env, "get_active_vc_count"),
-                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
-            );
         }
+
+        // Compute weighted VC points from stored VC list
+        let vc_list_key = DataKey::VcList(subject.clone());
+        let vc_list: Vec<VcEntry> = env
+            .storage()
+            .persistent()
+            .get(&vc_list_key)
+            .unwrap_or(Vec::new(&env));
+        let vc_count = vc_list.len();
+        let mut vc_points: u32 = 0;
+        for entry in vc_list.iter() {
+            let weight = match entry.vc_type {
+                Some(ref t) => env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::VcWeight(t.clone()))
+                    .unwrap_or(100u32),
+                None => 100u32,
+            };
+            vc_points =
+                vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+        }
+        let vc_points = vc_points.min(100);
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
 
         let score = compute_score_pure(
-            vc_count,
+            vc_points,
             tx_stats.volume_30d,
             tx_stats.avg_counterparties,
             repayment.on_time_count,
@@ -724,7 +838,7 @@ impl CreditOracle {
             is_first_computation = false;
         }
 
-        let is_first = !env
+        let _is_first = !env
             .storage()
             .persistent()
             .has(&DataKey::Score(subject.clone()));
@@ -1198,6 +1312,7 @@ impl CreditOracle {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+    use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::TryIntoVal;
 
@@ -1389,7 +1504,10 @@ mod tests {
         client.register_lender(&admin, &lender);
 
         // Set up identical scores except for counterparty diversity
-        client.set_vc_count(&feeder, &subject, &3);
+        for i in 0u8..3 {
+            let vc_id = BytesN::from_array(&env, &[i; 32]);
+            client.anchor_vc(&feeder, &subject, &vc_id, &None);
+        }
         client.update_tx_stats(
             &feeder,
             &subject,
@@ -1463,7 +1581,10 @@ mod tests {
         client.register_feeder(&admin, &feeder);
         client.register_lender(&admin, &lender);
 
-        client.set_vc_count(&feeder, &subject, &5);
+        for i in 0u8..5 {
+            let vc_id = BytesN::from_array(&env, &[i; 32]);
+            client.anchor_vc(&feeder, &subject, &vc_id, &None);
+        }
         client.update_tx_stats(
             &feeder,
             &subject,
@@ -1785,7 +1906,9 @@ mod tests {
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let identity_oracle_id = Address::generate(&env);
+        let identity_oracle_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_oracle_id);
+        identity.initialize(&admin);
 
         client.initialize(&admin);
 
@@ -1868,10 +1991,11 @@ mod tests {
         // Timestamp shouldn't change because write was skipped
         assert_eq!(record1.last_updated, record2.last_updated);
 
-        // Change an input (VC count)
+        // Change an input (anchor a VC)
         let feeder = Address::generate(&env);
         client.register_feeder(&admin, &feeder);
-        client.set_vc_count(&feeder, &subject, &2);
+        let vc_id = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&feeder, &subject, &vc_id, &None);
 
         // Advance ledger again
         env.ledger()
@@ -1884,7 +2008,7 @@ mod tests {
 
         // Write occurred, so timestamp is updated
         assert!(record3.last_updated > record2.last_updated);
-        assert_eq!(record3.vc_count, 2);
+        assert_eq!(record3.vc_count, 1);
     }
 
     #[test]
@@ -2212,6 +2336,53 @@ mod tests {
             }
         }
         assert_eq!(dispute_count, 1, "expected 1 DsptFild event");
+    }
+
+    #[test]
+    fn test_vc_type_weight_scoring() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Register type weights
+        let premium = Symbol::new(&env, "premium");
+        let basic = Symbol::new(&env, "basic");
+        client.set_vc_type_weight(&admin, &premium, &200);
+        client.set_vc_type_weight(&admin, &basic, &50);
+
+        // Expected VC points per credential:
+        //   default_weight * 20 / 100 = 100 * 20 / 100 = 20
+        //   premium * 20 / 100        = 200 * 20 / 100 = 40
+        //   basic * 20 / 100          =  50 * 20 / 100 = 10
+        //   unregistered type         = 100 * 20 / 100 = 20
+        //   Total = 90, capped at 100
+        let vc1 = BytesN::from_array(&env, &[0u8; 32]);
+        client.anchor_vc(&feeder, &user, &vc1, &None);
+
+        let vc2 = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&feeder, &user, &vc2, &Some(premium));
+
+        let vc3 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&feeder, &user, &vc3, &Some(basic));
+
+        let unreg = Symbol::new(&env, "unknown");
+        let vc4 = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc(&feeder, &user, &vc4, &Some(unreg));
+
+        let score = client.compute_score(&user);
+        let expected = compute_score_pure(90, 0, 0, 0, 0, 40, 30, 30);
+        assert_eq!(score, expected);
+
+        let record = client.get_score(&user).unwrap();
+        assert_eq!(record.vc_count, 4);
     }
 
 }

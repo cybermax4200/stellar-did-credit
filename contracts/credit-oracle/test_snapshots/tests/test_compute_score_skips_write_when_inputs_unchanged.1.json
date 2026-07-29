@@ -57,7 +57,7 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "set_vc_count",
+              "function_name": "anchor_vc",
               "args": [
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
@@ -66,8 +66,9 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 },
                 {
-                  "u32": 2
-                }
+                  "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                },
+                "void"
               ]
             }
           },
@@ -80,7 +81,7 @@
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 0,
+    "sequence_number": 2,
     "timestamp": 200,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -88,6 +89,49 @@
     "min_temp_entry_ttl": 16,
     "max_entry_ttl": 6312000,
     "ledger_entries": [
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "FeedersIndex"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "FeedersIndex"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518401
+        ]
+      ],
       [
         {
           "contract_data": {
@@ -130,7 +174,7 @@
                         "symbol": "computed_at_ledger"
                       },
                       "val": {
-                        "u32": 0
+                        "u32": 2
                       }
                     },
                     {
@@ -162,7 +206,7 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 388
+                        "u32": 344
                       }
                     },
                     {
@@ -189,7 +233,7 @@
                         "symbol": "vc_count"
                       },
                       "val": {
-                        "u32": 2
+                        "u32": 1
                       }
                     }
                   ]
@@ -198,7 +242,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -243,7 +287,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518401
         ]
       ],
       [
@@ -253,7 +297,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "VcCount"
+                  "symbol": "VcList"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -273,7 +317,7 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "VcCount"
+                      "symbol": "VcList"
                     },
                     {
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -282,13 +326,32 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 2
+                  "vec": [
+                    {
+                      "map": [
+                        {
+                          "key": {
+                            "symbol": "vc_id"
+                          },
+                          "val": {
+                            "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                          }
+                        },
+                        {
+                          "key": {
+                            "symbol": "vc_type"
+                          },
+                          "val": "void"
+                        }
+                      ]
+                    }
+                  ]
                 }
               }
             },
             "ext": "v0"
           },
-          4095
+          518401
         ]
       ],
       [
@@ -324,6 +387,18 @@
                         },
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ComputeCooldownLedgers"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 1
                         }
                       },
                       {
@@ -390,6 +465,18 @@
                               }
                             }
                           ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StorageVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 2
                         }
                       }
                     ]
@@ -465,7 +552,7 @@
             },
             "ext": "v0"
           },
-          6311999
+          6312000
         ]
       ],
       [
@@ -498,7 +585,7 @@
             },
             "ext": "v0"
           },
-          6311999
+          6312000
         ]
       ],
       [
