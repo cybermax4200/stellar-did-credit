@@ -203,11 +203,15 @@
     [],
     [],
     [],
+    [],
+    [],
+    [],
+    [],
     []
   ],
   "ledger": {
     "protocol_version": 22,
-    "sequence_number": 151,
+    "sequence_number": 17433,
     "timestamp": 0,
     "network_id": "0000000000000000000000000000000000000000000000000000000000000000",
     "base_reserve": 0,
@@ -254,44 +258,19 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "Config"
+                              "symbol": "ComputeCooldownLedgers"
                             }
                           ]
                         },
                         "val": {
-                          "map": [
-                            {
-                              "key": {
-                                "symbol": "repayment_weight"
-                              },
-                              "val": {
-                                "u32": 30
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "tx_weight"
-                              },
-                              "val": {
-                                "u32": 30
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "vc_weight"
-                              },
-                              "val": {
-                                "u32": 40
-                              }
-                            }
-                          ]
+                          "u32": 1
                         }
                       },
                       {
                         "key": {
                           "vec": [
                             {
-                              "symbol": "PendingWeights"
+                              "symbol": "Config"
                             }
                           ]
                         },
@@ -328,12 +307,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "PendingWeightsEffectiveLedger"
+                              "symbol": "StorageVersion"
                             }
                           ]
                         },
                         "val": {
-                          "u32": 17431
+                          "u32": 2
                         }
                       }
                     ]
@@ -343,7 +322,7 @@
             },
             "ext": "v0"
           },
-          4095
+          17433
         ]
       ],
       [
@@ -673,7 +652,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -925,7 +904,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ]
     ]

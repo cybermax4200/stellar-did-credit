@@ -34,6 +34,9 @@
               "function_name": "register_feeder",
               "args": [
                 {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
               ]
@@ -52,6 +55,9 @@
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
               "function_name": "register_lender",
               "args": [
+                {
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 }
@@ -109,7 +115,7 @@
                         "symbol": "avg_counterparties"
                       },
                       "val": {
-                        "u32": 5
+                        "u32": 0
                       }
                     },
                     {
@@ -411,7 +417,7 @@
                         "symbol": "avg_counterparties"
                       },
                       "val": {
-                        "u32": 12
+                        "u32": 35
                       }
                     },
                     {
@@ -461,10 +467,7 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "LastComputed"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                  "symbol": "FeedersIndex"
                 }
               ]
             },
@@ -481,22 +484,66 @@
                 "key": {
                   "vec": [
                     {
-                      "symbol": "LastComputed"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
+                      "symbol": "FeedersIndex"
                     }
                   ]
                 },
                 "durability": "persistent",
                 "val": {
-                  "u32": 1
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                    }
+                  ]
                 }
               }
             },
             "ext": "v0"
           },
-          4095
+          518400
+        ]
+      ],
+      [
+        {
+          "contract_data": {
+            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+            "key": {
+              "vec": [
+                {
+                  "symbol": "LendersIndex"
+                }
+              ]
+            },
+            "durability": "persistent"
+          }
+        },
+        [
+          {
+            "last_modified_ledger_seq": 0,
+            "data": {
+              "contract_data": {
+                "ext": "v0",
+                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
+                "key": {
+                  "vec": [
+                    {
+                      "symbol": "LendersIndex"
+                    }
+                  ]
+                },
+                "durability": "persistent",
+                "val": {
+                  "vec": [
+                    {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
+                    }
+                  ]
+                }
+              }
+            },
+            "ext": "v0"
+          },
+          518400
         ]
       ],
       [
@@ -551,6 +598,17 @@
                       "val": {
                         "u32": 8
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "total_repaid"
+                      },
+                      "val": {
+                        "i128": {
+                          "hi": 0,
+                          "lo": 8000
+                        }
+                      }
                     }
                   ]
                 }
@@ -600,10 +658,26 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "computed_at_ledger"
+                      },
+                      "val": {
+                        "u32": 1
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_updated"
                       },
                       "val": {
                         "u64": 0
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "previous_score"
+                      },
+                      "val": {
+                        "u32": 646
                       }
                     },
                     {
@@ -619,7 +693,15 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 663
+                        "u32": 657
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stale"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -647,7 +729,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -692,7 +774,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -737,7 +819,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -782,7 +864,7 @@
                         "symbol": "avg_counterparties"
                       },
                       "val": {
-                        "u32": 12
+                        "u32": 35
                       }
                     },
                     {
@@ -941,6 +1023,47 @@
                             }
                           ]
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ProtocolStats"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_repayments_recorded"
+                              },
+                              "val": {
+                                "u64": 8
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_subjects_scored"
+                              },
+                              "val": {
+                                "u64": 1
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StorageVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 2
+                        }
                       }
                     ]
                   }
@@ -949,7 +1072,7 @@
             },
             "ext": "v0"
           },
-          500000
+          4095
         ]
       ],
       [
@@ -1432,7 +1555,7 @@
             },
             "ext": "v0"
           },
-          500000
+          4095
         ]
       ]
     ]
@@ -1456,7 +1579,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAK3IM"
                 },
                 {
-                  "u32": 663
+                  "u32": 657
                 }
               ]
             }

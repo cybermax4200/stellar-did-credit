@@ -211,6 +211,31 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("anchorDID", () => {
+    it("throws a descriptive error when subjectKeypair public key does not match subject", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const wrongAddress = "GWRONGADDRESS12345678901234567890123456789012345678901234";
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid", wrongAddress),
+      ).rejects.toThrow("subjectKeypair public key does not match subject");
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("submits successfully when subjectKeypair matches explicit subject address", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      const result = await sdk.anchorDID(
+        subjectKeypair as never,
+        "QmExampleCid",
+        subjectAddress,
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+    });
+
     it("throws when simulation returns an explicit error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "anchor_did rejected" });
 
@@ -933,6 +958,7 @@ describe("contract struct type exports", () => {
       vcCount: 3,
       repaymentRate: 8000,
       txVolume30d: 1_000_000n,
+      previousScore: null,
       computedAtLedger: 1234567,
       stale: false,
     };
@@ -981,7 +1007,7 @@ describe("test_all_exports_are_defined", () => {
     const _weights: ScoringWeights = { vcWeight: 40, txWeight: 30, repaymentWeight: 30 };
     const _repayment: RepaymentRecord = { onTimeCount: 0, totalCount: 0 };
     const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
-    const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, computedAtLedger: 0, stale: false };
+    const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, previousScore: null, computedAtLedger: 0, stale: false };
     const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();

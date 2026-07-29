@@ -43,51 +43,6 @@
             "key": {
               "vec": [
                 {
-                  "symbol": "LastComputed"
-                },
-                {
-                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                }
-              ]
-            },
-            "durability": "persistent"
-          }
-        },
-        [
-          {
-            "last_modified_ledger_seq": 0,
-            "data": {
-              "contract_data": {
-                "ext": "v0",
-                "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-                "key": {
-                  "vec": [
-                    {
-                      "symbol": "LastComputed"
-                    },
-                    {
-                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
-                    }
-                  ]
-                },
-                "durability": "persistent",
-                "val": {
-                  "u32": 0
-                }
-              }
-            },
-            "ext": "v0"
-          },
-          4095
-        ]
-      ],
-      [
-        {
-          "contract_data": {
-            "contract": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-            "key": {
-              "vec": [
-                {
                   "symbol": "Score"
                 },
                 {
@@ -120,11 +75,25 @@
                   "map": [
                     {
                       "key": {
+                        "symbol": "computed_at_ledger"
+                      },
+                      "val": {
+                        "u32": 0
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "last_updated"
                       },
                       "val": {
                         "u64": 0
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "previous_score"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -140,6 +109,14 @@
                       },
                       "val": {
                         "u32": 300
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "stale"
+                      },
+                      "val": {
+                        "bool": false
                       }
                     },
                     {
@@ -167,7 +144,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -253,6 +230,47 @@
                             }
                           ]
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ProtocolStats"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_repayments_recorded"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_subjects_scored"
+                              },
+                              "val": {
+                                "u64": 1
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "StorageVersion"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 2
+                        }
                       }
                     ]
                   }
@@ -261,7 +279,7 @@
             },
             "ext": "v0"
           },
-          500000
+          4095
         ]
       ],
       [
@@ -315,7 +333,7 @@
             },
             "ext": "v0"
           },
-          500000
+          4095
         ]
       ]
     ]

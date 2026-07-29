@@ -78,16 +78,26 @@ export class StellarDIDCreditSDK {
    *
    * @param subjectKeypair - Stellar keypair of the subject (private + public key)
    * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
+   * @param subjectAddress - Optional Stellar G... address of the subject for validation
    * @returns Transaction hash on successful submission
+   * @throws Error if subjectAddress is provided and does not match subjectKeypair's public key
    */
-  async anchorDID(subjectKeypair: any, didDocCid: string): Promise<string> {
-    const server = new SorobanRpc.Server(this.config.rpcUrl);
-    const contract = new Contract(this.config.identityOracleId);
-
+  async anchorDID(
+    subjectKeypair: any,
+    didDocCid: string,
+    subjectAddress?: string,
+  ): Promise<string> {
     const publicKey =
-      subjectKeypair.publicKey instanceof Function
+      typeof subjectKeypair.publicKey === "function"
         ? subjectKeypair.publicKey()
         : subjectKeypair.publicKey;
+
+    if (subjectAddress && publicKey !== subjectAddress) {
+      throw new Error("subjectKeypair public key does not match subject");
+    }
+
+    const server = new SorobanRpc.Server(this.config.rpcUrl);
+    const contract = new Contract(this.config.identityOracleId);
 
     // Get the current account sequence number
     const accountData = await server.getAccount(publicKey);

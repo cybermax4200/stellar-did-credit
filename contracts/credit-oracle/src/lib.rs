@@ -2,7 +2,7 @@
 pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, Symbol, TryFromVal, Val, Vec,
+    IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -86,8 +86,6 @@ pub enum DataKey {
     FeedersIndex,
     /// Index of all registered lenders
     LendersIndex,
-    /// Storage version for migration tracking
-    StorageVersion,
     /// Dispute record for a (subject, input_key) pair
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
@@ -584,7 +582,6 @@ impl CreditOracle {
                     .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
             }
         }
-        let record_key = DataKey::RepaymentRecord(subject);
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
@@ -724,7 +721,7 @@ impl CreditOracle {
             is_first_computation = false;
         }
 
-        let is_first = !env
+        let _is_first = !env
             .storage()
             .persistent()
             .has(&DataKey::Score(subject.clone()));
@@ -1784,8 +1781,9 @@ mod tests {
         let contract_id = env.register_contract(None, CreditOracle);
         let client = CreditOracleClient::new(&env, &contract_id);
 
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+
         let admin = Address::generate(&env);
-        let identity_oracle_id = Address::generate(&env);
 
         client.initialize(&admin);
 
