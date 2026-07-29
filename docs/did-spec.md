@@ -174,6 +174,40 @@ The JSON-LD document SHOULD validate against a JSON Schema to ensure structural 
 3. The subject uploads the document to IPFS.
 4. The subject calls the `anchor_did` function on the `identity-oracle` contract, passing the CID.
 
+#### 3.1.1 CID Format Constraints
+
+The `anchor_did` function enforces the following constraints on the `did_doc_cid` parameter:
+
+| Constraint          | Details                                                       | Error              |
+| ------------------- | ------------------------------------------------------------- | ------------------ |
+| **Minimum length**  | At least 7 characters                                         | `InvalidCID`       |
+| **Accepted prefixes** (case-sensitive) | `ipfs://`, `bafy`, or `Qm` (checked in that order) | `InvalidCID` |
+
+- **`ipfs://`** — Standard IPFS URI scheme (e.g., `ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym`)
+- **`bafy`** — CIDv1 base32 encoded (e.g., `bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4`)
+- **`Qm`** — CIDv0 base58btc encoded (e.g., `QmVocdeKSNbd9jkc3pDjq9FdAVLpiHrfQFwcJMgB7aXZi3`)
+
+> **Note:** Prefix matching is performed by comparing leading bytes on the stack. The first matching prefix determines validity; no other prefixes are accepted. CIDs that do not start with one of these three prefixes are rejected with `InvalidCID` irrespective of their length.
+
+**Examples of valid CIDs:**
+
+| Format  | Example Value                                                                           |
+| ------- | --------------------------------------------------------------------------------------- |
+| IPFS URI | `ipfs://QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym`                              |
+| CIDv1    | `bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4`                       |
+| CIDv0    | `QmVocdeKSNbd9jkc3pDjq9FdAVLpiHrfQFwcJMgB7aXZi3`                                     |
+
+**Invalid examples that will be rejected:**
+
+| Value                | Reason                                  |
+| -------------------- | --------------------------------------- |
+| `""`                 | Too short (length 0 < 7)               |
+| `" "`                | Too short (single space, length 1 < 7) |
+| `"invalid-cid-data"` | Does not start with an accepted prefix  |
+| `"http://example.com/cid"` | Prefix `http://` is not accepted   |
+
+The validation is enforced in `contracts/identity-oracle/src/lib.rs` via the `cid_starts_with` helper function and the `anchor_did` entry point.
+
 ### 3.2 Read (Resolve)
 
 To resolve a `did:stellar` identifier:
