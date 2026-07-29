@@ -172,7 +172,7 @@ The JSON-LD document SHOULD validate against a JSON Schema to ensure structural 
 1. The subject generates a Stellar keypair.
 2. The subject creates a DID Document according to Section 2.
 3. The subject uploads the document to IPFS.
-4. The subject calls the `anchor_did` function on the `identity-oracle` contract, passing the CID.
+4. The subject calls the `anchor_did` function on the `identity-oracle` contract, passing the CID. The CID MUST conform to the format constraints documented in Section 7.
 
 ### 3.2 Read (Resolve)
 
@@ -232,3 +232,36 @@ By anchoring the DID to a Stellar address, the identity is permanently linked to
 ## 6. Reference Implementation
 
 The canonical implementation of the anchor contract is located in `contracts/identity-oracle/`.
+
+## 7. CID Format Constraints
+
+The `anchor_did` function in the `identity-oracle` contract validates the CID string against the following constraints:
+
+- **Minimum length:** The CID MUST be at least 7 characters long.
+- **Accepted prefixes** (checked via string prefix matching):
+
+| Prefix   | Description                          | Example                          |
+|----------|--------------------------------------|----------------------------------|
+| `ipfs://`| IPFS URI scheme wrapping either CIDv1 or CIDv0 | `ipfs://bafy...` / `ipfs://Qm...` |
+| `bafy`   | Bare CIDv1 in base32 (no scheme)     | `bafybeigdyrzt5...`              |
+| `Qm`     | Bare CIDv0 in base58 (no scheme)     | `QmT5NvUtoR5...`                 |
+
+### 7.1 Valid CID Examples
+
+```
+# CIDv1 with ipfs:// prefix
+ipfs://bafybeigdyrzt5mgu5pvh4pg2d6lkcc6ov7gjg3p6y3z5qy5t5w5k5a5z5q
+
+# CIDv0 with ipfs:// prefix
+ipfs://QmT5NvUtoR5YBFkL5Sjbv3T5tV5a3a5b5c5d5e5f5g5h5i5j5k5l5m5n5o5p
+
+# Bare CIDv1 (no prefix)
+bafybeigdyrzt5mgu5pvh4pg2d6lkcc6ov7gjg3p6y3z5qy5t5w5k5a5z5q
+
+# Bare CIDv0 (no prefix)
+QmT5NvUtoR5YBFkL5Sjbv3T5tV5a3a5b5c5d5e5f5g5h5i5j5k5l5m5n5o5p
+```
+
+### 7.2 Validation Logic
+
+The contract uses a helper function `cid_starts_with` that compares the leading bytes of the CID against each accepted prefix. A CID is considered valid if it starts with `ipfs://`, `bafy`, **or** `Qm`. If none of these prefixes match, the function returns `IdentityOracleError::InvalidCID`.
