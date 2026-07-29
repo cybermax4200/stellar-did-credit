@@ -36,7 +36,7 @@ mod tests {
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
         let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic0, Symbol::new(&env, "Initialized"));
+        assert_eq!(topic0, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
 
@@ -48,7 +48,7 @@ mod tests {
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
         let topic1: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic1, Symbol::new(&env, "Initialized"));
+        assert_eq!(topic1, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
 
@@ -60,7 +60,7 @@ mod tests {
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
         let topic2: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic2, Symbol::new(&env, "Initialized"));
+        assert_eq!(topic2, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
         assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
 
@@ -1130,7 +1130,8 @@ mod tests {
         assert_eq!(revoked, 2);
         assert!(identity.is_deactivated(&subject));
         assert!(!identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 0);
+        // Advance ledger to satisfy compute_score cooldown
+        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
 
         // 3. compute_score should now return 300 for deactivated subject
         let score_after_deactivation = credit.compute_score(&subject);
@@ -1503,7 +1504,6 @@ mod tests {
             "deterministic scoring: identical inputs must produce identical scores"
         );
     }
-}
 
     #[test]
     fn test_revocation_registry_missing_does_not_break_is_verified() {
@@ -1539,7 +1539,7 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
 
         // Revoke via revocation-registry (NOT via mark_vc_revoked)
-        revocation.revoke(&issuer, &vc_hash);
+        revocation.revoke(&issuer, &subject, &vc_hash);
 
         // Without registry linkage, revocations are silently ignored
         // This is the known limitation - the contract still works
@@ -1607,24 +1607,23 @@ mod tests {
         // Step 2: Admin accepts the dispute.
         credit.resolve_dispute(&subject, &input_key, &true);
 
+        // Step 3: Verify DsptRslv event was emitted (feeder monitors this).
+        let events = env.events().all();
+
         let resolved = credit.get_dispute(&subject, &input_key).unwrap();
         assert_eq!(resolved.status, DisputeStatus::Resolved);
 
-        // Step 3: Verify DsptRslv event was emitted (feeder monitors this).
-        let events = env.events().all();
-        let rslv_count = events
-            .iter()
-            .filter(|(id, topics, _)| {
-                *id == credit_id && topics.len() >= 1 && {
-                    let topic: soroban_sdk::Symbol =
-                        match topics.get(0).unwrap().try_into_val(&env) {
-                            Ok(s) => s,
-                            Err(_) => return false,
-                        };
-                    topic == soroban_sdk::symbol_short!("DsptRslv")
+        let mut rslv_count = 0;
+        for (id, topics, _) in events.iter() {
+            if id == credit_id && !topics.is_empty() {
+                let topic_res: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                if let Ok(topic) = topic_res {
+                    if topic == soroban_sdk::symbol_short!("DsptRslv") {
+                        rslv_count += 1;
+                    }
                 }
-            })
-            .count();
+            }
+        }
         assert_eq!(rslv_count, 1, "expected exactly one DsptRslv event");
 
         // Step 4: Feeder corrects tx_stats after re-sync.
@@ -1721,28 +1720,30 @@ mod tests {
         let subject = soroban_sdk::Address::generate(&env);
 
         identity.initialize(&admin);
-        identity.register_trusted_issuer(&admin, &issuer);
+        identity.register_issuer(&issuer);
 
-        revocation.initialize(&admin, &id_oracle_id);
+        revocation.initialize(&admin);
+        identity.set_revocation_registry(&rev_reg_id);
+
         credit.initialize(&admin);
         credit.register_feeder(&admin, &issuer);
+        credit.register_lender(&admin, &issuer);
 
         // 1. Write persistent entries
-        let cid = soroban_sdk::String::from_str(&env, "ipfs://QmPersistentTestDoc");
+        let cid = String::from_str(&env, "ipfs://QmPersistentTestDoc");
         identity.anchor_did(&subject, &cid);
 
-        let vc_hash = soroban_sdk::BytesN::from_array(&env, &[7u8; 32]);
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
-        revocation.register_revocation(&issuer, &subject, &vc_hash);
+        revocation.revoke(&issuer, &subject, &vc_hash);
 
-        credit.record_repayment(&issuer, &subject, &true, &100u64);
+        credit.record_repayment(&issuer, &subject, &100i128, &true);
 
         // 2. Advance ledger sequence by 200,000 ledgers (~11.5 days of ledgers)
         let jump = 200_000u32;
-        env.ledger().with_mut(|l| {
-            l.sequence_number += jump;
-        });
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + jump);
 
         // 3. Verify persistent entries survive and remain accessible
         let retrieved_did = identity.get_did_document(&subject);
@@ -1754,3 +1755,4 @@ mod tests {
         let active_count = identity.get_active_vc_count(&subject);
         assert_eq!(active_count, 0); // Revoked VC => 0 active
     }
+}

@@ -148,6 +148,8 @@ impl RevocationRegistry {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.events()
+            .publish((symbol_short!("Init"),), admin);
         Ok(())
     }
 

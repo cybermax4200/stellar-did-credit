@@ -321,6 +321,8 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
+        env.events()
+            .publish((symbol_short!("Init"),), admin.clone());
         Ok(())
     }
 
@@ -1905,10 +1907,9 @@ mod tests {
         let contract_id = env.register_contract(None, CreditOracle);
         let client = CreditOracleClient::new(&env, &contract_id);
 
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+
         let admin = Address::generate(&env);
-        let identity_oracle_id = env.register_contract(None, IdentityOracle);
-        let identity = IdentityOracleClient::new(&env, &identity_oracle_id);
-        identity.initialize(&admin);
 
         client.initialize(&admin);
 

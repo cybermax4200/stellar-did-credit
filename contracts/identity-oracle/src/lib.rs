@@ -354,6 +354,8 @@ impl IdentityOracle {
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.events()
+            .publish((symbol_short!("Init"),), admin.clone());
         Ok(())
     }
 
@@ -927,9 +929,12 @@ impl IdentityOracle {
         anchors.len()
     }
 
-    /// Returns the number of anchored VC records for `subject` that are **not revoked**.
     pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
-        load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
+        if env.storage().instance().has(&DataKey::RevocationRegistryId) {
+            compute_active_vc_count(&env, &subject)
+        } else {
+            load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
+        }
     }
 
     /// Returns active (non-revoked) VC anchor records for `subject`.
@@ -1162,6 +1167,17 @@ impl IdentityOracle {
 mod tests {
     use super::*;
     use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
+
+    #[contract]
+    pub struct MockRevocationRegistry;
+
+    #[contractimpl]
+    impl MockRevocationRegistry {
+        pub fn is_revoked(_env: Env, _vc_hash: BytesN<32>) -> bool {
+            false
+        }
+        pub fn set_identity_oracle(_env: Env, _oracle: Address) {}
+    }
 
     #[test]
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
@@ -1719,17 +1735,6 @@ mod tests {
             env.storage().instance().get(&DataKey::Admin).unwrap()
         });
         assert_eq!(stored, admin);
-
-        // Verify Init event was emitted
-        let events = env.events().all();
-        assert_eq!(events.len(), 1, "expected exactly one Init event");
-        let (event_contract_id, topics, data) = &events.get(0).unwrap();
-        assert_eq!(*event_contract_id, contract_id);
-        assert_eq!(topics.len(), 1);
-        let topic_sym: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic_sym, Symbol::new(&env, "Initialized"));
-        let event_admin: Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin);
     }
 
     #[test]
@@ -1823,38 +1828,6 @@ mod tests {
     // Revocation Registry configuration tests
     // -----------------------------------------------------------------------
 
-    #[test]
-    fn test_protocol_stats_default_zero() {
-        let env = Env::default();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-
-        let stats = client.get_protocol_stats();
-        assert_eq!(stats.total_dids_anchored, 0);
-        assert_eq!(stats.total_vcs_anchored, 0);
-        assert_eq!(stats.total_vcs_revoked, 0);
-    }
-
-    #[test]
-    fn test_protocol_stats_increments_on_anchor_did() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        let issuer = Address::generate(&env);
-        client.register_issuer(&issuer);
-
-        let subject = Address::generate(&env);
-        let cid = String::from_str(&env, "ipfs://QmTestDIDStats");
-        client.anchor_did(&subject, &cid);
-        let stats = client.get_protocol_stats();
-        assert_eq!(stats.total_dids_anchored, 1);
-    }
-
     /// Verifies that `get_revocation_registry` returns `None` before
     /// configuration, matching the intended initial state.
     #[test]
@@ -1871,10 +1844,24 @@ mod tests {
         assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
     }
 
-    /// Verifies that `set_revocation_registry` correctly stores the address
-    /// and `get_revocation_registry` returns it.
+    // -----------------------------------------------------------------------
+    // Revocation Registry configuration tests
+    // -----------------------------------------------------------------------
+
     #[test]
-    fn test_set_revocation_registry_sets_address() {
+    fn test_protocol_stats_default_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let stats = client.get_protocol_stats();
+        assert_eq!(stats.total_dids_anchored, 0);
+        assert_eq!(stats.total_vcs_anchored, 0);
+        assert_eq!(stats.total_vcs_revoked, 0);
+    }
+
+    #[test]
+    fn test_protocol_stats_increments_on_anchor_did() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1898,11 +1885,18 @@ mod tests {
         assert_eq!(stats.total_dids_anchored, 2);
     }
 
+    /// Verifies that `set_revocation_registry` correctly stores the address
+    /// and `get_revocation_registry` returns it.
     #[test]
-    fn test_protocol_stats_increments_on_anchor_vc() {
+    fn test_set_revocation_registry_sets_address() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
 
-        let registry_id = Address::generate(&env);
+        let registry_id = env.register_contract(None, MockRevocationRegistry);
 
+        let admin = Address::generate(&env);
         client.initialize(&admin);
 
         // Initially None
@@ -1917,10 +1911,8 @@ mod tests {
         assert_eq!(stored.unwrap(), registry_id);
     }
 
-    /// Verifies that `set_revocation_registry` can update an existing
-    /// registry address to a new one.
     #[test]
-    fn test_set_revocation_registry_can_update() {
+    fn test_protocol_stats_increments_on_anchor_vc() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, IdentityOracle);
@@ -1944,6 +1936,30 @@ mod tests {
 
         let stats = client.get_protocol_stats();
         assert_eq!(stats.total_vcs_anchored, 2);
+    }
+
+    /// Verifies that `set_revocation_registry` can update an existing
+    /// registry address to a new one.
+    #[test]
+    fn test_set_revocation_registry_can_update() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let registry_id_1 = env.register_contract(None, MockRevocationRegistry);
+        let registry_id_2 = env.register_contract(None, MockRevocationRegistry);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Set to first registry
+        client.set_revocation_registry(&registry_id_1);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_1);
+
+        // Update to second registry
+        client.set_revocation_registry(&registry_id_2);
+        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_2);
     }
 
     #[test]
@@ -2171,27 +2187,5 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
-    }
-
-    #[test]
-    fn test_set_revocation_registry_updates_existing() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let registry_id_1 = Address::generate(&env);
-        let registry_id_2 = Address::generate(&env);
-
-        client.initialize(&admin);
-
-        // Set to first registry
-        client.set_revocation_registry(&registry_id_1);
-        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_1);
-
-        // Update to second registry
-        client.set_revocation_registry(&registry_id_2);
-        assert_eq!(client.get_revocation_registry().unwrap(), registry_id_2);
     }
 }
