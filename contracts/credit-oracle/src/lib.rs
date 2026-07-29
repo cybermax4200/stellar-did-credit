@@ -1679,6 +1679,32 @@ mod tests {
     }
 
     #[test]
+    fn test_get_pending_weights_returns_correct_record() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let propose_ledger = env.ledger().sequence();
+        client.propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        });
+
+        let pending = client.get_pending_weights();
+        assert!(pending.is_some(), "get_pending_weights should return Some after proposal");
+        let record = pending.unwrap();
+        assert_eq!(record.weights.vc_weight, 50);
+        assert_eq!(record.weights.tx_weight, 30);
+        assert_eq!(record.weights.repayment_weight, 20);
+        assert_eq!(record.effective_ledger, propose_ledger + TIMELOCK_LEDGERS);
+    }
+
+    #[test]
     #[should_panic(expected = "timelock not expired")]
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
