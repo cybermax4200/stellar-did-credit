@@ -227,6 +227,20 @@ pub struct VcEntry {
     pub vc_type: Option<Symbol>,
 }
 
+/// An on-chain anchor record for a verifiable credential in the identity oracle.
+#[contracttype]
+#[derive(Clone)]
+pub struct IdentityVCRecord {
+    /// SHA-256 hash of the off-chain verifiable credential JSON.
+    pub vc_hash: BytesN<32>,
+    /// Address of the issuer who anchored this credential.
+    pub issuer: Address,
+    /// Ledger timestamp (Unix seconds) when this credential was anchored.
+    pub anchored_at: u64,
+    /// Whether this credential has been revoked by the issuer.
+    pub revoked: bool,
+}
+
 /// Status of an on-chain score input dispute.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -768,7 +782,10 @@ impl CreditOracle {
                 })
         };
 
-        // Check deactivation if identity-oracle is configured
+        let mut vc_points: u32 = 0;
+        let mut vc_count: u32 = 0;
+
+        // Check if identity-oracle is configured
         if let Some(identity_oracle_id) = env
             .storage()
             .instance()
@@ -776,34 +793,72 @@ impl CreditOracle {
         {
             let is_deactivated: bool = env.invoke_contract(
                 &identity_oracle_id,
-                &soroban_sdk::Symbol::new(&env, "is_deactivated"),
+                &Symbol::new(&env, "is_deactivated"),
                 soroban_sdk::vec![&env, subject.clone().into_val(&env)],
             );
             if is_deactivated {
                 return Ok(MIN_SCORE);
             }
-        }
 
-        // Compute weighted VC points from stored VC list
-        let vc_list_key = DataKey::VcList(subject.clone());
-        let vc_list: Vec<VcEntry> = env
-            .storage()
-            .persistent()
-            .get(&vc_list_key)
-            .unwrap_or(Vec::new(&env));
-        let vc_count = vc_list.len();
-        let mut vc_points: u32 = 0;
-        for entry in vc_list.iter() {
-            let weight = match entry.vc_type {
-                Some(ref t) => env
+            let identity_vcs = env.invoke_contract::<Vec<IdentityVCRecord>>(
+                &identity_oracle_id,
+                &Symbol::new(&env, "get_vc_details"),
+                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+            );
+
+            for record in identity_vcs.iter() {
+                let is_verified = env.invoke_contract::<bool>(
+                    &identity_oracle_id,
+                    &Symbol::new(&env, "verify_vc"),
+                    soroban_sdk::vec![&env, subject.clone().into_val(&env), record.vc_hash.clone().into_val(&env)],
+                );
+                if !is_verified {
+                    continue;
+                }
+                vc_count += 1;
+                let vc_type = env.invoke_contract::<Symbol>(
+                    &identity_oracle_id,
+                    &Symbol::new(&env, "get_vc_credential_type"),
+                    soroban_sdk::vec![&env, subject.clone().into_val(&env), record.vc_hash.clone().into_val(&env)],
+                );
+                let weight = env
                     .storage()
                     .instance()
-                    .get(&DataKey::VcWeight(t.clone()))
-                    .unwrap_or(100u32),
-                None => 100u32,
-            };
-            vc_points =
-                vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+                    .get(&DataKey::VcWeight(vc_type.clone()))
+                    .unwrap_or(100u32);
+                vc_points = vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+            }
+        } else {
+            // Compute weighted VC points from stored VC list
+            let vc_list_key = DataKey::VcList(subject.clone());
+            let vc_list: Vec<VcEntry> = env
+                .storage()
+                .persistent()
+                .get(&vc_list_key)
+                .unwrap_or(Vec::new(&env));
+            
+            if !vc_list.is_empty() {
+                vc_count = vc_list.len();
+                for entry in vc_list.iter() {
+                    let weight = match entry.vc_type {
+                        Some(ref t) => env
+                            .storage()
+                            .instance()
+                            .get(&DataKey::VcWeight(t.clone()))
+                            .unwrap_or(100u32),
+                        None => 100u32,
+                    };
+                    vc_points = vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+                }
+            } else {
+                // Fall back to cached VcCount
+                vc_count = env
+                    .storage()
+                    .persistent()
+                    .get(&DataKey::VcCount(subject.clone()))
+                    .unwrap_or(0u32);
+                vc_points = vc_count.saturating_mul(20).min(100);
+            }
         }
         let vc_points = vc_points.min(100);
 
