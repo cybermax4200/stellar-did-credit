@@ -38,6 +38,8 @@ pub enum GovernanceError {
     VoterNotRegistered = 12,
     /// Vote weight exceeds voter's available balance.
     InsufficientVoteWeight = 13,
+    /// Proposal has already been cancelled and cannot be executed or cancelled again.
+    ProposalAlreadyCancelled = 14,
 }
 
 /// Storage keys for the governance contract.
@@ -53,6 +55,8 @@ pub enum DataKey {
     QuorumRequired,
     /// Proposal data stored by proposal ID.
     Proposal(u64),
+    /// Original proposer address for a given proposal ID.
+    Proposer(u64),
     /// Registered voting weight for an address.
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
@@ -80,6 +84,8 @@ const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 pub struct GovernanceProposal {
     /// Unique proposal identifier, assigned at creation.
     pub id: u64,
+    /// Address of the account that created this proposal.
+    pub proposer: Address,
     /// Scoring weights to apply to the credit-oracle if the proposal passes.
     pub proposed_weights: ScoringWeights,
     /// Accumulated weight of votes cast in favor.
@@ -94,6 +100,9 @@ pub struct GovernanceProposal {
     pub execution_delay_ledgers: u32,
     /// Whether this proposal has been executed (weights applied or vote failed).
     pub executed: bool,
+    /// Whether this proposal has been cancelled. Cancelled proposals cannot be
+    /// executed. Only the original proposer or the contract admin may cancel.
+    pub cancelled: bool,
     /// Minimum `votes_for + votes_against` required for `execute` to apply
     /// this proposal's weights, snapshotted from the contract-wide default
     /// at proposal-creation time so later `set_quorum` calls never change
@@ -232,18 +241,23 @@ impl Governance {
 
         let proposal = GovernanceProposal {
             id,
+            proposer: proposer.clone(),
             proposed_weights: weights,
             votes_for: 0,
             votes_against: 0,
             expiry_ledger,
             execution_delay_ledgers,
             executed: false,
+            cancelled: false,
             quorum_required,
         };
 
         env.storage()
             .persistent()
             .set(&DataKey::Proposal(id), &proposal);
+        env.storage()
+            .persistent()
+            .set(&DataKey::Proposer(id), &proposer);
         env.storage()
             .instance()
             .set(&DataKey::NextProposalId, &(id + 1));
@@ -370,6 +384,10 @@ impl Governance {
 
         if proposal.executed {
             return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
         if proposal.votes_for + proposal.votes_against < proposal.quorum_required {
@@ -599,18 +617,64 @@ impl Governance {
 
     /// Cancel a governance proposal.
     ///
-    /// Note: Full cancellation logic is out of scope. This only emits the cancellation event.
-    pub fn cancel(
+    /// Only the original proposer or the contract admin may cancel a proposal.
+    /// A proposal that has already been executed or cancelled cannot be cancelled again.
+    /// Cancellation is immediate and permanent — a cancelled proposal can never be
+    /// executed, regardless of how many votes it accumulated.
+    ///
+    /// Votes already cast are preserved in storage but have no effect on a cancelled
+    /// proposal. The votes are not refunded because registered voting weight is not
+    /// consumed globally — each voter retains their full weight for other proposals.
+    ///
+    /// Emits a `PropCanc` event with `(proposal_id)` as topics and
+    /// `(canceller)` as data so off-chain indexers can track cancellations.
+    ///
+    /// Auth: `canceller` must sign the transaction and must be either the
+    /// original proposer or the contract admin.
+    pub fn cancel_proposal(
         env: Env,
         canceller: Address,
         proposal_id: u64,
-        reason: Option<soroban_sdk::String>,
     ) -> Result<(), GovernanceError> {
         canceller.require_auth();
 
+        let proposal_key = DataKey::Proposal(proposal_id);
+        let mut proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
+        // Only the original proposer or the admin may cancel.
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        let stored_proposer: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposer(proposal_id))
+            .ok_or(GovernanceError::NotAuthorized)?;
+
+        if canceller != stored_admin && canceller != stored_proposer {
+            return Err(GovernanceError::NotAuthorized);
+        }
+
+        proposal.cancelled = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
         env.events().publish(
             (symbol_short!("PropCanc"), proposal_id),
-            (canceller, reason),
+            canceller,
         );
 
         Ok(())
@@ -852,10 +916,8 @@ mod tests {
         let proposer = Address::generate(&env);
         let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
 
-        let canceller = Address::generate(&env);
-        let reason = Some(soroban_sdk::String::from_str(&env, "Spam proposal"));
-
-        gov_client.cancel(&canceller, &proposal_id, &reason);
+        // The proposer cancels their own proposal.
+        gov_client.cancel_proposal(&proposer, &proposal_id);
 
         let events = env.events().all();
         let mut found_event = false;
@@ -873,17 +935,19 @@ mod tests {
                         let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
                         assert_eq!(id, proposal_id);
 
-                        let event_data: (Address, Option<soroban_sdk::String>) =
-                            data.try_into_val(&env).unwrap();
-                        assert_eq!(event_data.0, canceller);
-                        // String comparison might require converting to bytes or comparing values but Option<String> should be somewhat comparable.
-                        // We will skip strict String value checking for now.
+                        let event_canceller: Address = data.try_into_val(&env).unwrap();
+                        assert_eq!(event_canceller, proposer);
                     }
                 }
             }
         }
 
         assert!(found_event, "ProposalCancelled event should be emitted");
+
+        // Verify the proposal is now marked cancelled on-chain.
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal.cancelled must be true after cancel_proposal");
+        assert!(!proposal.executed, "proposal.executed must remain false");
     }
 
     /// Verifies the full execution timelock flow:

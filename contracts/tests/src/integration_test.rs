@@ -779,6 +779,201 @@ mod tests {
         assert_eq!(list2.get(0).unwrap(), hash_d);
     }
 
+    /// Integration test: create a proposal, cancel it, then verify execute fails
+    /// with ProposalAlreadyCancelled.
+    ///
+    /// Acceptance criteria for cancel_proposal:
+    ///   - cancel_proposal(proposer, proposal_id) succeeds.
+    ///   - Cancelled proposals cannot be executed.
+    ///   - ProposalCancelled event is emitted.
+    #[test]
+    fn test_cancel_proposal_create_cancel_execute_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Transfer oracle admin to governance contract
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        // Create a proposal
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Cast a passing vote (so execute would succeed if not cancelled)
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter, &200);
+        gov.vote(&voter, &proposal_id, &true, &200);
+
+        // Proposer cancels the proposal
+        gov.cancel_proposal(&proposer, &proposal_id);
+
+        // Capture events immediately after cancel_proposal, before any other call drains them.
+        // env.events().all() is a draining operation — any subsequent client call will
+        // clear the buffer, so we must read it before get_proposal.
+        let events = env.events().all();
+
+        // Verify the proposal is marked cancelled on-chain
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal must be marked cancelled");
+        assert!(!proposal.executed, "proposal must not be executed");
+
+        // Verify the PropCanc event was emitted
+        let cancel_events: Vec<_> = events
+            .iter()
+            .filter(|(id, topics, _)| {
+                if *id != gov_id || topics.len() != 2 {
+                    return false;
+                }
+                let sym: Result<soroban_sdk::Symbol, _> =
+                    topics.get(0).unwrap().try_into_val(&env);
+                sym.map(|s| s == soroban_sdk::symbol_short!("PropCanc"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(cancel_events.len(), 1, "exactly one PropCanc event must be emitted");
+        let (_, topics, data) = &cancel_events[0];
+        let event_proposal_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_proposal_id, proposal_id);
+        let event_canceller: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_canceller, proposer);
+
+        // Advance ledger past expiry and execution delay so execute would normally proceed
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // Execute must fail with ProposalAlreadyCancelled
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "expected ProposalAlreadyCancelled when executing a cancelled proposal"
+        );
+    }
+
+    /// Admin can also cancel a proposal (not just the proposer).
+    #[test]
+    fn test_admin_can_cancel_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Admin (not the proposer) cancels the proposal
+        gov.cancel_proposal(&admin, &proposal_id);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "admin should be able to cancel a proposal");
+    }
+
+    /// A third party (neither proposer nor admin) cannot cancel a proposal.
+    #[test]
+    fn test_unauthorized_cancel_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let third_party = soroban_sdk::Address::generate(&env);
+        let res = gov.try_cancel_proposal(&third_party, &proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::NotAuthorized)),
+            "third party must not be able to cancel a proposal"
+        );
+
+        // Proposal must remain active
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(!proposal.cancelled, "proposal must not be cancelled");
+    }
+
+    /// Cancelling an already-cancelled proposal returns ProposalAlreadyCancelled.
+    #[test]
+    fn test_double_cancel_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // First cancel succeeds
+        gov.cancel_proposal(&proposer, &proposal_id);
+
+        // Second cancel must fail
+        let res = gov.try_cancel_proposal(&proposer, &proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "second cancel must return ProposalAlreadyCancelled"
+        );
+    }
+
     /// Integration test for governance execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.

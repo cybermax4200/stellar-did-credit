@@ -171,7 +171,7 @@
                         "symbol": "computed_at_ledger"
                       },
                       "val": {
-                        "u32": 1
+                        "u32": 0
                       }
                     },
                     {
@@ -186,9 +186,7 @@
                       "key": {
                         "symbol": "previous_score"
                       },
-                      "val": {
-                        "u32": 300
-                      }
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -203,7 +201,7 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 432
+                        "u32": 300
                       }
                     },
                     {
@@ -230,7 +228,7 @@
                         "symbol": "vc_count"
                       },
                       "val": {
-                        "u32": 3
+                        "u32": 0
                       }
                     }
                   ]

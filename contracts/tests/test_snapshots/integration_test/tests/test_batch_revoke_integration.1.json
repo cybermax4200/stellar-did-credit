@@ -1615,7 +1615,7 @@
                         "symbol": "computed_at_ledger"
                       },
                       "val": {
-                        "u32": 1
+                        "u32": 0
                       }
                     },
                     {
@@ -1630,9 +1630,7 @@
                       "key": {
                         "symbol": "previous_score"
                       },
-                      "val": {
-                        "u32": 690
-                      }
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -1647,7 +1645,7 @@
                         "symbol": "score"
                       },
                       "val": {
-                        "u32": 558
+                        "u32": 393
                       }
                     },
                     {
@@ -1674,7 +1672,7 @@
                         "symbol": "vc_count"
                       },
                       "val": {
-                        "u32": 2
+                        "u32": 0
                       }
                     }
                   ]
@@ -3368,7 +3366,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMDR4"
                 },
                 {
-                  "u32": 558
+                  "u32": 393
                 }
               ]
             }
