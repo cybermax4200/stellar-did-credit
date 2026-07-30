@@ -101,6 +101,7 @@ pub enum DataKey {
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
 /// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_score_pure(
     vc_points: u32,
     volume_30d: i128,

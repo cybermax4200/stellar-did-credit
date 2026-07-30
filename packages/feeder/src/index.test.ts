@@ -73,7 +73,16 @@ jest.mock("@stellar/stellar-sdk", () => ({
     ScMapEntry: jest.fn(),
     Operation: {},
   },
-  Keypair: {},
+  Keypair: {
+    fromPublicKey: jest.fn().mockImplementation((publicKey: string) => {
+      if (publicKey.startsWith("G") && publicKey.length === 56) {
+        return {
+          publicKey: () => publicKey,
+        };
+      }
+      throw new Error("Invalid address");
+    }),
+  },
   Horizon: {
     Server: jest.fn().mockImplementation(() => mockHorizonInstance),
   },
@@ -125,7 +134,7 @@ const config: FeederConfig = {
   creditOracleId: "CCREDIT",
   identityOracleId: "CIDENTITY",
   simAccount: "GSIM",
-  subjects: ["GSUBJECT1", "GSUBJECT2"],
+  subjects: ["GBAD5234567234567234567234567234567234567234567234567231", "GBAD5234567234567234567234567234567234567234567234567232"],
   pollIntervalMs: 999_999,
 };
 
@@ -152,7 +161,7 @@ describe("Feeder graceful shutdown", () => {
     await Promise.resolve();
 
     expect(feedSubjectSpy).toHaveBeenCalledTimes(1);
-    expect(feedSubjectSpy.mock.calls[0][0]).toBe("GSUBJECT1");
+    expect(feedSubjectSpy.mock.calls[0][0]).toBe("GBAD5234567234567234567234567234567234567234567234567231");
     const signalPassedToSubject = feedSubjectSpy.mock.calls[0][1] as
       | AbortSignal
       | undefined;
@@ -196,8 +205,8 @@ describe("Feeder state tracking", () => {
     await feeder.runCycle();
 
     expect(feedSubjectSpy).toHaveBeenCalledTimes(2);
-    expect(feedSubjectSpy).toHaveBeenCalledWith("GSUBJECT1", undefined);
-    expect(feedSubjectSpy).toHaveBeenCalledWith("GSUBJECT2", undefined);
+    expect(feedSubjectSpy).toHaveBeenCalledWith("GBAD5234567234567234567234567234567234567234567234567231", undefined);
+    expect(feedSubjectSpy).toHaveBeenCalledWith("GBAD5234567234567234567234567234567234567234567234567232", undefined);
 
     feedSubjectSpy.mockRestore();
   });
@@ -213,7 +222,7 @@ describe("Feeder state tracking", () => {
     // Pre-populate sync state with values that match what the mocks return:
     // - getActiveVcCount returns 3 (via scValToNative)
     // - fetchHorizonStats with empty records returns volume=0, txCount=0, avg=0
-    (feeder as any).syncState.set("GSUBJECT1", {
+    (feeder as any).syncState.set("GBAD5234567234567234567234567234567234567234567234567231", {
       vcCount: 3,
       volume30d: BigInt(0),
       txCount30d: 0,
@@ -224,14 +233,14 @@ describe("Feeder state tracking", () => {
     mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
 
     // The feeder should detect no change and return early.
-    await feeder.feedSubject("GSUBJECT1");
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
 
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      "[feeder] GSUBJECT1 — unchanged, skipping",
+      "[feeder] GBAD5234567234567234567234567234567234567234567234567231 — unchanged, skipping",
     );
 
     const syncingCalls = consoleLogSpy.mock.calls.filter(
-      (call: string[]) => call[0] === "[feeder] syncing GSUBJECT1",
+      (call: string[]) => call[0] === "[feeder] syncing GBAD5234567234567234567234567234567234567234567234567231",
     );
     expect(syncingCalls).toHaveLength(0);
   });
@@ -240,7 +249,7 @@ describe("Feeder state tracking", () => {
     const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as unknown as Keypair);
 
     // Pre-populate sync state with old values.
-    (feeder as any).syncState.set("GSUBJECT1", {
+    (feeder as any).syncState.set("GBAD5234567234567234567234567234567234567234567234567231", {
       vcCount: 3,
       volume30d: BigInt(0),
       txCount30d: 0,
@@ -254,17 +263,17 @@ describe("Feeder state tracking", () => {
 
     // feeder detects the change and proceeds (no rejection needed —
     // the mock pipeline is complete enough to succeed).
-    await feeder.feedSubject("GSUBJECT1");
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
 
     // Should have logged "syncing" (only appears when data changed).
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      "[feeder] syncing GSUBJECT1",
+      "[feeder] syncing GBAD5234567234567234567234567234567234567234567234567231",
     );
 
     // Should NOT have logged the skip message.
     const skipCalls = consoleLogSpy.mock.calls.filter(
       (call: string[]) =>
-        call[0] === "[feeder] GSUBJECT1 — unchanged, skipping",
+        call[0] === "[feeder] GBAD5234567234567234567234567234567234567234567234567231 — unchanged, skipping",
     );
     expect(skipCalls).toHaveLength(0);
   });
@@ -297,11 +306,11 @@ describe("Feeder state tracking", () => {
     mockServerInstance.getAccount.mockResolvedValue({ sequence: "99" });
 
     // feedSubject proceeds through the full sync path.
-    await feeder.feedSubject("GSUBJECT1");
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
 
     // After successful sync, state should be populated.
     expect((feeder as any).syncState.size).toBe(1);
-    const state = (feeder as any).syncState.get("GSUBJECT1");
+    const state = (feeder as any).syncState.get("GBAD5234567234567234567234567234567234567234567234567231");
     expect(state.vcCount).toBe(3);
     expect(state.volume30d).toBe(BigInt(0));
     expect(state.txCount30d).toBe(0);
@@ -330,7 +339,7 @@ describe("Horizon rate limiting handling", () => {
     // Dynamic import so the mock is picked up.
     const stats = await (
       await import("./index")
-    ).fetchHorizonStats("https://horizon.example", "GADDR");
+    ).fetchHorizonStats("https://horizon.example", "GBAD5234567234567234567234567234567234567234567234567233");
     expect(stats.txCount30d).toBe(0);
     expect(consoleWarn).toHaveBeenCalled();
 
@@ -381,14 +390,14 @@ describe("Address validation and error handling", () => {
 
     const stats = await fetchHorizonStats(
       "https://horizon.example",
-      "GACCOUNT",
+      "GBAD5234567234567234567234567234567234567234567234567234",
     );
 
     expect(stats.volume30d).toBe(BigInt(0));
     expect(stats.txCount30d).toBe(0);
     expect(stats.avgCounterparties).toBe(0);
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      "[feeder] Account not found for GACCOUNT, skipping",
+      "[feeder] Account not found for GBAD5234567234567234567234567234567234567234567234567234, skipping",
     );
   });
 
@@ -403,7 +412,7 @@ describe("Address validation and error handling", () => {
 
     // Should throw the transient error, not swallow it
     await expect(
-      fetchHorizonStats("https://horizon.example", "GADDR"),
+      fetchHorizonStats("https://horizon.example", "GBAD5234567234567234567234567234567234567234567234567233"),
     ).rejects.toThrow();
   });
 
@@ -417,7 +426,7 @@ describe("Address validation and error handling", () => {
 
     const stats = await fetchHorizonStats(
       "https://horizon.example",
-      "GADDR",
+      "GBAD5234567234567234567234567234567234567234567234567233",
     );
 
     expect(stats.volume30d).toBe(BigInt(0));
@@ -433,7 +442,7 @@ describe("Address validation and error handling", () => {
       result: { retval: {} },
     });
 
-    const count = await getActiveVcCount(mockServerInstance as any, config, "GSUBJECT");
+    const count = await getActiveVcCount(mockServerInstance as any, config, "GBAD5234567234567234567234567234567234567234567234567235");
 
     expect(count).toBe(0);
   });
@@ -445,12 +454,11 @@ describe("Address validation and error handling", () => {
       error: "Simulation failed",
     });
 
-    const count = await getActiveVcCount(mockServerInstance as any, config, "GSUBJECT");
+    const count = await getActiveVcCount(mockServerInstance as any, config, "GBAD5234567234567234567234567234567234567234567234567235");
 
     expect(count).toBe(0);
     expect(consoleErrorSpy).toHaveBeenCalledWith(
       expect.stringContaining("get_active_vc_count simulation failed"),
-      expect.any(String),
     );
   });
 
@@ -552,7 +560,7 @@ describe("runCycle error handling and summary", () => {
   it("validates all addresses at the start of cycle", async () => {
     const configWithInvalid: FeederConfig = {
       ...config,
-      subjects: ["GVALID123456789012345678901234567890123456789012345", "INVALID"],
+      subjects: ["GVALID12345678901234567890123456789012345678901234567890", "INVALID"],
     };
     const feeder = new Feeder(configWithInvalid, {
       publicKey: () => "GFEEDER",
@@ -591,7 +599,7 @@ describe("runCycle error handling and summary", () => {
 
     // Should include subject, error type, and action
     expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringMatching(/GSUBJECT1.*permanent.*skipped/),
+      expect.stringMatching(/GBAD5234567234567234567234567234567234567234567234567231.*permanent.*skipped/),
     );
 
     feedSubjectSpy.mockRestore();
@@ -615,12 +623,12 @@ describe("Error classification helpers", () => {
 
     const stats = await fetchHorizonStats(
       "https://horizon.example",
-      "GADDR",
+      "GBAD5234567234567234567234567234567234567234567234567233",
     );
 
     expect(stats.volume30d).toBe(BigInt(0));
     expect(consoleLogSpy).toHaveBeenCalledWith(
-      "[feeder] Account not found for GADDR, skipping",
+      "[feeder] Account not found for GBAD5234567234567234567234567234567234567234567234567233, skipping",
     );
 
     consoleLogSpy.mockRestore();
@@ -638,7 +646,7 @@ describe("Error classification helpers", () => {
 
     // Should throw (not catch) transient errors
     await expect(
-      fetchHorizonStats("https://horizon.example", "GADDR"),
+      fetchHorizonStats("https://horizon.example", "GBAD5234567234567234567234567234567234567234567234567233"),
     ).rejects.toThrow("Network timeout");
   });
 });
