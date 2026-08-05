@@ -1160,6 +1160,172 @@ mod tests {
     }
 
     #[test]
+    fn test_governance_insufficient_votes_cannot_execute_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 20,
+                repayment_weight: 30,
+            },
+            &5,
+            &0,
+        );
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter, &99);
+        gov.vote(&voter, &proposal_id, &true, &99);
+
+        env.ledger().with_mut(|ledger| ledger.sequence_number += 6);
+
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::QuorumNotMet))
+        );
+        assert!(!gov.get_proposal(&proposal_id).unwrap().executed);
+        assert!(credit.get_pending_weights().is_none());
+    }
+
+    #[test]
+    fn test_governance_expired_proposal_rejects_votes_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 20,
+                repayment_weight: 30,
+            },
+            &5,
+            &0,
+        );
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter, &100);
+
+        env.ledger().with_mut(|ledger| ledger.sequence_number += 6);
+
+        assert_eq!(
+            gov.try_vote(&voter, &proposal_id, &true, &100),
+            Err(Ok(GovernanceError::ProposalExpired))
+        );
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.votes_for, 0);
+        assert_eq!(proposal.votes_against, 0);
+    }
+
+    #[test]
+    fn test_governance_prevents_reusing_vote_weight_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 20,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+        );
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter, &100);
+        gov.vote(&voter, &proposal_id, &true, &100);
+
+        assert_eq!(
+            gov.try_vote(&voter, &proposal_id, &true, &1),
+            Err(Ok(GovernanceError::InsufficientVoteWeight))
+        );
+        assert_eq!(gov.get_vote_weight_used(&proposal_id, &voter), 100);
+        assert_eq!(gov.get_proposal(&proposal_id).unwrap().votes_for, 100);
+    }
+
+    #[test]
+    fn test_governance_concurrent_proposals_only_winner_queues_weights_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let winning_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let losing_weights = ScoringWeights {
+            vc_weight: 20,
+            tx_weight: 50,
+            repayment_weight: 30,
+        };
+        let winning_proposal = gov.create_proposal(&proposer, &winning_weights, &5, &0);
+        let losing_proposal = gov.create_proposal(&proposer, &losing_weights, &5, &0);
+
+        let voter_for = soroban_sdk::Address::generate(&env);
+        let voter_against = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter_for, &100);
+        gov.register_voter(&admin, &voter_against, &100);
+        gov.vote(&voter_for, &winning_proposal, &true, &100);
+        gov.vote(&voter_against, &losing_proposal, &false, &100);
+
+        env.ledger().with_mut(|ledger| ledger.sequence_number += 6);
+        gov.execute(&winning_proposal);
+        gov.execute(&losing_proposal);
+
+        assert!(gov.get_proposal(&winning_proposal).unwrap().executed);
+        assert!(gov.get_proposal(&losing_proposal).unwrap().executed);
+        let pending = credit.get_pending_weights().expect("winning proposal should queue weights");
+        assert_eq!(pending.weights.vc_weight, winning_weights.vc_weight);
+        assert_eq!(pending.weights.tx_weight, winning_weights.tx_weight);
+        assert_eq!(pending.weights.repayment_weight, winning_weights.repayment_weight);
+    }
+
+    #[test]
     fn test_list_issuers_reflects_register_and_deregister_operations() {
         let env = Env::default();
         env.mock_all_auths();
