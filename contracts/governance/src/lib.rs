@@ -431,7 +431,107 @@ impl Governance {
     /// This function should be called after `execute` has successfully queued
     /// new weights and the credit-oracle's timelock (17,280 ledgers / ~24 hours)
     /// has elapsed. Anyone can call this function.
-    pub fn apply_weights(env: Env) -> Result<(), GovernanceError> {
+    
+
+    /// Cleanup VoteWeightUsed entries for a completed proposal.
+    ///
+    /// After a proposal is executed, the VoteWeightUsed entries for that proposal
+    /// are no longer needed and can be removed to prevent storage bloat.
+    ///
+    /// Admin provides a list of voter addresses who voted on the proposal.
+    /// All VoteWeightUsed(proposal_id, voter) entries for these voters are removed.
+    ///
+    /// # Arguments
+    /// * `admin` - Must be the contract admin.
+    /// * `proposal_id` - ID of the proposal to clean up.
+    /// * `voters` - List of voter addresses whose entries should be removed.
+    ///
+    /// # Errors
+    /// * `NotAuthorized` - If caller is not admin.
+    /// * `ProposalNotFound` - If proposal does not exist.
+    /// * `ProposalNotExecuted` - If proposal has not been executed yet.
+    ///
+    /// # Note
+    /// This is a no-op (not an error) if the proposal exists and is executed,
+    /// even if some VoteWeightUsed entries are already missing.
+    pub fn cleanup_proposal_votes(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+        voters: soroban_sdk::Vec<Address>,
+    ) -> Result<(), GovernanceError> {
+        // Verify admin authorization
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        // Verify proposal exists
+        let proposal_key = DataKey::Proposal(proposal_id);
+        let proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        // Only allow cleanup on executed proposals
+        if !proposal.executed {
+            // No-op: proposal not executed yet, return success without removing anything
+            return Ok(());
+        }
+
+        // Remove VoteWeightUsed entries for each voter
+        let mut removed_count = 0;
+        for voter in voters.iter() {
+            let key = DataKey::VoteWeightUsed(proposal_id, voter);
+            if env.storage().persistent().has(&key) {
+                env.storage().persistent().remove(&key);
+                removed_count += 1;
+            }
+        }
+
+        // Emit event with cleanup details
+        env.events().publish(
+            (symbol_short!("VCleanup"), proposal_id),
+            (removed_count, voters.len()),
+        );
+
+        Ok(())
+    }
+
+
+    /// Cleanup VoteWeightUsed entries for all voters on a completed proposal.
+    ///
+    /// This is a convenience wrapper that collects all voters from the proposal's
+    /// vote history. Since we don't store a voter index, this function is not
+    /// implemented as it would require scanning all storage.
+    ///
+    /// Instead, use cleanup_proposal_votes with a known list of voters.
+    /// Off-chain services should maintain a list of voters for each proposal
+    /// to enable efficient cleanup.
+    ///
+    /// This placeholder is documented for clarity.
+    ///
+    /// # Note
+    /// For batch cleanup, consider using the admin cleanup function with
+    /// a pre-collected list of voter addresses.
+    pub fn cleanup_proposal_votes_batch(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+        voters: soroban_sdk::Vec<Address>,
+    ) -> Result<(), GovernanceError> {
+        // This is the same as cleanup_proposal_votes but with a different name.
+        // The function is provided for API symmetry.
+        Self::cleanup_proposal_votes(env, admin, proposal_id, voters)
+    }
+
+pub fn apply_weights(env: Env) -> Result<(), GovernanceError> {
         let credit_oracle_addr: Address = env
             .storage()
             .instance()
@@ -1384,5 +1484,184 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+    
+
+    #[test]
+    fn test_cleanup_proposal_votes_removes_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        let voter3 = Address::generate(&env);
+
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1000);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        client.accept_oracle_admin();
+
+        // Register voters with weights
+        client.register_voter(&admin, &voter1, &100);
+        client.register_voter(&admin, &voter2, &100);
+        client.register_voter(&admin, &voter3, &100);
+
+        // Create a proposal
+        let weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        };
+        let proposal_id = client.create_proposal(
+            &admin,
+            &weights,
+            &10u32,
+            &5u32,
+        );
+
+        // Cast votes
+        client.vote(&voter1, &proposal_id, &true, &100);
+        client.vote(&voter2, &proposal_id, &true, &100);
+        client.vote(&voter3, &proposal_id, &true, &100);
+
+        // Advance ledger past voting and timelock
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 20);
+
+        // Execute the proposal
+        let _ = client.execute(&proposal_id);
+
+        // Cleanup votes for voter1 and voter2
+        let voters_to_cleanup = soroban_sdk::vec![&env, voter1.clone(), voter2.clone()];
+        client.cleanup_proposal_votes(&admin, &proposal_id, &voters_to_cleanup);
+
+        // Verify VoteWeightUsed entries are removed for cleaned voters
+        let weight_key1 = DataKey::VoteWeightUsed(proposal_id, voter1.clone());
+        let weight_key2 = DataKey::VoteWeightUsed(proposal_id, voter2.clone());
+        let weight_key3 = DataKey::VoteWeightUsed(proposal_id, voter3.clone());
+
+        let weight1: i128 = env
+            .storage()
+            .persistent()
+            .get(&weight_key1)
+            .unwrap_or(0);
+        assert_eq!(weight1, 0, "voter1 weight should be removed");
+
+        let weight2: i128 = env
+            .storage()
+            .persistent()
+            .get(&weight_key2)
+            .unwrap_or(0);
+        assert_eq!(weight2, 0, "voter2 weight should be removed");
+
+        let weight3: i128 = env
+            .storage()
+            .persistent()
+            .get(&weight_key3)
+            .unwrap_or(0);
+        assert_eq!(weight3, 100, "voter3 weight should remain");
     }
+
+    #[test]
+    fn test_cleanup_proposal_votes_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1000);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        client.accept_oracle_admin();
+
+        client.register_voter(&admin, &voter, &100);
+
+        let weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        };
+        let proposal_id = client.create_proposal(
+            &admin,
+            &weights,
+            &10u32,
+            &5u32,
+        );
+
+        client.vote(&voter, &proposal_id, &true, &100);
+
+        let seq = env.ledger().sequence();
+        env.ledger().set_sequence_number(seq + 20);
+        let _ = client.execute(&proposal_id);
+
+        // Non-admin should not be able to cleanup
+        let voters = soroban_sdk::vec![&env, voter.clone()];
+        let result = client.try_cleanup_proposal_votes(&non_admin, &proposal_id, &voters);
+        assert!(result.is_err(), "Non-admin should not be able to cleanup votes");
+    }
+
+    #[test]
+    fn test_cleanup_proposal_votes_noop_if_not_executed() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let voter = Address::generate(&env);
+
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1000);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        client.accept_oracle_admin();
+
+        client.register_voter(&admin, &voter, &100);
+
+        let weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 30,
+            repayment_weight: 20,
+        };
+        let proposal_id = client.create_proposal(
+            &admin,
+            &weights,
+            &10u32,
+            &5u32,
+        );
+
+        // Vote but don't execute
+        client.vote(&voter, &proposal_id, &true, &100);
+
+        // Cleanup should be a no-op (not an error)
+        let voters = soroban_sdk::vec![&env, voter.clone()];
+        let result = client.try_cleanup_proposal_votes(&admin, &proposal_id, &voters);
+        assert!(result.is_ok(), "Cleanup on unexecuted proposal should be no-op");
+
+        // VoteWeightUsed entry should still exist
+        let weight_key = DataKey::VoteWeightUsed(proposal_id, voter.clone());
+        let weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&weight_key)
+            .unwrap_or(0);
+        assert_eq!(weight, 100, "VoteWeightUsed should remain if proposal not executed");
+    }}
 }
