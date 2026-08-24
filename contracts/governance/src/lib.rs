@@ -273,7 +273,7 @@ impl Governance {
     /// `vote_weight` must be positive and cannot exceed the voter's available
     /// weight for this proposal. Each voter can cast multiple votes up to their
     /// total registered weight. Returns an error if the proposal has expired,
-    /// been executed, or if the voter lacks sufficient weight.
+    /// been executed, been cancelled, or if the voter lacks sufficient weight.
     ///
     /// Auth: `voter` must sign the transaction.
     pub fn vote(
@@ -321,6 +321,12 @@ impl Governance {
 
         if proposal.executed {
             return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        // A cancelled proposal is dead: no further votes may be cast, even if
+        // the voting period has not yet expired.
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
         // Update vote totals
@@ -948,6 +954,99 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.cancelled, "proposal.cancelled must be true after cancel_proposal");
         assert!(!proposal.executed, "proposal.executed must remain false");
+    }
+
+    /// A cancelled proposal must reject all further vote calls with
+    /// `ProposalAlreadyCancelled`, even while the voting period is still
+    /// open, and must remain unexecutable (`execute` already guards against
+    /// cancelled proposals). Votes cast before cancellation are preserved.
+    #[test]
+    fn test_vote_rejected_after_cancellation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Vote before cancellation succeeds.
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter1, &500);
+        gov_client.register_voter(&admin, &voter2, &500);
+        gov_client.vote(&voter1, &proposal_id, &true, &300);
+
+        // The proposer cancels their own proposal.
+        gov_client.cancel_proposal(&proposer, &proposal_id);
+
+        // Voting after cancellation must fail even though the voting period
+        // has not expired.
+        let res = gov_client.try_vote(&voter2, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+
+        // A voter who already voted cannot add more weight either.
+        let res = gov_client.try_vote(&voter1, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+
+        // Votes cast before cancellation are preserved for audit.
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled);
+        assert_eq!(proposal.votes_for, 300);
+
+        // Execution of a cancelled proposal remains rejected.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+    }
+
+    /// The admin can cancel someone else's proposal, and voting on that
+    /// proposal is then rejected just as if the proposer had cancelled it.
+    #[test]
+    fn test_admin_cancel_blocks_further_votes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Admin (not the proposer) cancels the proposal.
+        gov_client.cancel_proposal(&admin, &proposal_id);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "admin cancel must persist cancelled");
+
+        // Voting on an admin-cancelled proposal is rejected.
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &100);
+        let res = gov_client.try_vote(&voter, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
     }
 
     /// Verifies the full execution timelock flow:

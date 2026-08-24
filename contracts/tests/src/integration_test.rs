@@ -974,6 +974,69 @@ mod tests {
         );
     }
 
+    /// Voting on a cancelled proposal must be rejected with
+    /// ProposalAlreadyCancelled, even while the voting period is still open.
+    /// Execution of the cancelled proposal must also remain rejected.
+    #[test]
+    fn test_vote_after_cancel_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Register a voter and cast a vote before cancellation.
+        let voter1 = soroban_sdk::Address::generate(&env);
+        let voter2 = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter1, &500);
+        gov.register_voter(&admin, &voter2, &500);
+        gov.vote(&voter1, &proposal_id, &true, &300);
+
+        // Proposer cancels while voting is still open.
+        gov.cancel_proposal(&proposer, &proposal_id);
+
+        // New votes must be rejected even though the voting period has not
+        // expired.
+        let res = gov.try_vote(&voter2, &proposal_id, &true, &100);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "vote after cancel must return ProposalAlreadyCancelled"
+        );
+
+        // Votes cast before cancellation are preserved for audit.
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal must be marked cancelled");
+        assert_eq!(proposal.votes_for, 300, "pre-cancel votes must be preserved");
+
+        // Advance past the voting period: execution stays rejected.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "executing a cancelled proposal must return ProposalAlreadyCancelled"
+        );
+    }
+
     /// Integration test for governance execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
