@@ -24,7 +24,7 @@ pub enum GovernanceError {
     ProposalNotExpired = 5,
     /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
-    /// Proposed scoring weights do not sum to 100.
+    /// Proposed scoring weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
     InvalidWeights = 7,
     /// Quorum value must be positive.
     InvalidQuorum = 8,
@@ -223,7 +223,7 @@ impl Governance {
         execution_delay_ledgers: u32,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(GovernanceError::InvalidWeights);
         }
 
@@ -1384,5 +1384,86 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+    }
+
+    #[test]
+    fn test_create_proposal_weight_component_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+
+        // Proposal with tx_weight = 0 fails with InvalidWeights
+        let res_tx_zero = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 60,
+                tx_weight: 0,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_zero, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 9 (< MIN_COMPONENT_WEIGHT) fails with InvalidWeights
+        let res_tx_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 51,
+                tx_weight: 9,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with vc_weight = 9 fails with InvalidWeights
+        let res_vc_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 9,
+                tx_weight: 45,
+                repayment_weight: 46,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_vc_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with repayment_weight = 9 fails with InvalidWeights
+        let res_repayment_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 45,
+                tx_weight: 46,
+                repayment_weight: 9,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_repayment_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 10 (exact MIN_COMPONENT_WEIGHT bound) passes
+        let prop_id = gov_client.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 10,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(prop_id, 1);
     }
 }

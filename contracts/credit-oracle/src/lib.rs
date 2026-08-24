@@ -20,7 +20,7 @@ pub enum CreditOracleError {
     FeederNotRegistered = 3,
     /// Lender is not registered.
     LenderNotRegistered = 4,
-    /// Proposed weights do not sum to 100.
+    /// Proposed weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
     InvalidWeights = 5,
     /// No pending admin proposal exists.
     NoPendingAdmin = 6,
@@ -982,7 +982,7 @@ impl CreditOracle {
     /// Propose new scoring weights with timelock
     /// Propose new scoring weights with timelock
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(CreditOracleError::InvalidWeights);
         }
         let stored_admin: Address = env
@@ -1744,13 +1744,43 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights — should return error via try_
+        // Invalid weights (sum != 100) — should return error via try_
         let result = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
             repayment_weight: 40,
         });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        let res_vc_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 9,
+            tx_weight: 45,
+            repayment_weight: 46,
+        });
+        assert_eq!(res_vc_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_tx_zero = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 55,
+            tx_weight: 0,
+            repayment_weight: 45,
+        });
+        assert_eq!(res_tx_zero, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_repayment_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 46,
+            repayment_weight: 9,
+        });
+        assert_eq!(res_repayment_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        let res_valid_min = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 10,
+            repayment_weight: 40,
+        });
+        assert!(res_valid_min.is_ok());
     }
 
     #[test]
@@ -1931,60 +1961,27 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 0
-        client.propose_weights(&ScoringWeights {
+        // Proposing tx_weight = 0 to contract is rejected as InvalidWeights
+        let res_zero = client.try_propose_weights(&ScoringWeights {
             vc_weight: 60,
             tx_weight: 0,
             repayment_weight: 40,
         });
-        let jump = TIMELOCK_LEDGERS + 2;
-        env.as_contract(&contract_id, || {
-            env.storage().instance().extend_ttl(jump, jump);
-        });
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + jump);
-        client.apply_weights();
+        assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        client.register_feeder(&admin, &feeder);
-
-        let subject_with_counterparties = Address::generate(&env);
-        let subject_without_counterparties = Address::generate(&env);
-
-        // Give first subject 100 counterparties (max bonus)
-        client.update_tx_stats(
-            &feeder,
-            &subject_with_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 100,
-            },
-        );
-        // Second subject has no counterparties
-        client.update_tx_stats(
-            &feeder,
-            &subject_without_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 0,
-            },
-        );
-
-        let score_with = client.compute_score(&subject_with_counterparties);
-        let score_without = client.compute_score(&subject_without_counterparties);
-
-        // Both scores must be identical — tx_weight=0 suppresses the counterparty bonus
+        // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
         );
     }
 
-    /// When tx_weight = 100, the counterparty bonus is fully applied and
+    /// When tx_weight is high (e.g., 80), the counterparty bonus is applied and
     /// a subject with 100+ counterparties scores higher than one with none.
     #[test]
-    fn test_counterparty_bonus_applied_when_tx_weight_is_100() {
+    fn test_counterparty_bonus_applied_when_tx_weight_is_high() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -1994,11 +1991,11 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 100
+        // Propose and apply valid weights with tx_weight = 80
         client.propose_weights(&ScoringWeights {
-            vc_weight: 0,
-            tx_weight: 100,
-            repayment_weight: 0,
+            vc_weight: 10,
+            tx_weight: 80,
+            repayment_weight: 10,
         });
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
