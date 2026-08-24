@@ -367,10 +367,10 @@ impl RevocationRegistry {
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
         ensure_not_paused(&env)?;
+        issuer.require_auth();
         if vc_hashes.len() > 100 {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
-        issuer.require_auth();
 
         let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
         let mut list: Vec<BytesN<32>> = env

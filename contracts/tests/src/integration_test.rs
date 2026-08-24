@@ -725,6 +725,46 @@ mod tests {
         assert!(!revocation.is_revoked(&hash3));
     }
 
+    /// An oversized batch submitted without the issuer's authorization must
+    /// fail with an auth error, not `BatchTooLarge`: `require_auth()` runs
+    /// before the batch-size check so unauthenticated callers cannot probe
+    /// validation logic without paying for authorization.
+    #[test]
+    fn test_batch_revoke_requires_auth_before_size_check() {
+        let env = Env::default();
+        // Deliberately do NOT mock authorizations: nothing is signed.
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+
+        // 101 hashes: exceeds the batch size limit.
+        let mut batch = soroban_sdk::Vec::new(&env);
+        for i in 0..101u32 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = (i % 256) as u8;
+            hash_arr[1] = (i / 256) as u8;
+            batch.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+
+        let res = revocation.try_batch_revoke(&issuer, &batch);
+
+        match res {
+            // Host-level auth error: expected, authorization is enforced first.
+            Err(Err(soroban_sdk::InvokeError::Abort)) => {}
+            // A contract-level BatchTooLarge would mean the size check ran
+            // before auth.
+            Err(Ok(e)) => panic!(
+                "expected auth error before size check, got contract error {:?}",
+                e
+            ),
+            other => panic!(
+                "unauthorized batch_revoke must fail with an auth error, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
     #[test]
     fn test_revocation_registry_count_and_list_integration() {
         let env = Env::default();
