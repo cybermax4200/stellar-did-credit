@@ -667,16 +667,16 @@ impl IdentityOracle {
     }
 
     /// Deactivate the subject's DID. This is the **canonical, full**
-    /// deactivation path — prefer this over [`Self::deactivate_identity`]
+    /// deactivation path — prefer this over `deactivate_identity`
     /// unless you specifically need to keep the DID document resolvable
     /// (see that function's doc comment for when that applies).
     ///
     /// 1. Sets the same `Deactivated` flag used by `deactivate_identity`,
-    ///    so [`Self::is_deactivated`] returns `true` and `is_verified` /
+    ///    so `is_deactivated` returns `true` and `is_verified` /
     ///    credit scoring are suppressed for this subject via `credit-oracle`.
     /// 2. Revokes all active verifiable credentials anchored for the subject.
     /// 3. Removes the anchored DID Document CID entirely — after this call,
-    ///    [`Self::get_did_document`] returns `None`.
+    ///    `get_did_document` returns `None`.
     /// 4. Emits a `DIDDeact` event.
     ///
     /// Reversible via `reactivate_identity`, which clears the `Deactivated`
@@ -855,7 +855,7 @@ impl IdentityOracle {
     /// Voluntarily deactivate a subject's identity **without** touching
     /// their DID document.
     ///
-    /// Use this instead of [`Self::deactivate_did`] only when the subject
+    /// Use this instead of `deactivate_did` only when the subject
     /// wants to suppress verification and credit scoring while keeping
     /// their DID document CID resolvable (e.g. `get_did_document` still
     /// returns a value) — for example, a temporary suspension where the
@@ -864,7 +864,7 @@ impl IdentityOracle {
     ///
     /// Shares its core logic with `deactivate_did` (see `deactivate_core`):
     ///
-    /// 1. Sets the `Deactivated` flag in storage so [`Self::is_deactivated`]
+    /// 1. Sets the `Deactivated` flag in storage so `is_deactivated`
     ///    returns `true` and `is_verified` / credit scoring are suppressed.
     /// 2. Marks **all** active VC anchors as revoked, making revocation
     ///    visible to query functions that check the on-chain revoked flag.
