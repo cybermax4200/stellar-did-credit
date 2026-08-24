@@ -452,13 +452,14 @@ impl RevocationRegistry {
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
     /// Auth: admin only — verified via `require_admin`.
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        ensure_not_paused(&env).unwrap();
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
         require_admin(&env);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 }
 

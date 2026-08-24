@@ -1145,17 +1145,18 @@ impl CreditOracle {
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
-            panic!("not authorized");
+            return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 
     /// Returns aggregate protocol-level counters.
@@ -1904,7 +1905,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
     fn test_upgrade_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1914,7 +1914,8 @@ mod tests {
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
-        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+        let result = client.try_upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
     /// When tx_weight = 0, the counterparty bonus contributes nothing to the final score
