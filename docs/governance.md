@@ -439,6 +439,7 @@ No auth, no side effects.
 | `get_voter_weight` | `(env, voter: Address) -> Option<i128>` | Registered total weight, or `None` if not registered. |
 | `get_vote_weight_used` | `(env, proposal_id: u64, voter: Address) -> i128` | Used weight on a specific proposal. 0 if never voted. |
 | `get_available_vote_weight` | `(env, proposal_id: u64, voter: Address) -> i128` | `total_weight - used_weight`. 0 if not registered (total defaults to 0). |
+| `list_proposals` | `(env, from_id: u64, limit: u32, include_inactive: bool) -> Vec<GovernanceProposal>` | Enumerates up to `limit` (max 20) proposals starting from `from_id`. Skips non-existent proposals and filters inactive (cancelled/executed) proposals unless `include_inactive` is true. Returns empty vector if `from_id >= NextProposalId`. |
 
 ---
 
@@ -533,7 +534,7 @@ The governance contract is currently **not exposed in `packages/sdk/src/index.ts
 
 ### 5.5 Proposal ID and Creation Order
 
-IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. There is no reverse index of `proposer → proposal_ids` or a paginated list; off-chain indexers should track `PropCreat` events to build a proposal list.
+IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. Proposals can be enumerated on-chain using `list_proposals(from_id, limit, include_inactive)`. Off-chain indexers can also track `PropCreat` events.
 
 ### 5.6 No Proposal Expiry Cleanup
 

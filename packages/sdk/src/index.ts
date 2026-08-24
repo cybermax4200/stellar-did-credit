@@ -52,10 +52,24 @@ export interface VCRecord {
   revoked: boolean;
 }
 
+export interface GovernanceProposal {
+  id: bigint;
+  proposer: string;
+  proposedWeights: ScoringWeights;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  expiryLedger: number;
+  executionDelayLedgers: number;
+  executed: boolean;
+  cancelled: boolean;
+  quorumRequired: bigint;
+}
+
 export interface ProtocolConfig {
   identityOracleId: string;
   creditOracleId: string;
   revocationRegistryId: string;
+  governanceId?: string;
   networkPassphrase: string;
   rpcUrl: string;
   simAccount: string;
@@ -805,6 +819,62 @@ export class StellarDIDCreditSDK {
     const native = scValToNative(resultScVal);
     return (native as unknown[]).map((addr) => String(addr));
   }
+
+  /**
+   * List governance proposals starting from `fromId` up to `limit`.
+   *
+   * Uses a read-only simulation against the governance contract.
+   *
+   * @param fromId - Proposal ID to start listing from
+   * @param limit - Maximum number of proposals to fetch (capped at 20 on-chain)
+   * @param includeInactive - Whether to include executed or cancelled proposals (default false)
+   * @returns Array of GovernanceProposal objects
+   */
+  async listProposals(
+    fromId: number | bigint,
+    limit: number,
+    includeInactive = false,
+  ): Promise<GovernanceProposal[]> {
+    if (!this.config.governanceId) {
+      throw new Error("governanceId is not configured in ProtocolConfig");
+    }
+
+    const server = this.server;
+    const contract = new Contract(this.config.governanceId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "list_proposals",
+          nativeToScVal(BigInt(fromId), { type: "u64" }),
+          nativeToScVal(limit, { type: "u32" }),
+          nativeToScVal(includeInactive, { type: "bool" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseGovernanceProposalList(resultScVal);
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
@@ -875,6 +945,36 @@ function parseVCRecordList(scVal: xdr.ScVal): VCRecord[] {
       issuer: String(raw["issuer"]),
       anchoredAt: Number(raw["anchored_at"]),
       revoked: Boolean(raw["revoked"]),
+    };
+  });
+}
+
+/**
+ * Parse a Soroban ScVal representing a `Vec<GovernanceProposal>`.
+ */
+function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined) {
+    return [];
+  }
+  return (native as unknown[]).map((entry) => {
+    const raw = entry as Record<string, unknown>;
+    const weights = raw["proposed_weights"] as Record<string, unknown>;
+    return {
+      id: BigInt(raw["id"] as bigint | number | string),
+      proposer: String(raw["proposer"]),
+      proposedWeights: {
+        vcWeight: Number(weights["vc_weight"]),
+        txWeight: Number(weights["tx_weight"]),
+        repaymentWeight: Number(weights["repayment_weight"]),
+      },
+      votesFor: BigInt(raw["votes_for"] as bigint | number | string),
+      votesAgainst: BigInt(raw["votes_against"] as bigint | number | string),
+      expiryLedger: Number(raw["expiry_ledger"]),
+      executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
+      executed: Boolean(raw["executed"]),
+      cancelled: Boolean(raw["cancelled"]),
+      quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
     };
   });
 }

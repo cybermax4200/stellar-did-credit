@@ -11,6 +11,7 @@ import type {
   ScoringWeights,
   RepaymentRecord,
   VCRecord,
+  GovernanceProposal,
 } from "./index";
 import { xdr } from "@stellar/stellar-sdk";
 import type { Keypair } from "@stellar/stellar-sdk";
@@ -1196,11 +1197,74 @@ describe("test_all_exports_are_defined", () => {
     const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
     const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, previousScore: null, computedAtLedger: 0, stale: false };
     const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
+    const _govProp: GovernanceProposal = { id: 1n, proposer: "G", proposedWeights: _weights, votesFor: 0n, votesAgainst: 0n, expiryLedger: 0, executionDelayLedgers: 0, executed: false, cancelled: false, quorumRequired: 100n };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
     expect(_repayment).toBeDefined();
     expect(_vc).toBeDefined();
     expect(_score).toBeDefined();
     expect(_config).toBeDefined();
+    expect(_govProp).toBeDefined();
   });
 });
+
+describe("listProposals", () => {
+  it("throws error if governanceId is not configured", async () => {
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    await expect(sdk.listProposals(1, 10)).rejects.toThrow(
+      "governanceId is not configured in ProtocolConfig",
+    );
+  });
+
+  it("calls list_proposals contract method and parses result correctly", async () => {
+    const configWithGov = {
+      ...mockConfig,
+      governanceId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGOV1",
+    };
+    const sdk = new StellarDIDCreditSDK(configWithGov);
+
+    const mockProposalsRaw = [
+      {
+        id: 1n,
+        proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+        proposed_weights: {
+          vc_weight: 40,
+          tx_weight: 30,
+          repayment_weight: 30,
+        },
+        votes_for: 100n,
+        votes_against: 0n,
+        expiry_ledger: 1000,
+        execution_delay_ledgers: 100,
+        executed: false,
+        cancelled: false,
+        quorum_required: 100n,
+      },
+    ];
+
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: { value: mockProposalsRaw } },
+    });
+
+    const proposals = await sdk.listProposals(1, 10, true);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toEqual({
+      id: 1n,
+      proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+      proposedWeights: {
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      },
+      votesFor: 100n,
+      votesAgainst: 0n,
+      expiryLedger: 1000,
+      executionDelayLedgers: 100,
+      executed: false,
+      cancelled: false,
+      quorumRequired: 100n,
+    });
+  });
+});
+

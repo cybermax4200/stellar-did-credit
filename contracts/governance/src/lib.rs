@@ -5,7 +5,7 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -619,6 +619,52 @@ impl Governance {
             .unwrap_or(0);
 
         total_weight - used_weight
+    }
+
+    /// List governance proposals starting from `from_id` up to `limit`.
+    ///
+    /// Iterates proposal IDs in `[from_id, from_id + min(limit, 20))`.
+    /// `limit` is capped at 20 to prevent storage read budget exhaustion.
+    /// Non-existent proposals (deleted or skipped) are omitted.
+    /// If `include_inactive` is `false`, cancelled and executed proposals are skipped.
+    /// Returns an empty vector (not an error) if `from_id` is beyond `NextProposalId` or `limit` is 0.
+    pub fn list_proposals(
+        env: Env,
+        from_id: u64,
+        limit: u32,
+        include_inactive: bool,
+    ) -> Vec<GovernanceProposal> {
+        let mut result = Vec::new(&env);
+        let cap = limit.min(20);
+        if cap == 0 {
+            return result;
+        }
+
+        let next_proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+
+        if from_id >= next_proposal_id {
+            return result;
+        }
+
+        let end_id = from_id.saturating_add(cap as u64).min(next_proposal_id);
+
+        for id in from_id..end_id {
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, GovernanceProposal>(&DataKey::Proposal(id))
+            {
+                if include_inactive || (!proposal.executed && !proposal.cancelled) {
+                    result.push_back(proposal);
+                }
+            }
+        }
+
+        result
     }
 
     /// Cancel a governance proposal.
@@ -1384,5 +1430,85 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+    }
+
+    #[test]
+    fn test_list_proposals_enumeration_filtering_and_cap() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        // Before any proposal is created, list_proposals returns an empty vec
+        let empty_list = gov_client.list_proposals(&1, &10, &true);
+        assert_eq!(empty_list.len(), 0);
+
+        // from_id beyond NextProposalId returns empty vec
+        let beyond_list = gov_client.list_proposals(&999, &10, &true);
+        assert_eq!(beyond_list.len(), 0);
+
+        let proposer = Address::generate(&env);
+        let weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        // Create 25 proposals (IDs 1 through 25)
+        for _ in 0..25 {
+            gov_client.create_proposal(&proposer, &weights, &100, &10);
+        }
+
+        // Cancel proposal 2
+        gov_client.cancel_proposal(&proposer, &2);
+
+        // Register voter and execute proposal 3
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &3, &true, &150);
+        // Advance ledger sequence past expiry + execution delay (1 + 100 + 10 = 111)
+        env.ledger().with_mut(|l| l.sequence_number = 115);
+        gov_client.execute(&3);
+
+        // Verify proposal 2 is cancelled and proposal 3 is executed
+        assert!(gov_client.get_proposal(&2).unwrap().cancelled);
+        assert!(gov_client.get_proposal(&3).unwrap().executed);
+
+        // Test 1: include_inactive = true (returns 10 proposals)
+        let list_all_10 = gov_client.list_proposals(&1, &10, &true);
+        assert_eq!(list_all_10.len(), 10);
+        assert_eq!(list_all_10.get(0).unwrap().id, 1);
+        assert_eq!(list_all_10.get(1).unwrap().id, 2);
+        assert_eq!(list_all_10.get(2).unwrap().id, 3);
+        assert_eq!(list_all_10.get(9).unwrap().id, 10);
+
+        // Test 2: cap limit at 20 when limit > 20 is requested
+        let list_capped = gov_client.list_proposals(&1, &50, &true);
+        assert_eq!(list_capped.len(), 20);
+        assert_eq!(list_capped.get(0).unwrap().id, 1);
+        assert_eq!(list_capped.get(19).unwrap().id, 20);
+
+        // Test 3: Pagination with from_id = 21
+        let list_page2 = gov_client.list_proposals(&21, &10, &true);
+        assert_eq!(list_page2.len(), 5); // IDs 21, 22, 23, 24, 25
+        assert_eq!(list_page2.get(0).unwrap().id, 21);
+        assert_eq!(list_page2.get(4).unwrap().id, 25);
+
+        // Test 4: include_inactive = false (filters out cancelled ID 2 and executed ID 3)
+        let list_active = gov_client.list_proposals(&1, &5, &false);
+        assert_eq!(list_active.len(), 3); // IDs 1, 4, 5
+        assert_eq!(list_active.get(0).unwrap().id, 1);
+        assert_eq!(list_active.get(1).unwrap().id, 4);
+        assert_eq!(list_active.get(2).unwrap().id, 5);
+
+        // Test 5: limit = 0 returns empty vec
+        let list_zero = gov_client.list_proposals(&1, &0, &true);
+        assert_eq!(list_zero.len(), 0);
     }
 }
