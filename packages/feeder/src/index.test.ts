@@ -741,3 +741,158 @@ describe("parsePollIntervalMs", () => {
     expect(exitSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("Feeder oracle configuration handling", () => {
+  let consoleLogSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+  });
+
+  it("skips set_vc_count when identity oracle is configured", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return true (oracle is configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(true);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for update_tx_stats only
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should log that set_vc_count is being skipped due to cross-contract lookup
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "  skipping set_vc_count (cross-contract lookup configured)"
+    );
+
+    // Should have only submitted one transaction (update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    getHasIdentityOracleSpy.mockRestore();
+  });
+
+  it("skips set_vc_count when skipLegacyVcCount is explicitly enabled", async () => {
+    const configWithSkip: FeederConfig = {
+      ...config,
+      skipLegacyVcCount: true,
+    };
+    const feeder = new Feeder(configWithSkip, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return false (oracle not configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(false);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for update_tx_stats only
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should log that set_vc_count is being skipped due to explicit configuration
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "  skipping set_vc_count (skipLegacyVcCount enabled)"
+    );
+
+    // Should have only submitted one transaction (update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    getHasIdentityOracleSpy.mockRestore();
+  });
+
+  it("calls set_vc_count when neither oracle nor skipLegacyVcCount are configured", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return false (oracle not configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(false);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for both set_vc_count and update_tx_stats
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction
+      .mockResolvedValueOnce({
+        status: "PENDING",
+        hash: "set-vc-count-hash",
+      })
+      .mockResolvedValueOnce({
+        status: "PENDING",
+        hash: "update-tx-stats-hash",
+      });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should NOT have logged the skip message
+    const skipLogs = consoleLogSpy.mock.calls.filter(
+      (call: string[]) => call[0]?.includes("skipping set_vc_count")
+    );
+    expect(skipLogs).toHaveLength(0);
+
+    // Should have submitted two transactions (set_vc_count + update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(2);
+
+    // Should log the transaction hashes
+    expect(consoleLogSpy).toHaveBeenCalledWith("  set_vc_count tx   = set-vc-count-hash");
+    expect(consoleLogSpy).toHaveBeenCalledWith("  update_tx_stats tx = update-tx-stats-hash");
+
+    getHasIdentityOracleSpy.mockRestore();
+  }, 15_000);
+});

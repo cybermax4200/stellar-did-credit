@@ -638,6 +638,15 @@ impl CreditOracle {
         {
             return Err(CreditOracleError::FeederNotRegistered);
         }
+
+        // Emit deprecation warning if identity oracle is configured
+        if env.storage().instance().has(&DataKey::IdentityOracleId) {
+            env.events().publish(
+                (symbol_short!("VcCntDep"),),
+                (subject.clone(), count),
+            );
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::VcCount(subject), &count);
@@ -2540,6 +2549,81 @@ mod tests {
 
         let record = client.get_score(&user).unwrap();
         assert_eq!(record.vc_count, 4);
+    }
+
+    #[test]
+    fn test_set_vc_count_emits_deprecation_event_when_oracle_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        
+        // Configure identity oracle
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        // Clear any existing events from setup
+        env.events().all().len(); // Just to consume them
+        
+        // Call set_vc_count - should emit deprecation warning
+        client.set_vc_count(&feeder, &subject, &5);
+
+        // Check for VcCntDep event
+        let events = env.events().all();
+        let mut found_deprecation_event = false;
+        for i in 0..events.len() {
+            let (event_contract_id, topics, data) = events.get(i).unwrap();
+            if event_contract_id == contract_id && topics.len() == 1 {
+                let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if topic == symbol_short!("VcCntDep") {
+                    let (event_subject, event_count): (Address, u32) = data.try_into_val(&env).unwrap();
+                    assert_eq!(event_subject, subject);
+                    assert_eq!(event_count, 5);
+                    found_deprecation_event = true;
+                    break;
+                }
+            }
+        }
+        assert!(found_deprecation_event, "VcCntDep event should be emitted when identity oracle is configured");
+    }
+
+    #[test]
+    fn test_set_vc_count_no_deprecation_event_when_oracle_not_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        
+        // Clear any existing events from setup
+        env.events().all().len(); // Just to consume them
+        
+        // Call set_vc_count without oracle configured - should not emit deprecation warning
+        client.set_vc_count(&feeder, &subject, &3);
+
+        // Check that no VcCntDep event was emitted
+        let events = env.events().all();
+        for i in 0..events.len() {
+            let (event_contract_id, topics, _) = events.get(i).unwrap();
+            if event_contract_id == contract_id && topics.len() == 1 {
+                let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                assert_ne!(topic, symbol_short!("VcCntDep"), "VcCntDep event should not be emitted when oracle not configured");
+            }
+        }
     }
 
 }
