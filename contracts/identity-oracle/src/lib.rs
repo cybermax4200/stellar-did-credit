@@ -642,7 +642,7 @@ impl IdentityOracle {
         subject.require_auth();
 
         let len = did_doc_cid.len();
-        if len < 7 || len > MAX_CID_LENGTH {
+        if !(7..=MAX_CID_LENGTH).contains(&len) {
             return Err(IdentityOracleError::InvalidCID);
         }
 
