@@ -3,8 +3,6 @@ import {
   ScoreNotComputedError,
   MIN_SCORE,
   MAX_SCORE,
-} from "./index";
-import type {
   ScoreRecord,
   ProtocolConfig,
   TxStats,
@@ -13,8 +11,7 @@ import type {
   VCRecord,
   GovernanceProposal,
 } from "./index";
-import { xdr } from "@stellar/stellar-sdk";
-import type { Keypair } from "@stellar/stellar-sdk";
+import { xdr, Keypair } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();

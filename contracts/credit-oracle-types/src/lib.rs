@@ -8,9 +8,14 @@
 
 use soroban_sdk::{contracttype, Address, Env, IntoVal, Symbol};
 
+/// Minimum weight allowed for any individual scoring weight component (10%).
+/// Every component must contribute at least 10% to prevent degenerate scoring
+/// (e.g., setting a component weight to 0 silently disables that metric).
+pub const MIN_COMPONENT_WEIGHT: u32 = 10;
+
 /// Weights used in credit score calculation.
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ScoringWeights {
     /// Weight for verified credentials component.
     pub vc_weight: u32,
@@ -18,6 +23,16 @@ pub struct ScoringWeights {
     pub tx_weight: u32,
     /// Weight for repayment history component.
     pub repayment_weight: u32,
+}
+
+impl ScoringWeights {
+    /// Validates that scoring weights sum to 100 and that each component is at least `MIN_COMPONENT_WEIGHT`.
+    pub fn is_valid(&self) -> bool {
+        self.vc_weight >= MIN_COMPONENT_WEIGHT
+            && self.tx_weight >= MIN_COMPONENT_WEIGHT
+            && self.repayment_weight >= MIN_COMPONENT_WEIGHT
+            && (self.vc_weight + self.tx_weight + self.repayment_weight == 100)
+    }
 }
 
 /// Pending weights proposal with timelock.

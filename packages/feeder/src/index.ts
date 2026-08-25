@@ -67,6 +67,8 @@ export interface FeederConfig {
   maxRetries?: number;
   /** Base delay for exponential backoff, in milliseconds */
   retryBaseDelayMs?: number;
+  /** Whether to skip legacy set_vc_count calls when identity oracle is configured */
+  skipLegacyVcCount?: boolean;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -666,9 +668,14 @@ export class Feeder {
       () => this.getHasIdentityOracle(),
     );
 
-    // Step 3: submit set_vc_count (skip if cross-contract is configured)
-    if (identityOracleConfigured) {
-      console.log(`  skipping set_vc_count (cross-contract lookup configured)`);
+    // Step 3: submit set_vc_count (skip if cross-contract is configured or explicitly disabled)
+    const shouldSkipVcCount = identityOracleConfigured || this.config.skipLegacyVcCount === true;
+    
+    if (shouldSkipVcCount) {
+      const reason = identityOracleConfigured 
+        ? "cross-contract lookup configured" 
+        : "skipLegacyVcCount enabled";
+      console.log(`  skipping set_vc_count (${reason})`);
     } else {
       const vcCountTxHash = await withExponentialBackoff(
         `set_vc_count(${subjectAddress})`,

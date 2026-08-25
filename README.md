@@ -364,6 +364,33 @@ A feeder is a registered off-chain service that periodically calls two credit-or
 | `set_vc_count(feeder, subject, count)` | **Deprecated**: Caches the active VC count. Use cross-contract lookup via `set_identity_oracle` instead. |
 | `update_tx_stats(feeder, subject, stats)` | Pushes 30-day Horizon payment stats (volume, tx count, counterparties) |
 
+### Migration path for set_vc_count deprecation
+
+The `set_vc_count` function is deprecated in favor of cross-contract VC count lookup via the identity-oracle. When the credit-oracle has an identity-oracle configured via `set_identity_oracle`, the feeder will automatically skip `set_vc_count` calls and a deprecation warning event (`VcCntDep`) will be emitted if the function is still called.
+
+#### For feeder operators:
+
+1. **No immediate action required** — The feeder automatically detects when cross-contract lookup is configured and skips `set_vc_count` calls.
+
+2. **Optional explicit configuration** — Add `skipLegacyVcCount: true` to your `FeederConfig` to explicitly disable `set_vc_count` calls regardless of identity-oracle configuration:
+
+```typescript
+const config: FeederConfig = {
+  // ... other config
+  skipLegacyVcCount: true,  // Explicitly skip set_vc_count calls
+};
+```
+
+3. **Monitor deprecation events** — Watch for `VcCntDep` events if you're still calling `set_vc_count` on an oracle with identity-oracle configured. These indicate redundant calls that should be eliminated.
+
+#### For credit-oracle operators:
+
+1. **Phase 1** — Deploy and configure identity-oracle via `set_identity_oracle`
+2. **Phase 2** — Feeders automatically stop calling `set_vc_count`  
+3. **Phase 3** — Future contract version will remove `set_vc_count` entirely
+
+The migration is backward-compatible — existing feeders continue to work without modification.
+
 ### Prerequisites
 
 1. **Register the feeder on-chain** — the credit-oracle admin must call `register_feeder(admin, FEEDER_PUBLIC_KEY)` once before the feeder can submit data.
