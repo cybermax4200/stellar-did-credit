@@ -78,6 +78,10 @@ pub enum DataKey {
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
+// Persistent voter entries must survive long voting periods.
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+const PERS_TTL_EXTEND: u32 = 518_400;
+
 #[contracttype]
 #[derive(Clone)]
 /// An on-chain governance proposal for updating credit-oracle scoring weights.
@@ -295,6 +299,11 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoterWeight(voter.clone()))
             .ok_or(GovernanceError::VoterNotRegistered)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         // Check how much weight this voter has already used for this proposal
         let used_weight: i128 = env
@@ -302,6 +311,13 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoteWeightUsed(proposal_id, voter.clone()))
             .unwrap_or(0);
+        if used_weight > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        }
 
         let available_weight = total_weight - used_weight;
         if vote_weight > available_weight {
@@ -341,6 +357,11 @@ impl Governance {
         env.storage().persistent().set(
             &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
             &new_used_weight,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
         );
 
         // Store updated proposal
@@ -499,6 +520,11 @@ impl Governance {
         env.storage()
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         env.events()
             .publish((symbol_short!("VoterReg"), voter.clone()), weight);
@@ -539,6 +565,11 @@ impl Governance {
             env.storage()
                 .persistent()
                 .set(&DataKey::VoterWeight(voter.clone()), &weight);
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoterWeight(voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
         }
 
         env.events()
@@ -1268,6 +1299,50 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.votes_for, 60);
         assert_eq!(proposal.votes_against, 40);
+    }
+
+    #[test]
+    fn test_vote_weight_used_survives_long_voting_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 25,
+            repayment_weight: 25,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &100);
+        gov_client.vote(&voter, &proposal_id, &true, &60);
+
+        // Keep the proposal alive so this test isolates voter-entry TTLs.
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(500_001, 500_001);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Proposal(proposal_id),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        });
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number += 500_001;
+        });
+
+        gov_client.vote(&voter, &proposal_id, &false, &40);
+
+        assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 100);
+        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 0);
     }
 
     #[test]
