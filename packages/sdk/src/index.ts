@@ -80,6 +80,7 @@ export interface ProtocolConfig {
   baseFee?: string;
   confirmationTimeoutMs?: number;
   pollIntervalMs?: number;
+  network?: NetworkType;
 }
 
 export type Unsubscribe = () => void;
@@ -151,8 +152,9 @@ export function createNetworkConfig(
   return {
     ...networkDefaults,
     ...overrides,
-    network,
   };
+}
+
 export type GovernanceInteger = number | bigint;
 
 /**
