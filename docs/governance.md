@@ -29,7 +29,7 @@ Every proposal is a persisted struct with these fields (see `DataKey::Proposal(u
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `u64` | Monotonically assigned at creation, starting from 1. |
-| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100. |
+| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100 and each component weight must be at least 10 (`MIN_COMPONENT_WEIGHT`). |
 | `votes_for` | `i128` | Accumulated registered voting weight cast in favor. Saturating add. |
 | `votes_against` | `i128` | Accumulated registered voting weight cast against. Saturating add. |
 | `expiry_ledger` | `u32` | Ledger sequence after which `vote` is rejected (`ProposalExpired`). Set to `current_sequence + voting_period_ledgers` at creation. |
