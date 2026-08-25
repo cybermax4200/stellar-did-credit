@@ -1,5 +1,7 @@
 import {
   StellarDIDCreditSDK,
+  GovernanceClient,
+  GovernanceProposal,
   ScoreNotComputedError,
   MIN_SCORE,
   MAX_SCORE,
@@ -66,7 +68,10 @@ jest.mock("@stellar/stellar-sdk", () => ({
     setTimeout: jest.fn().mockReturnThis(),
     build: jest.fn().mockReturnValue({ operations: [] }),
   })),
-  nativeToScVal: (value: unknown) => ({ value }),
+  nativeToScVal: (value: unknown, options?: { type?: unknown }) => ({
+    value,
+    type: options?.type,
+  }),
   scValToNative: (scVal: { value?: unknown }) => scVal?.value,
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
@@ -91,6 +96,8 @@ const mockConfig = {
   identityOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   creditOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   revocationRegistryId:
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+  governanceId:
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   networkPassphrase: "Test SDF Network ; September 2015",
   rpcUrl: "http://localhost:8000",
@@ -124,6 +131,182 @@ describe("StellarDIDCreditSDK", () => {
       hash: "mock-tx-hash",
     });
     (jest.requireMock("@stellar/stellar-sdk").SorobanRpc.Server as jest.Mock).mockClear();
+  });
+
+  describe("governance", () => {
+    const governanceWeights: ScoringWeights = {
+      vcWeight: 50,
+      txWeight: 25,
+      repaymentWeight: 25,
+    };
+
+    beforeEach(() => {
+      mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+    });
+
+    it("creates a proposal with the governance contract and returns its ID", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: 7n } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposalId = await sdk.governance.createProposal(
+        subjectKeypair as never,
+        governanceWeights,
+        100,
+        50,
+      );
+
+      expect(proposalId).toBe(7n);
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockGetTransaction).toHaveBeenCalledWith("mock-tx-hash");
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.governanceId,
+        method: "create_proposal",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(4);
+      expect(mockContractCalls[0]?.args[2]).toMatchObject({
+        value: 100,
+        type: "u32",
+      });
+      expect(mockContractCalls[0]?.args[3]).toMatchObject({
+        value: 50,
+        type: "u32",
+      });
+    });
+
+    it("casts a vote with explicit u64 and i128 arguments", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.governance.vote(subjectKeypair as never, 7n, true, 100n),
+      ).resolves.toBe("mock-tx-hash");
+
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.governanceId,
+        method: "vote",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(4);
+      expect(mockContractCalls[0]?.args[1]).toMatchObject({
+        value: 7n,
+        type: "u64",
+      });
+      expect(mockContractCalls[0]?.args[3]).toMatchObject({
+        value: 100n,
+        type: "i128",
+      });
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+    });
+
+    it("decodes a governance proposal and returns null for an absent ID", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              id: 7n,
+              proposer: subjectAddress,
+              proposed_weights: {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+              },
+              votes_for: 100n,
+              votes_against: 20n,
+              expiry_ledger: 120,
+              execution_delay_ledgers: 50,
+              executed: false,
+              cancelled: false,
+              quorum_required: 100n,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposal = await sdk.governance.getProposal(7n);
+
+      expect(proposal).toEqual<GovernanceProposal>({
+        id: 7n,
+        proposer: subjectAddress,
+        proposedWeights: governanceWeights,
+        votesFor: 100n,
+        votesAgainst: 20n,
+        expiryLedger: 120,
+        executionDelayLedgers: 50,
+        executed: false,
+        cancelled: false,
+        quorumRequired: 100n,
+      });
+      expect(mockLastContractCall?.method).toBe("get_proposal");
+
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+      await expect(sdk.governance.getProposal(999n)).resolves.toBeNull();
+    });
+
+    it("executes and applies weights through signed governance calls", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.governance.execute(subjectKeypair as never, 7n)).resolves
+        .toBe("mock-tx-hash");
+      await expect(sdk.governance.applyWeights(subjectKeypair as never)).resolves
+        .toBe("mock-tx-hash");
+
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "execute",
+        "apply_weights",
+      ]);
+    });
+
+    it("lists proposals by scanning proposal IDs", async () => {
+      mockSimulateTransaction
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                id: 3n,
+                proposer: subjectAddress,
+                proposed_weights: {
+                  vc_weight: 50,
+                  tx_weight: 25,
+                  repayment_weight: 25,
+                },
+                votes_for: 1n,
+                votes_against: 0n,
+                expiry_ledger: 10,
+                execution_delay_ledgers: 0,
+                executed: false,
+                cancelled: false,
+                quorum_required: 1n,
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({ result: { retval: { value: null } } });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposals = await sdk.governance.listProposals(3n, 2);
+
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0]?.id).toBe(3n);
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "get_proposal",
+        "get_proposal",
+      ]);
+    });
+
+    it("exports GovernanceClient and requires governanceId", async () => {
+      expect(GovernanceClient).toBeDefined();
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        governanceId: undefined,
+      });
+
+      await expect(sdk.governance.getProposal(1n)).rejects.toThrow(
+        "governanceId is required",
+      );
+    });
   });
 
   describe("RPC server instance reuse", () => {
