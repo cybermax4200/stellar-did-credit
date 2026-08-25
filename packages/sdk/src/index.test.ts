@@ -125,6 +125,7 @@ describe("StellarDIDCreditSDK", () => {
       status: "PENDING",
       hash: "mock-tx-hash",
     });
+    mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
     (jest.requireMock("@stellar/stellar-sdk").SorobanRpc.Server as jest.Mock).mockClear();
   });
 
@@ -358,6 +359,32 @@ describe("StellarDIDCreditSDK", () => {
       expect(error.name).toBe("SDKError");
       expect(error.code).toBe("INVALID_VC_HASH");
     });
+
+    it("retries transient submission failures before confirming revocation", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("RPC request failed with 503"), {
+            response: { status: 503 },
+          }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-revoke-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.revokeVC(
+        issuerKeypair as never,
+        Buffer.alloc(32, 4),
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBe("retried-revoke-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-revoke-hash");
+    });
   });
 
   describe("anchorDID", () => {
@@ -426,6 +453,72 @@ describe("StellarDIDCreditSDK", () => {
         method: "anchor_did",
       });
     });
+
+    it("uses three default retries with exponential backoff", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-anchor-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk.anchorDID(subjectKeypair as never, "QmExampleCid");
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(3);
+
+      await jest.advanceTimersByTimeAsync(4000);
+
+      await expect(promise).resolves.toBe("retried-anchor-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(4);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-anchor-hash");
+    });
+
+    it("throws SDKError with TRANSACTION_TIMEOUT when confirmation never responds", async () => {
+      jest.useFakeTimers();
+      mockGetTransaction.mockReturnValue(new Promise(() => undefined));
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, timeoutSeconds: 1 });
+      const promise = sdk
+        .anchorDID(subjectKeypair as never, "QmExampleCid")
+        .catch((caught: unknown) => caught);
+
+      await jest.advanceTimersByTimeAsync(1000);
+      const error = await promise;
+
+      expect(error).toBeInstanceOf(SDKError);
+      expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
+      expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry permanent submission errors", async () => {
+      mockSendTransaction.mockRejectedValue(
+        Object.assign(new Error("bad request"), { response: { status: 400 } }),
+      );
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 3 });
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
+      ).rejects.toThrow("bad request");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("issueVC", () => {
@@ -471,6 +564,32 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.identityOracleId,
         method: "anchor_vc",
       });
+    });
+
+    it("retries TRY_AGAIN_LATER responses before confirming the transaction", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockResolvedValueOnce({
+          status: "TRY_AGAIN_LATER",
+          hash: "retry-later-hash",
+        })
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-vc-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.issueVC(
+        issuerKeypair as never,
+        subjectAddress,
+        Buffer.alloc(32, 1),
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBe("retried-vc-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-vc-hash");
     });
 
     it("rejects non-32-byte credential hashes", async () => {
@@ -698,6 +817,48 @@ describe("StellarDIDCreditSDK", () => {
         ),
       ).rejects.toThrow("Simulation failed: compute_score rejected");
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("retries transient submission failures before reading the confirmed score", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-compute-hash",
+        });
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: { retval: { value: null } } })
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                score: 640,
+                last_updated: 1_710_000_000,
+                vc_count: 4,
+                repayment_rate: 9000,
+                tx_volume_30d: 3_000_000n,
+                previous_score: 620,
+                computed_at_ledger: 1000001,
+                stale: false,
+              },
+            },
+          },
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.computeScore(
+        { publicKey: () => subjectAddress } as unknown as Keypair,
+        subjectAddress,
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toMatchObject({ score: 640 });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-compute-hash");
     });
   });
 
@@ -1343,4 +1504,3 @@ describe("listProposals", () => {
     });
   });
 });
-

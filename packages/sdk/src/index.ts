@@ -122,7 +122,7 @@ export class StellarDIDCreditSDK {
    * @param subjectKeypair - Stellar keypair of the subject (private + public key)
    * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
    * @param subjectAddress - Optional Stellar G... address of the subject for validation
-   * @returns Transaction hash on successful submission
+   * @returns Transaction hash after successful ledger confirmation
    * @throws Error if subjectAddress is provided and does not match subjectKeypair's public key
    */
   async anchorDID(
@@ -157,7 +157,7 @@ export class StellarDIDCreditSDK {
           nativeToScVal(didDocCid),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
@@ -175,14 +175,23 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(subjectKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
 
-    if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
-    }
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "anchorDID",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
+    );
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -194,7 +203,7 @@ export class StellarDIDCreditSDK {
    * @param issuerKeypair - Stellar keypair of the credential issuer
    * @param subjectAddress - Stellar G... address of the credential subject
    * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
-   * @returns Transaction hash on successful submission
+   * @returns Transaction hash after successful ledger confirmation
    */
   async issueVC(
     issuerKeypair: KeypairLike,
@@ -232,7 +241,7 @@ export class StellarDIDCreditSDK {
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
@@ -250,14 +259,23 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
 
-    if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
-    }
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "issueVC",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
+    );
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -313,19 +331,33 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(payerKeypair);
 
-    const response = await this.server.sendTransaction(preparedTx);
-
-    if (response.status !== "PENDING") {
-      if (response.errorResult && String(response.errorResult).toLowerCase().includes("cooldown")) {
-        throw new Error(`Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
-      }
-      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
-    }
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (submissionResponse) => {
+        if (
+          submissionResponse.errorResult &&
+          String(submissionResponse.errorResult)
+            .toLowerCase()
+            .includes("cooldown")
+        ) {
+          return new Error(
+            "Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
+          );
+        }
+        return new Error(
+          `Transaction submission failed: ${String(submissionResponse.errorResult)}`,
+        );
+      },
+    );
 
     await waitForTransactionConfirmation(
       this.server,
-      response.hash,
+      txHash,
       "computeScore",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
     );
 
     try {
@@ -523,23 +555,23 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
-
-    if (response.status !== "PENDING") {
-      throw createRevokeError(
-        `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
-        response.errorResult,
-      );
-    }
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        createRevokeError(
+          `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
+          response.errorResult,
+        ),
+    );
 
     try {
       await waitForTransactionConfirmation(
         server,
-        response.hash,
+        txHash,
         "revokeVC",
-        this.config.confirmationTimeoutMs ??
-          (this.config.timeoutSeconds ?? 30) * 1000,
+        getConfirmationTimeoutMs(this.config),
         this.config.pollIntervalMs ?? 1000,
       );
     } catch (error) {
@@ -549,7 +581,7 @@ export class StellarDIDCreditSDK {
       );
     }
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -1021,6 +1053,44 @@ function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
   });
 }
 
+type SendTransactionErrorFactory = (
+  response: SorobanRpc.Api.SendTransactionResponse,
+) => Error;
+
+async function sendTransactionWithRetry(
+  server: SorobanRpc.Server,
+  transaction: Parameters<SorobanRpc.Server["sendTransaction"]>[0],
+  maxRetries = 3,
+  errorFactory: SendTransactionErrorFactory,
+): Promise<string> {
+  const retries = normalizeMaxRetries(maxRetries);
+
+  for (let attempt = 0; ; attempt++) {
+    let response: SorobanRpc.Api.SendTransactionResponse;
+    try {
+      response = await server.sendTransaction(transaction);
+    } catch (error) {
+      if (!isRetryableError(error) || attempt >= retries) {
+        throw error;
+      }
+
+      await sleep(getRetryDelayMs(attempt));
+      continue;
+    }
+
+    // DUPLICATE means an earlier attempt already reached the RPC successfully.
+    if (response.status === "PENDING" || response.status === "DUPLICATE") {
+      return response.hash;
+    }
+
+    if (response.status !== "TRY_AGAIN_LATER" || attempt >= retries) {
+      throw errorFactory(response);
+    }
+
+    await sleep(getRetryDelayMs(attempt));
+  }
+}
+
 async function waitForTransactionConfirmation(
   server: SorobanRpc.Server,
   txHash: string,
@@ -1028,16 +1098,39 @@ async function waitForTransactionConfirmation(
   timeoutMs = 20_000,
   delayMs = 1000,
 ): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  let firstAttempt = true;
+  const normalizedTimeoutMs = Number.isFinite(timeoutMs)
+    ? Math.max(0, timeoutMs)
+    : 30_000;
+  const pollDelayMs = Number.isFinite(delayMs) ? Math.max(1, delayMs) : 1000;
+  const deadline = Date.now() + normalizedTimeoutMs;
 
-  while (firstAttempt || Date.now() <= deadline) {
-    firstAttempt = false;
-    const result = await server.getTransaction(txHash);
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throwTransactionTimeout(operationName, txHash);
+    }
 
-    const status = result.status as string;
+    let result: Awaited<ReturnType<SorobanRpc.Server["getTransaction"]>>;
+    try {
+      result = await withTimeout(
+        server.getTransaction(txHash),
+        deadline - Date.now(),
+        () => createTransactionTimeoutError(operationName, txHash),
+      );
+    } catch (error) {
+      if (error instanceof SDKError) {
+        throw error;
+      }
+      if (!isRetryableError(error)) {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throwTransactionTimeout(operationName, txHash);
+      }
+      await sleep(Math.min(pollDelayMs, deadline - Date.now()));
+      continue;
+    }
 
-    switch (status) {
+    switch (result.status as string) {
       case "SUCCESS":
         return;
       case "FAILED": {
@@ -1047,26 +1140,83 @@ async function waitForTransactionConfirmation(
         );
       }
       case "NOT_FOUND":
-      case "PENDING": {
-        const remainingMs = deadline - Date.now();
-        if (remainingMs <= 0) {
-          throw new Error(
-            `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
-          );
+      case "PENDING":
+        if (Date.now() >= deadline) {
+          throwTransactionTimeout(operationName, txHash);
         }
-        await sleep(Math.min(delayMs, remainingMs));
+        await sleep(Math.min(pollDelayMs, deadline - Date.now()));
         break;
-      }
       default:
         throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String((result as unknown as { status: string }).status)}`,
+          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
         );
     }
   }
+}
 
-  throw new Error(
+function createTransactionTimeoutError(
+  operationName: string,
+  txHash: string,
+): SDKError {
+  return new SDKError(
+    "TRANSACTION_TIMEOUT",
     `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
   );
+}
+
+function throwTransactionTimeout(operationName: string, txHash: string): never {
+  throw createTransactionTimeoutError(operationName, txHash);
+}
+
+function getConfirmationTimeoutMs(config: ProtocolConfig): number {
+  return (
+    config.confirmationTimeoutMs ??
+    (config.timeoutSeconds ?? 30) * 1000
+  );
+}
+
+function normalizeMaxRetries(maxRetries: number): number {
+  return Number.isFinite(maxRetries) ? Math.max(0, Math.floor(maxRetries)) : 3;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  return 1000 * 2 ** attempt;
+}
+
+function isRetryableError(error: unknown): boolean {
+  const candidate = error as {
+    code?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown; statusCode?: unknown };
+  } | null;
+
+  const httpStatus = [
+    candidate?.status,
+    candidate?.statusCode,
+    candidate?.response?.status,
+    candidate?.response?.statusCode,
+  ]
+    .map((status) => Number(status))
+    .find((status) => Number.isInteger(status) && status > 0);
+  if (httpStatus !== undefined) {
+    return [408, 429, 500, 502, 503, 504].includes(httpStatus);
+  }
+
+  const code = String(candidate?.code ?? "").toUpperCase();
+  if (
+    ["ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "ETIMEDOUT", "EAI_AGAIN"].includes(
+      code,
+    )
+  ) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
+  return /\b503\b|timeout|timed out|network|fetch failed|unavailable|socket/.test(message);
 }
 
 function createRevokeError(message: string, details: unknown): SDKError {
@@ -1078,7 +1228,10 @@ function createRevokeError(message: string, details: unknown): SDKError {
     );
   }
 
-  if (message.includes("Timed out waiting")) {
+  if (
+    details instanceof SDKError &&
+    details.code === "TRANSACTION_TIMEOUT"
+  ) {
     return new SDKError("TRANSACTION_TIMEOUT", message, { cause: details });
   }
 
@@ -1106,6 +1259,30 @@ function getErrorMessage(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  createError: () => Error,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(createError()),
+      Math.max(0, timeoutMs),
+    );
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function sleep(ms: number): Promise<void> {

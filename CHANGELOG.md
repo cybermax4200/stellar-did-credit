@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- TypeScript SDK (`@stellar-did-credit/sdk`): `anchorDID`, `issueVC`,
+  `revokeVC`, and `computeScore` now retry transient transaction submissions
+  with exponential backoff and wait for final transaction status. Confirmation
+  respects `ProtocolConfig.timeoutSeconds` and reports timeouts as `SDKError`
+  with code `TRANSACTION_TIMEOUT` (#501)
 - SDK (`@stellar-did-credit/sdk`): removed duplicate `revokeVC` method that referenced undefined helpers; added missing `SorobanRpc.Server` instance property to the class constructor; fixed `computeScore` to use the class-level server and inline helpers; resolved type error in `waitForTransactionConfirmation` where `GetTransactionStatus` union was compared against string literals (#161)
 - `credit-oracle`: `record_repayment` now records the public `amount` parameter in `RepaymentRecord.total_repaid` and includes capped repayment volume in the repayment score component (#221)
 
