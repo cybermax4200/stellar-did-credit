@@ -5,7 +5,7 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -421,6 +421,58 @@ impl Governance {
         env.events().publish(
             (symbol_short!("PropExec"), proposal_id),
             (proposal.votes_for, proposal.votes_against),
+        );
+
+        Ok(())
+    }
+
+    /// Cleanup VoteWeightUsed entries for a completed proposal.
+    ///
+    /// Only the contract admin can call this function. The proposal must be
+    /// executed (`proposal.executed == true`) before cleanup is allowed.
+    /// This removes all VoteWeightUsed entries for the specified voters on
+    /// the completed proposal.
+    ///
+    /// If the proposal is not executed, this is a no-op (not an error).
+    ///
+    /// Auth: `admin` must sign the transaction.
+    pub fn cleanup_proposal_votes(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+        voters: Vec<Address>,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        // No-op if proposal not executed
+        if !proposal.executed {
+            return Ok(());
+        }
+
+        // Remove VoteWeightUsed entries for each voter
+        for voter in voters.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::VoteWeightUsed(proposal_id, voter.clone()));
+        }
+
+        env.events().publish(
+            (symbol_short!("VCln"), proposal_id),
+            voters.len(),
         );
 
         Ok(())
