@@ -17,8 +17,10 @@ const sdk = new StellarDIDCreditSDK({
   identityOracleId: "C...",
   creditOracleId: "C...",
   revocationRegistryId: "C...",
+  governanceId: "C...",
   networkPassphrase: "Test SDF Network ; September 2015",
   rpcUrl: "https://soroban-testnet.stellar.org",
+  simAccount: "G...",
 });
 
 const score = await sdk.getScore("G...");
@@ -28,6 +30,18 @@ if (score) {
   console.log("No score computed yet");
 }
 ```
+
+## Transaction reliability
+
+`anchorDID`, `issueVC`, `revokeVC`, and `computeScore` retry transient
+submission failures with exponential backoff starting at one second. The
+default is three retries after the initial submission attempt. Set
+`maxRetries` to `0` to disable submission retries.
+
+All four methods wait for a final on-chain transaction status before
+returning. `timeoutSeconds` sets the total confirmation deadline and defaults
+to 30 seconds. A transaction that remains pending or receives no RPC response
+before the deadline throws `SDKError` with code `TRANSACTION_TIMEOUT`.
 
 ## API
 
@@ -66,6 +80,19 @@ The cooldown can be configured by the contract admin using `update_compute_coold
 | **Testnet** | `100` (~8 minutes) | Balances testing convenience with realistic network conditions. |
 | **Mainnet** | `17280` (~24 hours) | Prevents spam, reduces fees, and aligns with typical score update frequencies. |
 
+### `revokeVC(issuerKeypair: KeypairLike, vcHash: Buffer): Promise<string>`
+
+Submits a signed transaction to `revocation_registry.revoke(issuer, vc_hash)`
+and waits for final confirmation. The hash must be exactly 32 bytes.
+
+```typescript
+const txHash = await sdk.revokeVC(issuerKeypair, vcHash);
+```
+
+Use `confirmationTimeoutMs` and `pollIntervalMs` in `ProtocolConfig` to tune
+confirmation polling. Invalid hashes throw `SDKError` with code
+`INVALID_VC_HASH`; issuer mismatch failures use `NOT_REGISTERED_ISSUER`.
+
 ### SDK Method Status Table
 
 | Method | Status | Description |
@@ -81,6 +108,42 @@ The cooldown can be configured by the contract admin using `update_compute_coold
 | `getVCCount` | ✅ Implemented | Fetch count of active VCs for a subject |
 | `getWeights` | ✅ Implemented | Fetch contract scoring weight configuration |
 | `getRegisteredIssuers` | ✅ Implemented | List all registered trusted credential issuers |
+
+### Governance
+
+Set `governanceId` in `ProtocolConfig` to use the exported `GovernanceClient`
+through `sdk.governance`. The client wraps proposal creation, weighted voting,
+execution, application of scoring weights, and read-only proposal queries.
+
+```typescript
+const proposalId = await sdk.governance.createProposal(
+  proposerKeypair,
+  { vcWeight: 50, txWeight: 25, repaymentWeight: 25 },
+  17_280,
+  17_280,
+);
+
+await sdk.governance.vote(voterKeypair, proposalId, true, 100n);
+const proposal = await sdk.governance.getProposal(proposalId);
+const recentProposals = await sdk.governance.listProposals(1n, 10);
+
+// After voting closes and the proposal execution delay expires:
+await sdk.governance.execute(payerKeypair, proposalId);
+
+// After the credit-oracle's additional approximately 24-hour timelock:
+await sdk.governance.applyWeights(payerKeypair);
+```
+
+Governance uses a double timelock. Voting closes at the proposal's
+`expiryLedger`, and `execute` is available only after that plus the proposal's
+`executionDelayLedgers`. A successful `execute` queues the weights in the
+credit-oracle; it does not activate them. Wait approximately 24 hours, or
+until the credit-oracle pending record's `effective_ledger`, before calling
+`applyWeights`.
+
+`GovernanceProposal` mirrors the Rust contract struct. Its `id`, vote tallies,
+and `quorumRequired` fields are `bigint`, preserving Soroban `u64` and `i128`
+values without JavaScript precision loss.
 
 ## Error handling
 

@@ -3,6 +3,7 @@
  *
  * Usage:
  *   ISSUER_SECRET=YOUR_STELLAR_SECRET_KEY npm run issue -- --subject GSUBJECT... --kyc-level basic --country NG
+ *   ISSUER_SECRET=YOUR_STELLAR_SECRET_KEY npm run issue -- --subject GSUBJECT... --revoke
  *
  * Required environment variables:
  *   ISSUER_SECRET        — Stellar secret key of a registered issuer (starts with S)
@@ -31,6 +32,10 @@ function parseArgs(argv: string[]): Record<string, string> {
     const arg = argv[i];
     if (arg.startsWith("--")) {
       const key = arg.slice(2);
+      if (key === "revoke") {
+        args[key] = "true";
+        continue;
+      }
       const value = argv[i + 1] ?? "";
       args[key] = value;
       i++;
@@ -44,6 +49,7 @@ const args = parseArgs(process.argv.slice(2));
 let subjectAddress = args["subject"];
 const kycLevel = args["kyc-level"] ?? "basic";
 const country = args["country"] ?? "XX";
+const revokeAfterIssue = args["revoke"] === "true";
 
 if (!subjectAddress) {
   console.error("Error: --subject <G... or C...> is required");
@@ -149,24 +155,40 @@ async function main(): Promise<void> {
   console.log("  Issuer :", issuerAddress);
   console.log("  Subject:", subjectAddress);
 
-  const txHash = await sdk.issueVC(issuerKeypair, subjectAddress, vcHash);
+  const issueTxHash = await sdk.issueVC(
+    issuerKeypair,
+    subjectAddress,
+    vcHash
+  );
 
   console.log("\nSuccess!");
-  console.log("  Transaction hash:", txHash);
+  console.log("  Transaction hash:", issueTxHash);
   console.log(
     "  View on explorer:",
-    `https://stellar.expert/explorer/testnet/tx/${txHash}`
+    `https://stellar.expert/explorer/testnet/tx/${issueTxHash}`
   );
 
   // Verify the anchor is readable
   const confirmed = await sdk.verifyVC(subjectAddress, vcHash);
   console.log("  Verified on-chain:", confirmed);
 
+  let revocationTxHash: string | undefined;
+  if (revokeAfterIssue) {
+    console.log("\nRevoking credential hash on-chain...");
+    revocationTxHash = await sdk.revokeVC(issuerKeypair, vcHash);
+    console.log("  Revocation transaction hash:", revocationTxHash);
+    console.log(
+      "  View on explorer:",
+      `https://stellar.expert/explorer/testnet/tx/${revocationTxHash}`
+    );
+  }
+
   // Print the off-chain VC and its hash — the issuer should store both
   console.log("\n--- Store this record off-chain ---");
   console.log({
     vcHash: vcHash.toString("hex"),
-    txHash,
+    issueTxHash,
+    revocationTxHash,
     subject: subjectAddress,
     issuer: issuerAddress,
     anchoredAt: new Date().toISOString(),

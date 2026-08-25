@@ -29,7 +29,7 @@ Every proposal is a persisted struct with these fields (see `DataKey::Proposal(u
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `u64` | Monotonically assigned at creation, starting from 1. |
-| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100. |
+| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100 and each component weight must be at least 10 (`MIN_COMPONENT_WEIGHT`). |
 | `votes_for` | `i128` | Accumulated registered voting weight cast in favor. Saturating add. |
 | `votes_against` | `i128` | Accumulated registered voting weight cast against. Saturating add. |
 | `expiry_ledger` | `u32` | Ledger sequence after which `vote` is rejected (`ProposalExpired`). Set to `current_sequence + voting_period_ledgers` at creation. |
@@ -439,6 +439,7 @@ No auth, no side effects.
 | `get_voter_weight` | `(env, voter: Address) -> Option<i128>` | Registered total weight, or `None` if not registered. |
 | `get_vote_weight_used` | `(env, proposal_id: u64, voter: Address) -> i128` | Used weight on a specific proposal. 0 if never voted. |
 | `get_available_vote_weight` | `(env, proposal_id: u64, voter: Address) -> i128` | `total_weight - used_weight`. 0 if not registered (total defaults to 0). |
+| `list_proposals` | `(env, from_id: u64, limit: u32, include_inactive: bool) -> Vec<GovernanceProposal>` | Enumerates up to `limit` (max 20) proposals starting from `from_id`. Skips non-existent proposals and filters inactive (cancelled/executed) proposals unless `include_inactive` is true. Returns empty vector if `from_id >= NextProposalId`. |
 
 ---
 
@@ -499,7 +500,17 @@ Also subscribe to credit-oracle events for the downstream weight-change steps:
 
 ### 4.4 TypeScript SDK
 
-The governance contract is currently **not exposed in `packages/sdk/src/index.ts`** (as of the workspace state at time of writing). Score-reading methods are implemented; `anchorDID`, `issueVC`, and governance helpers are listed as open/planned. Integration from TypeScript today should use the generic `SorobanRpc.Server` + contract spec directly, calling the same function names and argument order documented above. The `ScoringWeights` struct type IS already exported by the SDK (per CHANGELOG #20), so callers can reuse it for proposal and pending-weight payloads.
+The SDK exposes `GovernanceClient` as `sdk.governance` when
+`ProtocolConfig.governanceId` is configured. It provides signed helpers for
+`createProposal`, `vote`, `execute`, and `applyWeights`, plus read-only
+`getProposal` and `listProposals` helpers. See
+[`packages/sdk/README.md`](../packages/sdk/README.md#governance) for the
+TypeScript API and examples.
+
+`listProposals` scans the contract's monotonically increasing proposal IDs
+because the governance contract exposes `get_proposal` but does not expose a
+bulk list entrypoint. Its `fromId` and `limit` arguments therefore bound the
+number of read-only simulations performed by the client.
 
 ---
 
@@ -533,7 +544,7 @@ The governance contract is currently **not exposed in `packages/sdk/src/index.ts
 
 ### 5.5 Proposal ID and Creation Order
 
-IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. There is no reverse index of `proposer → proposal_ids` or a paginated list; off-chain indexers should track `PropCreat` events to build a proposal list.
+IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. Proposals can be enumerated on-chain using `list_proposals(from_id, limit, include_inactive)`. Off-chain indexers can also track `PropCreat` events.
 
 ### 5.6 No Proposal Expiry Cleanup
 

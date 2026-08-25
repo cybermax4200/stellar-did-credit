@@ -1,24 +1,26 @@
 import {
   StellarDIDCreditSDK,
+  GovernanceClient,
+  SDKError,
   ScoreNotComputedError,
   MIN_SCORE,
   MAX_SCORE,
-} from "./index";
-import type {
   ScoreRecord,
   ProtocolConfig,
   TxStats,
   ScoringWeights,
   RepaymentRecord,
   VCRecord,
+  GovernanceProposal,
 } from "./index";
-import { xdr } from "@stellar/stellar-sdk";
-import type { Keypair } from "@stellar/stellar-sdk";
+import { xdr, Keypair } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
 const mockSendTransaction = jest.fn();
 const mockGetTransaction = jest.fn();
+const mockGetEvents = jest.fn();
+const mockGetLatestLedger = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -43,6 +45,9 @@ jest.mock("@stellar/stellar-sdk", () => ({
     },
     ScVal: {
       scvVoid: () => ({ switch: () => "scvVoid" }),
+      scvSymbol: (symbol: string) => ({
+        toXDR: () => `symbol:${symbol}`,
+      }),
     },
   },
   Keypair: {},
@@ -69,7 +74,10 @@ jest.mock("@stellar/stellar-sdk", () => ({
     setTimeout: jest.fn().mockReturnThis(),
     build: jest.fn().mockReturnValue({ operations: [] }),
   })),
-  nativeToScVal: (value: unknown) => ({ value }),
+  nativeToScVal: (value: unknown, options?: { type?: unknown }) => ({
+    value,
+    type: options?.type,
+  }),
   scValToNative: (scVal: { value?: unknown }) => scVal?.value,
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
@@ -77,6 +85,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
       sendTransaction: mockSendTransaction,
       simulateTransaction: mockSimulateTransaction,
       getTransaction: mockGetTransaction,
+      getEvents: mockGetEvents,
+      getLatestLedger: mockGetLatestLedger,
     })),
     assembleTransaction: jest.fn().mockReturnValue({
       build: jest.fn().mockReturnValue({
@@ -94,6 +104,8 @@ const mockConfig = {
   identityOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   creditOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   revocationRegistryId:
+    "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+  governanceId:
     "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   networkPassphrase: "Test SDF Network ; September 2015",
   rpcUrl: "http://localhost:8000",
@@ -118,6 +130,8 @@ describe("StellarDIDCreditSDK", () => {
     mockGetAccount.mockReset();
     mockSendTransaction.mockReset();
     mockGetTransaction.mockReset();
+    mockGetEvents.mockReset();
+    mockGetLatestLedger.mockReset();
     mockContractCalls.length = 0;
     mockLastContractCall = undefined;
     mockGetAccount.mockResolvedValue({ sequenceNumber: () => "1" });
@@ -126,7 +140,184 @@ describe("StellarDIDCreditSDK", () => {
       status: "PENDING",
       hash: "mock-tx-hash",
     });
+    mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
     (jest.requireMock("@stellar/stellar-sdk").SorobanRpc.Server as jest.Mock).mockClear();
+  });
+
+  describe("governance", () => {
+    const governanceWeights: ScoringWeights = {
+      vcWeight: 50,
+      txWeight: 25,
+      repaymentWeight: 25,
+    };
+
+    beforeEach(() => {
+      mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+    });
+
+    it("creates a proposal with the governance contract and returns its ID", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: 7n } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposalId = await sdk.governance.createProposal(
+        subjectKeypair as never,
+        governanceWeights,
+        100,
+        50,
+      );
+
+      expect(proposalId).toBe(7n);
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockGetTransaction).toHaveBeenCalledWith("mock-tx-hash");
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.governanceId,
+        method: "create_proposal",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(4);
+      expect(mockContractCalls[0]?.args[2]).toMatchObject({
+        value: 100,
+        type: "u32",
+      });
+      expect(mockContractCalls[0]?.args[3]).toMatchObject({
+        value: 50,
+        type: "u32",
+      });
+    });
+
+    it("casts a vote with explicit u64 and i128 arguments", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.governance.vote(subjectKeypair as never, 7n, true, 100n),
+      ).resolves.toBe("mock-tx-hash");
+
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.governanceId,
+        method: "vote",
+      });
+      expect(mockContractCalls[0]?.args).toHaveLength(4);
+      expect(mockContractCalls[0]?.args[1]).toMatchObject({
+        value: 7n,
+        type: "u64",
+      });
+      expect(mockContractCalls[0]?.args[3]).toMatchObject({
+        value: 100n,
+        type: "i128",
+      });
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+    });
+
+    it("decodes a governance proposal and returns null for an absent ID", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              id: 7n,
+              proposer: subjectAddress,
+              proposed_weights: {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+              },
+              votes_for: 100n,
+              votes_against: 20n,
+              expiry_ledger: 120,
+              execution_delay_ledgers: 50,
+              executed: false,
+              cancelled: false,
+              quorum_required: 100n,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposal = await sdk.governance.getProposal(7n);
+
+      expect(proposal).toEqual<GovernanceProposal>({
+        id: 7n,
+        proposer: subjectAddress,
+        proposedWeights: governanceWeights,
+        votesFor: 100n,
+        votesAgainst: 20n,
+        expiryLedger: 120,
+        executionDelayLedgers: 50,
+        executed: false,
+        cancelled: false,
+        quorumRequired: 100n,
+      });
+      expect(mockLastContractCall?.method).toBe("get_proposal");
+
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+      await expect(sdk.governance.getProposal(999n)).resolves.toBeNull();
+    });
+
+    it("executes and applies weights through signed governance calls", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.governance.execute(subjectKeypair as never, 7n)).resolves
+        .toBe("mock-tx-hash");
+      await expect(sdk.governance.applyWeights(subjectKeypair as never)).resolves
+        .toBe("mock-tx-hash");
+
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "execute",
+        "apply_weights",
+      ]);
+    });
+
+    it("lists proposals by scanning proposal IDs", async () => {
+      mockSimulateTransaction
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                id: 3n,
+                proposer: subjectAddress,
+                proposed_weights: {
+                  vc_weight: 50,
+                  tx_weight: 25,
+                  repayment_weight: 25,
+                },
+                votes_for: 1n,
+                votes_against: 0n,
+                expiry_ledger: 10,
+                execution_delay_ledgers: 0,
+                executed: false,
+                cancelled: false,
+                quorum_required: 1n,
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({ result: { retval: { value: null } } });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposals = await sdk.governance.listProposals(3n, 2);
+
+      expect(proposals).toHaveLength(1);
+      expect(proposals[0]?.id).toBe(3n);
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "get_proposal",
+        "get_proposal",
+      ]);
+    });
+
+    it("exports GovernanceClient and requires governanceId", async () => {
+      expect(GovernanceClient).toBeDefined();
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        governanceId: undefined,
+      });
+
+      await expect(sdk.governance.getProposal(1n)).rejects.toThrow(
+        "governanceId is required",
+      );
+    });
   });
 
   describe("RPC server instance reuse", () => {
@@ -161,6 +352,143 @@ describe("StellarDIDCreditSDK", () => {
       await sdk.isVerified(subjectAddress);
 
       expect(serverMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("event subscriptions", () => {
+    const issuer = "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const vcHash = Buffer.alloc(32, 7);
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("polls VCAnch pages, decodes each event, and stops after unsubscribe", async () => {
+      mockGetEvents
+        .mockResolvedValueOnce({
+          latestLedger: 101,
+          events: [
+            {
+              ledger: 100,
+              value: {
+                value: [issuer, subjectAddress, vcHash],
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          latestLedger: 102,
+          events: [
+            {
+              ledger: 102,
+              value: {
+                value: [issuer, subjectAddress, Buffer.alloc(32, 8)],
+              },
+            },
+          ],
+        });
+
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 10,
+      });
+      const received: Array<[string, string, Buffer]> = [];
+      const unsubscribe = sdk.onVCAnchored(
+        mockConfig.identityOracleId,
+        (eventIssuer, eventSubject, eventHash) => {
+          received.push([eventIssuer, eventSubject, eventHash]);
+        },
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(received).toEqual([[issuer, subjectAddress, vcHash]]);
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startLedger: 100,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [mockConfig.identityOracleId],
+              topics: [["symbol:VCAnch"]],
+            },
+          ],
+        }),
+      );
+
+      await jest.advanceTimersByTimeAsync(10);
+      expect(received).toEqual([
+        [issuer, subjectAddress, vcHash],
+        [issuer, subjectAddress, Buffer.alloc(32, 8)],
+      ]);
+      expect(mockGetEvents).toHaveBeenLastCalledWith(
+        expect.objectContaining({ startLedger: 102 }),
+      );
+
+      unsubscribe();
+      await jest.advanceTimersByTimeAsync(10);
+      expect(mockGetEvents).toHaveBeenCalledTimes(2);
+    });
+
+    it("decodes Score and Revoked event tuples", async () => {
+      mockGetEvents
+        .mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            {
+              ledger: 100,
+              value: { value: [subjectAddress, 612] },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            {
+              ledger: 100,
+              value: { value: [issuer, vcHash] },
+            },
+          ],
+        });
+
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 10,
+      });
+      const scoreCallback = jest.fn();
+      const revokeCallback = jest.fn();
+      const stopScore = sdk.onScoreComputed(
+        mockConfig.creditOracleId,
+        scoreCallback,
+      );
+      const stopRevoke = sdk.onVCRevoked(
+        mockConfig.revocationRegistryId,
+        revokeCallback,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scoreCallback).toHaveBeenCalledWith(subjectAddress, 612);
+      expect(revokeCallback).toHaveBeenCalledWith(issuer, vcHash);
+
+      stopScore();
+      stopRevoke();
+    });
+
+    it("rejects an invalid polling interval", () => {
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 0,
+      });
+
+      expect(() =>
+        sdk.onScoreComputed(mockConfig.creditOracleId, jest.fn()),
+      ).toThrow("pollIntervalMs must be a positive number");
     });
   });
 
@@ -214,11 +542,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
-      const result = await sdk.revokeVC(
-        issuerKeypair as never,
-        subjectAddress,
-        vcHash,
-      );
+      const result = await sdk.revokeVC(issuerKeypair as never, vcHash);
 
       expect(result).toBe("mock-tx-hash");
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
@@ -229,17 +553,99 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.revocationRegistryId,
         method: "revoke",
       });
-      expect(mockContractCalls[0]?.args).toHaveLength(3);
+      expect(mockContractCalls[0]?.args).toHaveLength(2);
     });
 
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
-      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(31)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "INVALID_VC_HASH",
+        message: "vcHash must be exactly 32 bytes",
+      });
       expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a missing revocation registry configuration", async () => {
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        revocationRegistryId: "",
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "MISSING_REVOCATION_REGISTRY",
+      });
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps IssuerMismatch simulation failures to NOT_REGISTERED_ISSUER", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps confirmed IssuerMismatch failures to NOT_REGISTERED_ISSUER", async () => {
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+    });
+
+    it("polls a pending transaction until it succeeds", async () => {
+      mockGetTransaction
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 100,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 7)),
+      ).resolves.toBe("mock-tx-hash");
+      expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws a typed error when confirmation times out", async () => {
+      mockGetTransaction.mockResolvedValue({ status: "PENDING" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 0,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 8)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "TRANSACTION_TIMEOUT",
+      });
     });
 
     it("reports simulation failures before changing either contract", async () => {
@@ -249,11 +655,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC simulation failed; no revocation state was changed: Error(Contract, #4)",
       );
@@ -272,14 +674,44 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes",
       );
+    });
+
+    it("exports SDKError with its code", () => {
+      const error = new SDKError("INVALID_VC_HASH", "invalid hash");
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe("SDKError");
+      expect(error.code).toBe("INVALID_VC_HASH");
+    });
+
+    it("retries transient submission failures before confirming revocation", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("RPC request failed with 503"), {
+            response: { status: 503 },
+          }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-revoke-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.revokeVC(
+        issuerKeypair as never,
+        Buffer.alloc(32, 4),
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBe("retried-revoke-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-revoke-hash");
     });
   });
 
@@ -349,6 +781,72 @@ describe("StellarDIDCreditSDK", () => {
         method: "anchor_did",
       });
     });
+
+    it("uses three default retries with exponential backoff", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockRejectedValueOnce(
+          Object.assign(new Error("service unavailable"), { status: 503 }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-anchor-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk.anchorDID(subjectKeypair as never, "QmExampleCid");
+
+      await jest.advanceTimersByTimeAsync(0);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+
+      await jest.advanceTimersByTimeAsync(1000);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+
+      await jest.advanceTimersByTimeAsync(2000);
+      expect(mockSendTransaction).toHaveBeenCalledTimes(3);
+
+      await jest.advanceTimersByTimeAsync(4000);
+
+      await expect(promise).resolves.toBe("retried-anchor-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(4);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-anchor-hash");
+    });
+
+    it("throws SDKError with TRANSACTION_TIMEOUT when confirmation never responds", async () => {
+      jest.useFakeTimers();
+      mockGetTransaction.mockReturnValue(new Promise(() => undefined));
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, timeoutSeconds: 1 });
+      const promise = sdk
+        .anchorDID(subjectKeypair as never, "QmExampleCid")
+        .catch((caught: unknown) => caught);
+
+      await jest.advanceTimersByTimeAsync(1000);
+      const error = await promise;
+
+      expect(error).toBeInstanceOf(SDKError);
+      expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
+      expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("does not retry permanent submission errors", async () => {
+      mockSendTransaction.mockRejectedValue(
+        Object.assign(new Error("bad request"), { response: { status: 400 } }),
+      );
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 3 });
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
+      ).rejects.toThrow("bad request");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
   });
 
   describe("issueVC", () => {
@@ -394,6 +892,32 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.identityOracleId,
         method: "anchor_vc",
       });
+    });
+
+    it("retries TRY_AGAIN_LATER responses before confirming the transaction", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockResolvedValueOnce({
+          status: "TRY_AGAIN_LATER",
+          hash: "retry-later-hash",
+        })
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-vc-hash",
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.issueVC(
+        issuerKeypair as never,
+        subjectAddress,
+        Buffer.alloc(32, 1),
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toBe("retried-vc-hash");
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-vc-hash");
     });
 
     it("rejects non-32-byte credential hashes", async () => {
@@ -621,6 +1145,48 @@ describe("StellarDIDCreditSDK", () => {
         ),
       ).rejects.toThrow("Simulation failed: compute_score rejected");
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("retries transient submission failures before reading the confirmed score", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction
+        .mockRejectedValueOnce(
+          Object.assign(new Error("request timed out"), { code: "ETIMEDOUT" }),
+        )
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "retried-compute-hash",
+        });
+      mockSimulateTransaction
+        .mockResolvedValueOnce({ result: { retval: { value: null } } })
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                score: 640,
+                last_updated: 1_710_000_000,
+                vc_count: 4,
+                repayment_rate: 9000,
+                tx_volume_30d: 3_000_000n,
+                previous_score: 620,
+                computed_at_ledger: 1000001,
+                stale: false,
+              },
+            },
+          },
+        });
+
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, maxRetries: 1 });
+      const promise = sdk.computeScore(
+        { publicKey: () => subjectAddress } as unknown as Keypair,
+        subjectAddress,
+      );
+
+      await jest.advanceTimersByTimeAsync(1000);
+
+      await expect(promise).resolves.toMatchObject({ score: 640 });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("retried-compute-hash");
     });
   });
 
@@ -1196,11 +1762,76 @@ describe("test_all_exports_are_defined", () => {
     const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
     const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, previousScore: null, computedAtLedger: 0, stale: false };
     const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
+    const _govProp: GovernanceProposal = { id: 1n, proposer: "G", proposedWeights: _weights, votesFor: 0n, votesAgainst: 0n, expiryLedger: 0, executionDelayLedgers: 0, executed: false, cancelled: false, quorumRequired: 100n };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
     expect(_repayment).toBeDefined();
     expect(_vc).toBeDefined();
     expect(_score).toBeDefined();
     expect(_config).toBeDefined();
+    expect(_govProp).toBeDefined();
+  });
+});
+
+describe("listProposals", () => {
+  it("throws error if governanceId is not configured", async () => {
+    const sdk = new StellarDIDCreditSDK({
+      ...mockConfig,
+      governanceId: undefined,
+    });
+    await expect(sdk.listProposals(1, 10)).rejects.toThrow(
+      "governanceId is not configured in ProtocolConfig",
+    );
+  });
+
+  it("calls list_proposals contract method and parses result correctly", async () => {
+    const configWithGov = {
+      ...mockConfig,
+      governanceId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGOV1",
+    };
+    const sdk = new StellarDIDCreditSDK(configWithGov);
+
+    const mockProposalsRaw = [
+      {
+        id: 1n,
+        proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+        proposed_weights: {
+          vc_weight: 40,
+          tx_weight: 30,
+          repayment_weight: 30,
+        },
+        votes_for: 100n,
+        votes_against: 0n,
+        expiry_ledger: 1000,
+        execution_delay_ledgers: 100,
+        executed: false,
+        cancelled: false,
+        quorum_required: 100n,
+      },
+    ];
+
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: { value: mockProposalsRaw } },
+    });
+
+    const proposals = await sdk.listProposals(1, 10, true);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toEqual({
+      id: 1n,
+      proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+      proposedWeights: {
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      },
+      votesFor: 100n,
+      votesAgainst: 0n,
+      expiryLedger: 1000,
+      executionDelayLedgers: 100,
+      executed: false,
+      cancelled: false,
+      quorumRequired: 100n,
+    });
   });
 });

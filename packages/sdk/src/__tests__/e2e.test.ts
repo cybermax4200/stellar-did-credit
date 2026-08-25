@@ -55,6 +55,7 @@ describeE2E("E2E: deployed testnet contracts", () => {
       identityOracleId: contracts["identity-oracle"],
       creditOracleId: contracts["credit-oracle"],
       revocationRegistryId: contracts["revocation-registry"],
+      governanceId: contracts["governance"],
       networkPassphrase: NETWORK_PASSPHRASE,
       rpcUrl: RPC_URL,
       simAccount: subjectKeypair.publicKey(),
@@ -80,5 +81,27 @@ describeE2E("E2E: deployed testnet contracts", () => {
   it("computeScore persists a score and getScore returns score > MIN_SCORE", async () => {
     const record = await sdk.computeScore(subjectKeypair, subjectKeypair.publicKey());
     expect(record.score).toBeGreaterThan(MIN_SCORE);
+  }, TIMEOUT_MS);
+
+  it.skip("documents the complete governance proposal lifecycle", async () => {
+    // The governance contract must already own credit-oracle admin rights and
+    // the issuer keypair must be registered as a voter for this lifecycle.
+    const proposalId = await sdk.governance.createProposal(
+      issuerKeypair,
+      { vcWeight: 45, txWeight: 30, repaymentWeight: 25 },
+      1,
+      1,
+    );
+    await sdk.governance.vote(issuerKeypair, proposalId, true, 1);
+
+    // Wait for the governance voting period and execution delay, then execute.
+    // The successful execute only queues weights in credit-oracle.
+    const proposal = await sdk.governance.getProposal(proposalId);
+    expect(proposal?.id).toBe(proposalId);
+    await sdk.governance.execute(issuerKeypair, proposalId);
+
+    // Wait roughly 24 hours, or poll credit-oracle.get_pending_weights() until
+    // its effective_ledger is reached, before applying the queued weights.
+    await sdk.governance.applyWeights(issuerKeypair);
   }, TIMEOUT_MS);
 });

@@ -54,17 +54,57 @@ export interface VCRecord {
   revoked: boolean;
 }
 
+export interface GovernanceProposal {
+  id: bigint;
+  proposer: string;
+  proposedWeights: ScoringWeights;
+  votesFor: bigint;
+  votesAgainst: bigint;
+  expiryLedger: number;
+  executionDelayLedgers: number;
+  executed: boolean;
+  cancelled: boolean;
+  quorumRequired: bigint;
+}
+
 export interface ProtocolConfig {
   identityOracleId: string;
   creditOracleId: string;
   revocationRegistryId: string;
+  governanceId?: string;
   networkPassphrase: string;
   rpcUrl: string;
   simAccount: string;
   timeoutSeconds?: number;
   maxRetries?: number;
   baseFee?: string;
-  network?: NetworkType;
+  confirmationTimeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+export type Unsubscribe = () => void;
+
+export type SDKErrorCode =
+  | "INVALID_VC_HASH"
+  | "MISSING_REVOCATION_REGISTRY"
+  | "NOT_REGISTERED_ISSUER"
+  | "TRANSACTION_FAILED"
+  | "TRANSACTION_TIMEOUT";
+
+export class SDKError extends Error {
+  constructor(
+    public readonly code: SDKErrorCode,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message);
+    if (options?.cause !== undefined) {
+      this.cause = options.cause;
+    }
+    this.name = "SDKError";
+  }
+
+  declare readonly cause?: unknown;
 }
 
 /**
@@ -113,10 +153,268 @@ export function createNetworkConfig(
     ...overrides,
     network,
   };
+export type GovernanceInteger = number | bigint;
+
+/**
+ * Client for the governance contract's proposal and weight-management flow.
+ *
+ * A successful proposal passes through two independent timelocks: the
+ * governance execution delay, followed by the credit-oracle's fixed
+ * approximately 24-hour timelock. Callers must wait for the first delay before
+ * `execute`, then wait for the credit-oracle pending record's effective ledger
+ * before calling `applyWeights`.
+ */
+export class GovernanceClient {
+  private readonly server: SorobanRpc.Server;
+
+  constructor(
+    private readonly config: ProtocolConfig,
+    server?: SorobanRpc.Server,
+  ) {
+    this.server = server ?? new SorobanRpc.Server(config.rpcUrl);
+  }
+
+  /**
+   * Create a scoring-weight proposal and return its on-chain ID.
+   *
+   * This starts the governance voting window. If the proposal passes, callers
+   * must still wait for its governance execution delay, call `execute`, wait
+   * approximately 24 hours for the credit-oracle timelock, and then call
+   * `applyWeights` before the new weights become active.
+   */
+  async createProposal(
+    proposerKeypair: Keypair,
+    weights: ScoringWeights,
+    votingPeriodLedgers: number,
+    executionDelayLedgers: number,
+  ): Promise<bigint> {
+    const proposer = getPublicKey(proposerKeypair);
+    const contract = this.governanceContract();
+    const result = await this.submitSignedTransaction(
+      proposerKeypair,
+      contract.call(
+        "create_proposal",
+        new Address(proposer).toScVal(),
+        scoringWeightsToScVal(weights),
+        nativeToScVal(votingPeriodLedgers, { type: "u32" }),
+        nativeToScVal(executionDelayLedgers, { type: "u32" }),
+      ),
+      "createProposal",
+    );
+
+    if (!result.retval) {
+      throw new Error("createProposal returned no proposal ID");
+    }
+    return BigInt(scValToNative(result.retval) as bigint | number | string);
+  }
+
+  /**
+   * Cast a weighted vote on an open proposal.
+   *
+   * Voting only affects the proposal's governance phase. A successful vote
+   * does not start the credit-oracle timelock; that happens only after the
+   * voting period and governance execution delay have elapsed and `execute`
+   * succeeds.
+   */
+  async vote(
+    voterKeypair: Keypair,
+    proposalId: GovernanceInteger,
+    voteFor: boolean,
+    voteWeight: GovernanceInteger,
+  ): Promise<string> {
+    const voter = getPublicKey(voterKeypair);
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        voterKeypair,
+        contract.call(
+          "vote",
+          new Address(voter).toScVal(),
+          nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+          nativeToScVal(voteFor),
+          nativeToScVal(toPositiveBigInt(voteWeight), { type: "i128" }),
+        ),
+        "vote",
+      )
+    ).hash;
+  }
+
+  /**
+   * Execute a proposal after voting and the governance execution delay finish.
+   *
+   * For a passing proposal, this queues the new weights in the credit-oracle;
+   * it does not activate them. Callers must wait approximately 24 hours, or
+   * until the credit-oracle pending record's `effective_ledger`, before calling
+   * `applyWeights` to complete the second timelock.
+   */
+  async execute(
+    payerKeypair: Keypair,
+    proposalId: GovernanceInteger,
+  ): Promise<string> {
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        payerKeypair,
+        contract.call(
+          "execute",
+          nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+        ),
+        "execute",
+      )
+    ).hash;
+  }
+
+  /**
+   * Apply weights queued by a previously executed passing proposal.
+   *
+   * This call must be made only after the credit-oracle's fixed timelock has
+   * expired, approximately 24 hours after `execute` at the normal five-second
+   * ledger cadence. Calling earlier is rejected by the credit-oracle.
+   */
+  async applyWeights(payerKeypair: Keypair): Promise<string> {
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        payerKeypair,
+        contract.call("apply_weights"),
+        "applyWeights",
+      )
+    ).hash;
+  }
+
+  /**
+   * Fetch one governance proposal, or `null` when the ID is not present.
+   *
+   * An `executed` proposal may still have weights pending in the
+   * credit-oracle. The new weights become active only after the second,
+   * approximately 24-hour timelock and a successful `applyWeights` call.
+   */
+  async getProposal(
+    proposalId: GovernanceInteger,
+  ): Promise<GovernanceProposal | null> {
+    const contract = this.governanceContract();
+    const retval = await this.simulateRead(
+      contract.call(
+        "get_proposal",
+        nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+      ),
+    );
+    const native = scValToNative(retval);
+    return native === null || native === undefined
+      ? null
+      : parseGovernanceProposal(native);
+  }
+
+  /**
+   * Fetch proposals by scanning the contract's monotonically increasing IDs.
+   *
+   * The governance contract exposes `get_proposal`, but no list endpoint, so
+   * this helper performs up to `limit` read-only RPC simulations starting at
+   * `fromId` and omits IDs that no longer have stored proposals.
+   * Proposal execution state does not imply active weights until the
+   * credit-oracle timelock has elapsed and `applyWeights` succeeds.
+   */
+  async listProposals(
+    fromId: GovernanceInteger,
+    limit: number,
+  ): Promise<GovernanceProposal[]> {
+    if (!Number.isInteger(limit) || limit < 0) {
+      throw new Error("limit must be a non-negative integer");
+    }
+
+    const firstId = toUnsignedBigInt(fromId);
+    const proposals: GovernanceProposal[] = [];
+    for (let offset = 0n; offset < BigInt(limit); offset += 1n) {
+      const proposal = await this.getProposal(firstId + offset);
+      if (proposal) {
+        proposals.push(proposal);
+      }
+    }
+    return proposals;
+  }
+
+  private governanceContract(): Contract {
+    if (!this.config.governanceId?.trim()) {
+      throw new Error(
+        "governanceId is required to use the governance client",
+      );
+    }
+    return new Contract(this.config.governanceId);
+  }
+
+  private async simulateRead(operation: xdr.Operation): Promise<xdr.ScVal> {
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+    const retval = sim.result?.retval;
+    if (!retval) {
+      throw new Error("No return value in simulation result");
+    }
+    return retval;
+  }
+
+  private async submitSignedTransaction(
+    keypair: Keypair,
+    operation: xdr.Operation,
+    operationName: string,
+  ): Promise<{ hash: string; retval?: xdr.ScVal }> {
+    const publicKey = getPublicKey(keypair);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(
+      publicKey,
+      accountData.sequenceNumber(),
+    );
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`${operationName} simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error(`${operationName} simulation returned unexpected response`);
+    }
+
+    const retval = sim.result?.retval;
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(keypair);
+    const response = await this.server.sendTransaction(preparedTx);
+    if (response.status !== "PENDING") {
+      throw new Error(
+        `${operationName} transaction submission failed: ${response.errorResult}`,
+      );
+    }
+
+    await waitForTransactionConfirmation(
+      this.server,
+      response.hash,
+      operationName,
+    );
+    return { hash: response.hash, retval };
+  }
 }
 
 export class StellarDIDCreditSDK {
   private server: SorobanRpc.Server;
+  public readonly governance: GovernanceClient;
 
   constructor(config: ProtocolConfig) {
     // Apply network defaults if network is specified but URL fields are missing
@@ -131,6 +429,7 @@ export class StellarDIDCreditSDK {
     }
 
     this.server = new SorobanRpc.Server(this.config.rpcUrl);
+    this.governance = new GovernanceClient(this.config, this.server);
   }
 
   private config: ProtocolConfig;
@@ -144,7 +443,7 @@ export class StellarDIDCreditSDK {
    * @param subjectKeypair - Stellar keypair of the subject (private + public key)
    * @param didDocCid - IPFS CID of the DID document (e.g. "Qm...")
    * @param subjectAddress - Optional Stellar G... address of the subject for validation
-   * @returns Transaction hash on successful submission
+   * @returns Transaction hash after successful ledger confirmation
    * @throws Error if subjectAddress is provided and does not match subjectKeypair's public key
    */
   async anchorDID(
@@ -179,7 +478,7 @@ export class StellarDIDCreditSDK {
           nativeToScVal(didDocCid),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
@@ -197,14 +496,23 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(subjectKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
 
-    if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
-    }
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "anchorDID",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
+    );
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -216,7 +524,7 @@ export class StellarDIDCreditSDK {
    * @param issuerKeypair - Stellar keypair of the credential issuer
    * @param subjectAddress - Stellar G... address of the credential subject
    * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
-   * @returns Transaction hash on successful submission
+   * @returns Transaction hash after successful ledger confirmation
    */
   async issueVC(
     issuerKeypair: KeypairLike,
@@ -254,7 +562,7 @@ export class StellarDIDCreditSDK {
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
@@ -272,14 +580,23 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
 
-    if (response.status !== "PENDING") {
-      throw new Error(`Transaction submission failed: ${response.errorResult}`);
-    }
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "issueVC",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
+    );
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -335,19 +652,33 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(payerKeypair);
 
-    const response = await this.server.sendTransaction(preparedTx);
-
-    if (response.status !== "PENDING") {
-      if (response.errorResult && String(response.errorResult).toLowerCase().includes("cooldown")) {
-        throw new Error(`Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
-      }
-      throw new Error(`Transaction submission failed: ${String(response.errorResult)}`);
-    }
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (submissionResponse) => {
+        if (
+          submissionResponse.errorResult &&
+          String(submissionResponse.errorResult)
+            .toLowerCase()
+            .includes("cooldown")
+        ) {
+          return new Error(
+            "Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
+          );
+        }
+        return new Error(
+          `Transaction submission failed: ${String(submissionResponse.errorResult)}`,
+        );
+      },
+    );
 
     await waitForTransactionConfirmation(
       this.server,
-      response.hash,
+      txHash,
       "computeScore",
+      getConfirmationTimeoutMs(this.config),
+      this.config.pollIntervalMs ?? 1000,
     );
 
     try {
@@ -466,25 +797,33 @@ export class StellarDIDCreditSDK {
   /**
    * Revoke a verifiable credential by its hash.
    *
-   * Submits one Soroban operation to the revocation-registry. The registry calls
-   * `mark_vc_revoked` on the identity-oracle in the same contract invocation.
-   * Soroban transactions execute atomically, so a failure in either contract
-   * discards every state change made by the invocation.
-   *
-   * @see https://developers.stellar.org/docs/learn/fundamentals/contract-development/contract-interactions/transaction-simulation
+   * The issuer signs one transaction calling `revocation_registry.revoke`.
+   * The registry is responsible for synchronizing the identity-oracle state.
+   * A submitted transaction is polled until it succeeds, fails, or reaches
+   * the configured confirmation deadline.
    *
    * @param issuerKeypair - Stellar keypair of the credential issuer
-   * @param subjectAddress - Stellar G... address of the credential subject
    * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
    * @returns Transaction hash after successful ledger confirmation
+   * @throws SDKError with code `INVALID_VC_HASH` for a non-32-byte hash
+   * @throws SDKError with code `NOT_REGISTERED_ISSUER` for `IssuerMismatch`
    */
   async revokeVC(
     issuerKeypair: KeypairLike,
-    subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
     if (vcHash.length !== 32) {
-      throw new Error("vcHash must be exactly 32 bytes");
+      throw new SDKError(
+        "INVALID_VC_HASH",
+        "vcHash must be exactly 32 bytes",
+      );
+    }
+
+    if (!this.config.revocationRegistryId.trim()) {
+      throw new SDKError(
+        "MISSING_REVOCATION_REGISTRY",
+        "revocationRegistryId is required to revoke a VC",
+      );
     }
 
     const server = this.server;
@@ -510,24 +849,25 @@ export class StellarDIDCreditSDK {
         registryContract.call(
           "revoke",
           new Address(publicKey).toScVal(),
-          new Address(subjectAddress).toScVal(),
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(
+      throw createRevokeError(
         `revokeVC simulation failed; no revocation state was changed: ${sim.error}`,
+        sim.error,
       );
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error(
+      throw new SDKError(
+        "TRANSACTION_FAILED",
         "revokeVC simulation returned an unexpected response; no revocation state was changed",
       );
     }
@@ -536,25 +876,33 @@ export class StellarDIDCreditSDK {
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
     preparedTx.sign(issuerKeypair as Keypair);
 
-    // Submit to the network
-    const response = await server.sendTransaction(preparedTx);
-
-    if (response.status !== "PENDING") {
-      throw new Error(
-        `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
-      );
-    }
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        createRevokeError(
+          `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
+          response.errorResult,
+        ),
+    );
 
     try {
-      await waitForTransactionConfirmation(server, response.hash, "revokeVC");
+      await waitForTransactionConfirmation(
+        server,
+        txHash,
+        "revokeVC",
+        getConfirmationTimeoutMs(this.config),
+        this.config.pollIntervalMs ?? 1000,
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes: ${message}`,
+      throw createRevokeError(
+        `revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes: ${getErrorMessage(error)}`,
+        error,
       );
     }
 
-    return response.hash;
+    return txHash;
   }
 
   /**
@@ -866,6 +1214,210 @@ export class StellarDIDCreditSDK {
     const native = scValToNative(resultScVal);
     return (native as unknown[]).map((addr) => String(addr));
   }
+
+  /**
+   * List governance proposals starting from `fromId` up to `limit`.
+   *
+   * Uses a read-only simulation against the governance contract.
+   *
+   * @param fromId - Proposal ID to start listing from
+   * @param limit - Maximum number of proposals to fetch (capped at 20 on-chain)
+   * @param includeInactive - Whether to include executed or cancelled proposals (default false)
+   * @returns Array of GovernanceProposal objects
+   */
+  async listProposals(
+    fromId: number | bigint,
+    limit: number,
+    includeInactive = false,
+  ): Promise<GovernanceProposal[]> {
+    if (!this.config.governanceId) {
+      throw new Error("governanceId is not configured in ProtocolConfig");
+    }
+
+    const server = this.server;
+    const contract = new Contract(this.config.governanceId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "list_proposals",
+          nativeToScVal(BigInt(fromId), { type: "u64" }),
+          nativeToScVal(limit, { type: "u32" }),
+          nativeToScVal(includeInactive, { type: "bool" }),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseGovernanceProposalList(resultScVal);
+  }
+
+  /**
+   * Poll for VCAnch events emitted by an identity-oracle contract.
+   *
+   * The first poll starts at the latest ledger returned by the RPC server.
+   * Subsequent polls begin after the latest ledger seen by this subscription.
+   *
+   * @param contractId - Identity-oracle contract ID to monitor
+   * @param callback - Called with the issuer, subject, and 32-byte VC hash
+   * @returns A function that stops future polls for this subscription
+   */
+  onVCAnchored(
+    contractId: string,
+    callback: (issuer: string, subject: string, vcHash: Buffer) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "VCAnch",
+      (value) => {
+        const [issuer, subject, vcHash] = parseEventTuple(
+          value,
+          "VCAnch",
+          3,
+        );
+        callback(String(issuer), String(subject), toBuffer(vcHash));
+      },
+    );
+  }
+
+  /**
+   * Poll for Score events emitted by a credit-oracle contract.
+   *
+   * @param contractId - Credit-oracle contract ID to monitor
+   * @param callback - Called with the subject address and computed score
+   * @returns A function that stops future polls for this subscription
+   */
+  onScoreComputed(
+    contractId: string,
+    callback: (subject: string, score: number) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "Score",
+      (value) => {
+        const [subject, score] = parseEventTuple(value, "Score", 2);
+        callback(String(subject), Number(score));
+      },
+    );
+  }
+
+  /**
+   * Poll for Revoked events emitted by a revocation-registry contract.
+   *
+   * @param contractId - Revocation-registry contract ID to monitor
+   * @param callback - Called with the issuer and 32-byte VC hash
+   * @returns A function that stops future polls for this subscription
+   */
+  onVCRevoked(
+    contractId: string,
+    callback: (issuer: string, vcHash: Buffer) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "Revoked",
+      (value) => {
+        const [issuer, vcHash] = parseEventTuple(value, "Revoked", 2);
+        callback(String(issuer), toBuffer(vcHash));
+      },
+    );
+  }
+
+  private subscribeToEvents(
+    contractId: string,
+    eventName: string,
+    handleValue: (value: xdr.ScVal) => void,
+  ): Unsubscribe {
+    const pollIntervalMs = this.config.pollIntervalMs ?? 1000;
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new Error("pollIntervalMs must be a positive number");
+    }
+
+    let active = true;
+    let polling = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastSeenLedger: number | undefined;
+
+    const poll = async (): Promise<void> => {
+      if (!active || polling) {
+        return;
+      }
+
+      polling = true;
+      try {
+        if (lastSeenLedger === undefined) {
+          const latestLedger = await this.server.getLatestLedger();
+          lastSeenLedger = latestLedger.sequence;
+        }
+
+        if (!active) {
+          return;
+        }
+
+        const response = await this.server.getEvents({
+          startLedger: lastSeenLedger,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [contractId],
+              topics: [[xdr.ScVal.scvSymbol(eventName).toXDR("base64")]],
+            },
+          ],
+          limit: 100,
+        });
+
+        const latestEventLedger = response.events.reduce(
+          (highestLedger, event) => Math.max(highestLedger, event.ledger),
+          lastSeenLedger,
+        );
+        lastSeenLedger =
+          Math.max(response.latestLedger, latestEventLedger) + 1;
+
+        for (const event of response.events) {
+          if (!active) {
+            break;
+          }
+          handleValue(event.value);
+        }
+      } catch {
+        // Keep polling after transient RPC failures. The ledger cursor is only
+        // advanced after a successful getEvents response.
+      } finally {
+        polling = false;
+        if (active) {
+          timer = setTimeout(() => void poll(), pollIntervalMs);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      active = false;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
@@ -874,6 +1426,53 @@ export class ScoreNotComputedError extends Error {
     super(address ? `No score computed for address: ${address}` : "Score has not been computed");
     this.name = "ScoreNotComputedError";
   }
+}
+
+function getPublicKey(keypair: KeypairLike): string {
+  return typeof keypair.publicKey === "function"
+    ? keypair.publicKey()
+    : keypair.publicKey;
+}
+
+function toUnsignedBigInt(value: GovernanceInteger): bigint {
+  assertSafeInteger(value);
+  const result = BigInt(value);
+  if (result < 0n) {
+    throw new Error("integer values must be non-negative");
+  }
+  return result;
+}
+
+function toPositiveBigInt(value: GovernanceInteger): bigint {
+  assertSafeInteger(value);
+  const result = BigInt(value);
+  if (result <= 0n) {
+    throw new Error("voteWeight must be positive");
+  }
+  return result;
+}
+
+function assertSafeInteger(value: GovernanceInteger): void {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new Error("number values must be safe integers; use bigint instead");
+  }
+}
+
+function scoringWeightsToScVal(weights: ScoringWeights): xdr.ScVal {
+  return nativeToScVal(
+    {
+      vc_weight: weights.vcWeight,
+      tx_weight: weights.txWeight,
+      repayment_weight: weights.repaymentWeight,
+    },
+    {
+      type: {
+        vc_weight: ["symbol", "u32"],
+        tx_weight: ["symbol", "u32"],
+        repayment_weight: ["symbol", "u32"],
+      },
+    },
+  );
 }
 
 /**
@@ -916,6 +1515,40 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
   };
 }
 
+function parseGovernanceProposal(native: unknown): GovernanceProposal {
+  if (typeof native !== "object" || native === null) {
+    throw new Error("get_proposal returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  const weights = raw["proposed_weights"];
+  if (typeof weights !== "object" || weights === null) {
+    throw new Error("get_proposal returned invalid proposed weights");
+  }
+
+  const rawWeights = weights as Record<string, unknown>;
+  return {
+    id: BigInt(raw["id"] as bigint | number | string),
+    proposer: String(raw["proposer"]),
+    proposedWeights: {
+      vcWeight: Number(rawWeights["vc_weight"]),
+      txWeight: Number(rawWeights["tx_weight"]),
+      repaymentWeight: Number(rawWeights["repayment_weight"]),
+    },
+    votesFor: BigInt(raw["votes_for"] as bigint | number | string),
+    votesAgainst: BigInt(
+      raw["votes_against"] as bigint | number | string,
+    ),
+    expiryLedger: Number(raw["expiry_ledger"]),
+    executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
+    executed: Boolean(raw["executed"]),
+    cancelled: Boolean(raw["cancelled"]),
+    quorumRequired: BigInt(
+      raw["quorum_required"] as bigint | number | string,
+    ),
+  };
+}
+
 /**
  * Parse a Soroban ScVal representing a `Vec<VCRecord>`.
  * The identity-oracle serializes `vc_hash` (BytesN<32>) as raw bytes, so
@@ -940,19 +1573,138 @@ function parseVCRecordList(scVal: xdr.ScVal): VCRecord[] {
   });
 }
 
+/**
+ * Parse a Soroban ScVal representing a `Vec<GovernanceProposal>`.
+ */
+function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined) {
+    return [];
+  }
+  return (native as unknown[]).map((entry) => {
+    const raw = entry as Record<string, unknown>;
+    const weights = raw["proposed_weights"] as Record<string, unknown>;
+    return {
+      id: BigInt(raw["id"] as bigint | number | string),
+      proposer: String(raw["proposer"]),
+      proposedWeights: {
+        vcWeight: Number(weights["vc_weight"]),
+        txWeight: Number(weights["tx_weight"]),
+        repaymentWeight: Number(weights["repayment_weight"]),
+      },
+      votesFor: BigInt(raw["votes_for"] as bigint | number | string),
+      votesAgainst: BigInt(raw["votes_against"] as bigint | number | string),
+      expiryLedger: Number(raw["expiry_ledger"]),
+      executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
+      executed: Boolean(raw["executed"]),
+      cancelled: Boolean(raw["cancelled"]),
+      quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
+    };
+  });
+}
+
+type SendTransactionErrorFactory = (
+  response: SorobanRpc.Api.SendTransactionResponse,
+) => Error;
+
+async function sendTransactionWithRetry(
+  server: SorobanRpc.Server,
+  transaction: Parameters<SorobanRpc.Server["sendTransaction"]>[0],
+  maxRetries = 3,
+  errorFactory: SendTransactionErrorFactory,
+): Promise<string> {
+  const retries = normalizeMaxRetries(maxRetries);
+
+  for (let attempt = 0; ; attempt++) {
+    let response: SorobanRpc.Api.SendTransactionResponse;
+    try {
+      response = await server.sendTransaction(transaction);
+    } catch (error) {
+      if (!isRetryableError(error) || attempt >= retries) {
+        throw error;
+      }
+
+      await sleep(getRetryDelayMs(attempt));
+      continue;
+    }
+
+    // DUPLICATE means an earlier attempt already reached the RPC successfully.
+    if (response.status === "PENDING" || response.status === "DUPLICATE") {
+      return response.hash;
+    }
+
+    if (response.status !== "TRY_AGAIN_LATER" || attempt >= retries) {
+      throw errorFactory(response);
+    }
+
+    await sleep(getRetryDelayMs(attempt));
+  }
+}
+
+function parseEventTuple(
+  scVal: xdr.ScVal,
+  eventName: string,
+  expectedLength: number,
+): unknown[] {
+  const native = scValToNative(scVal);
+  if (!Array.isArray(native) || native.length !== expectedLength) {
+    throw new Error(
+      `${eventName} event data must be a tuple with ${expectedLength} values`,
+    );
+  }
+  return native;
+}
+
+function toBuffer(value: unknown): Buffer {
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+  throw new Error("event data contains an invalid byte value");
+}
+
 async function waitForTransactionConfirmation(
   server: SorobanRpc.Server,
   txHash: string,
   operationName: string,
-  attempts = 20,
+  timeoutMs = 20_000,
   delayMs = 1000,
 ): Promise<void> {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    const result = await server.getTransaction(txHash);
+  const normalizedTimeoutMs = Number.isFinite(timeoutMs)
+    ? Math.max(0, timeoutMs)
+    : 30_000;
+  const pollDelayMs = Number.isFinite(delayMs) ? Math.max(1, delayMs) : 1000;
+  const deadline = Date.now() + normalizedTimeoutMs;
 
-    const status = result.status as string;
+  for (;;) {
+    if (Date.now() >= deadline) {
+      throwTransactionTimeout(operationName, txHash);
+    }
 
-    switch (status) {
+    let result: Awaited<ReturnType<SorobanRpc.Server["getTransaction"]>>;
+    try {
+      result = await withTimeout(
+        server.getTransaction(txHash),
+        deadline - Date.now(),
+        () => createTransactionTimeoutError(operationName, txHash),
+      );
+    } catch (error) {
+      if (error instanceof SDKError) {
+        throw error;
+      }
+      if (!isRetryableError(error)) {
+        throw error;
+      }
+      if (Date.now() >= deadline) {
+        throwTransactionTimeout(operationName, txHash);
+      }
+      await sleep(Math.min(pollDelayMs, deadline - Date.now()));
+      continue;
+    }
+
+    switch (result.status as string) {
       case "SUCCESS":
         return;
       case "FAILED": {
@@ -963,18 +1715,148 @@ async function waitForTransactionConfirmation(
       }
       case "NOT_FOUND":
       case "PENDING":
-        await sleep(delayMs);
+        if (Date.now() >= deadline) {
+          throwTransactionTimeout(operationName, txHash);
+        }
+        await sleep(Math.min(pollDelayMs, deadline - Date.now()));
         break;
       default:
         throw new Error(
-          `Unexpected transaction status for ${txHash}: ${String((result as unknown as { status: string }).status)}`,
+          `Unexpected transaction status for ${txHash}: ${String(result.status)}`,
         );
     }
   }
+}
 
-  throw new Error(
+function createTransactionTimeoutError(
+  operationName: string,
+  txHash: string,
+): SDKError {
+  return new SDKError(
+    "TRANSACTION_TIMEOUT",
     `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
   );
+}
+
+function throwTransactionTimeout(operationName: string, txHash: string): never {
+  throw createTransactionTimeoutError(operationName, txHash);
+}
+
+function getConfirmationTimeoutMs(config: ProtocolConfig): number {
+  return (
+    config.confirmationTimeoutMs ??
+    (config.timeoutSeconds ?? 30) * 1000
+  );
+}
+
+function normalizeMaxRetries(maxRetries: number): number {
+  return Number.isFinite(maxRetries) ? Math.max(0, Math.floor(maxRetries)) : 3;
+}
+
+function getRetryDelayMs(attempt: number): number {
+  return 1000 * 2 ** attempt;
+}
+
+function isRetryableError(error: unknown): boolean {
+  const candidate = error as {
+    code?: unknown;
+    status?: unknown;
+    statusCode?: unknown;
+    response?: { status?: unknown; statusCode?: unknown };
+  } | null;
+
+  const httpStatus = [
+    candidate?.status,
+    candidate?.statusCode,
+    candidate?.response?.status,
+    candidate?.response?.statusCode,
+  ]
+    .map((status) => Number(status))
+    .find((status) => Number.isInteger(status) && status > 0);
+  if (httpStatus !== undefined) {
+    return [408, 429, 500, 502, 503, 504].includes(httpStatus);
+  }
+
+  const code = String(candidate?.code ?? "").toUpperCase();
+  if (
+    ["ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "ETIMEDOUT", "EAI_AGAIN"].includes(
+      code,
+    )
+  ) {
+    return true;
+  }
+
+  const message =
+    error instanceof Error
+      ? error.message.toLowerCase()
+      : String(error).toLowerCase();
+  return /\b503\b|timeout|timed out|network|fetch failed|unavailable|socket/.test(message);
+}
+
+function createRevokeError(message: string, details: unknown): SDKError {
+  if (containsIssuerMismatch(details)) {
+    return new SDKError(
+      "NOT_REGISTERED_ISSUER",
+      "The issuer is not registered for this VC hash",
+      { cause: details },
+    );
+  }
+
+  if (
+    details instanceof SDKError &&
+    details.code === "TRANSACTION_TIMEOUT"
+  ) {
+    return new SDKError("TRANSACTION_TIMEOUT", message, { cause: details });
+  }
+
+  return new SDKError("TRANSACTION_FAILED", message, { cause: details });
+}
+
+function containsIssuerMismatch(value: unknown): boolean {
+  const text = getErrorMessage(value).toLowerCase();
+  return (
+    text.includes("issuermismatch") ||
+    text.includes("issuer mismatch") ||
+    /error\(contract,\s*#3\)/i.test(text)
+  );
+}
+
+function getErrorMessage(value: unknown): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  createError: () => Error,
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(createError()),
+      Math.max(0, timeoutMs),
+    );
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
 }
 
 function sleep(ms: number): Promise<void> {

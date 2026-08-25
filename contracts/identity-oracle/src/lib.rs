@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 //! Identity oracle contract for the Stellar DID Credit protocol.
 //!
 //! Manages trusted credential issuers, DID document anchoring, and
@@ -102,7 +102,13 @@ pub enum IdentityOracleError {
     ContractPaused = 8,
     /// The provided revocation registry contract is invalid or did not respond.
     InvalidRevocationRegistry = 9,
+    /// The subject has reached the maximum number of active VCs allowed.
+    VCLimitReached = 10,
 }
+
+/// Maximum number of active (non-revoked) VCs a subject can have anchored.
+/// Prevents unbounded Vec growth and gas exhaustion on read paths.
+const MAX_VCS_PER_SUBJECT: u32 = 100;
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -339,6 +345,67 @@ fn load_active_vc_count(env: &Env, subject: &Address) -> Option<u32> {
     env.storage()
         .persistent()
         .get(&DataKey::ActiveVCCount(subject.clone()))
+}
+
+/// Shared core logic for both `deactivate_did` and `deactivate_identity`.
+///
+/// 1. Sets the `Deactivated` flag so `is_deactivated` returns `true` and
+///    `is_verified` / credit scoring are suppressed, regardless of which
+///    of the two public entry points was used.
+/// 2. Marks every anchored VC for the subject as revoked.
+/// 3. Zeroes the cached active-VC count.
+/// 4. Bumps the `total_vcs_revoked` protocol stat.
+///
+/// Does **not** touch the DID document CID or emit any event — callers are
+/// responsible for those two pieces, since that's the only place the two
+/// public functions actually differ.
+///
+/// Returns the number of VCs that transitioned from active to revoked.
+fn deactivate_core(env: &Env, subject: &Address) -> u32 {
+    // 1. Set the Deactivated flag
+    let flag_key = DataKey::Deactivated(subject.clone());
+    env.storage().persistent().set(&flag_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&flag_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+    // 2. Revoke all VCs anchored for this subject
+    let key = DataKey::VCAnchors(subject.clone());
+    let anchors: Vec<VCRecord> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+
+    let mut updated = Vec::new(env);
+    let mut revoked_count: u32 = 0;
+    for mut record in anchors.iter() {
+        if !record.revoked {
+            revoked_count += 1;
+        }
+        record.revoked = true;
+        updated.push_back(record);
+    }
+
+    if !anchors.is_empty() {
+        env.storage().persistent().set(&key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    }
+
+    if revoked_count > 0 {
+        increment_vcs_revoked(env, revoked_count as u64);
+    }
+
+    // 3. Clear cached active VC count
+    let active_key = DataKey::ActiveVCCount(subject.clone());
+    env.storage().persistent().set(&active_key, &0u32);
+    env.storage()
+        .persistent()
+        .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+    revoked_count
 }
 
 #[contractimpl]
@@ -605,49 +672,38 @@ impl IdentityOracle {
             .get(&DataKey::DIDDocument(subject))
     }
 
-    /// Deactivate the subject's DID.
+    /// Deactivate the subject's DID. This is the **canonical, full**
+    /// deactivation path — prefer this over `deactivate_identity`
+    /// unless you specifically need to keep the DID document resolvable
+    /// (see that function's doc comment for when that applies).
     ///
-    /// 1. Revokes all active verifiable credentials anchored for the subject.
-    /// 2. Removes the anchored DID Document CID.
-    /// 3. Emits a `DIDDeact` event.
+    /// 1. Sets the same `Deactivated` flag used by `deactivate_identity`,
+    ///    so `is_deactivated` returns `true` and `is_verified` /
+    ///    credit scoring are suppressed for this subject via `credit-oracle`.
+    /// 2. Revokes all active verifiable credentials anchored for the subject.
+    /// 3. Removes the anchored DID Document CID entirely — after this call,
+    ///    `get_did_document` returns `None`.
+    /// 4. Emits a `DIDDeact` event.
+    ///
+    /// Reversible via `reactivate_identity`, which clears the `Deactivated`
+    /// flag but does **not** restore the removed DID document CID or any
+    /// revoked VCs — the subject must re-anchor a DID document (and their
+    /// issuers must re-anchor VCs) after reactivating.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
-        // 1. Revoke all VCs
-        let key = DataKey::VCAnchors(subject.clone());
-        let anchors: Vec<VCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+        // 1 & 2: shared with `deactivate_identity` — sets the Deactivated
+        // flag and revokes all anchored VCs.
+        deactivate_core(&env, &subject);
 
-        if !anchors.is_empty() {
-            let mut updated = Vec::new(&env);
-            let mut revoked_count: u64 = 0;
-            for mut record in anchors.iter() {
-                if !record.revoked {
-                    revoked_count += 1;
-                }
-                record.revoked = true;
-                updated.push_back(record);
-            }
-            env.storage().persistent().set(&key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-            if revoked_count > 0 {
-                increment_vcs_revoked(&env, revoked_count);
-            }
-        }
-
-        // 2. Remove DID Document
+        // 3. Remove DID Document
         env.storage()
             .persistent()
             .remove(&DataKey::DIDDocument(subject.clone()));
 
-        // 3. Emit event
+        // 4. Emit event
         env.events().publish((symbol_short!("DIDDeact"),), subject);
 
         Ok(())
@@ -696,6 +752,15 @@ impl IdentityOracle {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 return Ok(());
             }
+        }
+
+        // Enforce active VC cap: revoked VCs do not count toward the limit.
+        let active_count: u32 = anchors
+            .iter()
+            .filter(|r| !r.revoked && !is_record_revoked(&env, r))
+            .count() as u32;
+        if active_count >= MAX_VCS_PER_SUBJECT {
+            return Err(IdentityOracleError::VCLimitReached);
         }
 
         let record = VCRecord {
@@ -802,13 +867,26 @@ impl IdentityOracle {
             .unwrap_or(false)
     }
 
-    /// Voluntarily deactivate a subject's identity.
+    /// Voluntarily deactivate a subject's identity **without** touching
+    /// their DID document.
     ///
-    /// 1. Sets a `Deactivated` flag in storage so `is_verified` returns
-    ///    `false` and credit scoring is suppressed.
+    /// Use this instead of `deactivate_did` only when the subject
+    /// wants to suppress verification and credit scoring while keeping
+    /// their DID document CID resolvable (e.g. `get_did_document` still
+    /// returns a value) — for example, a temporary suspension where the
+    /// document itself should remain publicly retrievable. For a full,
+    /// permanent-style deactivation, prefer `deactivate_did`.
+    ///
+    /// Shares its core logic with `deactivate_did` (see `deactivate_core`):
+    ///
+    /// 1. Sets the `Deactivated` flag in storage so `is_deactivated`
+    ///    returns `true` and `is_verified` / credit scoring are suppressed.
     /// 2. Marks **all** active VC anchors as revoked, making revocation
     ///    visible to query functions that check the on-chain revoked flag.
     /// 3. Returns the number of VCs that were transitioned to revoked.
+    ///
+    /// The only difference from `deactivate_did` is that the DID document
+    /// CID is left untouched.
     ///
     /// This is **reversible** via `reactivate_identity` (which clears the
     /// flag but does not restore previously-revoked VCs).
@@ -817,53 +895,9 @@ impl IdentityOracle {
     pub fn deactivate_identity(env: Env, subject: Address) -> u32 {
         subject.require_auth();
 
-        // 1. Set the Deactivated flag
-        env.storage()
-            .persistent()
-            .set(&DataKey::Deactivated(subject.clone()), &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Deactivated(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        let revoked_count = deactivate_core(&env, &subject);
 
-        // 2. Revoke all VCs anchored for this subject
-        let key = DataKey::VCAnchors(subject.clone());
-        let anchors: Vec<VCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        let mut updated = Vec::new(&env);
-        let mut revoked_count: u32 = 0;
-        for mut record in anchors.iter() {
-            if !record.revoked {
-                revoked_count += 1;
-            }
-            record.revoked = true;
-            updated.push_back(record);
-        }
-
-        if !anchors.is_empty() {
-            env.storage().persistent().set(&key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
-
-        if revoked_count > 0 {
-            increment_vcs_revoked(&env, revoked_count as u64);
-        }
-
-        // 3. Clear cached active VC count
-        let active_key = DataKey::ActiveVCCount(subject.clone());
-        env.storage()
-            .persistent()
-            .set(&active_key, &0u32);
-        env.storage()
-            .persistent()
-            .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-
-        // 4. Emit event
+        // Emit event
         env.events()
             .publish((symbol_short!("IdDeact"),), (subject, revoked_count));
 
@@ -872,9 +906,12 @@ impl IdentityOracle {
 
     /// Re-activate a previously deactivated identity.
     ///
-    /// Clears the `Deactivated` flag set by `deactivate_identity`. Does
-    /// **not** restore previously-revoked VCs — those remain revoked and
-    /// must be re-anchored by their original issuers.
+    /// Clears the `Deactivated` flag set by either `deactivate_did` or
+    /// `deactivate_identity`. Does **not** restore previously-revoked VCs
+    /// (those remain revoked and must be re-anchored by their original
+    /// issuers) and does **not** restore a DID document CID that was
+    /// removed by `deactivate_did` (the subject must call `anchor_did`
+    /// again). On-chain DID recovery is out of scope for this function.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn reactivate_identity(env: Env, subject: Address) {
@@ -2017,6 +2054,69 @@ mod tests {
     }
 
     #[test]
+    fn test_deactivate_did_sets_deactivated_flag_and_removes_did_document() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDeactivateDidFlag");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+        assert!(!client.is_deactivated(&subject));
+        assert!(client.get_did_document(&subject).is_some());
+
+        client.deactivate_did(&subject);
+
+        // Regression test for the bug this issue reports: previously
+        // `deactivate_did` never set the `Deactivated` flag, so
+        // `is_deactivated` (which `credit-oracle` relies on via
+        // cross-contract call) kept returning `false` after a subject
+        // called `deactivate_did`, letting their score still be computed.
+        assert!(client.is_deactivated(&subject));
+
+        // Full deactivation also removes the DID document.
+        assert!(client.get_did_document(&subject).is_none());
+
+        // And, as before, VCs are revoked / not verified / active count 0.
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_deactivate_identity_does_not_remove_did_document() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDeactivateIdentityKeepsDid");
+        client.anchor_did(&subject, &cid);
+
+        client.deactivate_identity(&subject);
+
+        // Unlike `deactivate_did`, `deactivate_identity` leaves the DID
+        // document CID in place.
+        assert_eq!(client.get_did_document(&subject), Some(cid));
+        assert!(client.is_deactivated(&subject));
+    }
+
+    #[test]
     fn test_deactivate_identity_sets_flag_and_revokes_vcs() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2187,5 +2287,77 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+
+    #[test]
+    fn test_vc_limit_reached_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 1;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 1;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash_101);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
+
+    #[test]
+    fn test_revoked_vcs_do_not_count_toward_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+        }
+
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 3;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        assert_eq!(client.get_active_vc_count(&subject), 100);
     }
 }
