@@ -68,6 +68,19 @@ The cooldown can be configured by the contract admin using `update_compute_coold
 | **Testnet** | `100` (~8 minutes) | Balances testing convenience with realistic network conditions. |
 | **Mainnet** | `17280` (~24 hours) | Prevents spam, reduces fees, and aligns with typical score update frequencies. |
 
+### `revokeVC(issuerKeypair: KeypairLike, vcHash: Buffer): Promise<string>`
+
+Submits a signed transaction to `revocation_registry.revoke(issuer, vc_hash)`
+and waits for final confirmation. The hash must be exactly 32 bytes.
+
+```typescript
+const txHash = await sdk.revokeVC(issuerKeypair, vcHash);
+```
+
+Use `confirmationTimeoutMs` and `pollIntervalMs` in `ProtocolConfig` to tune
+confirmation polling. Invalid hashes throw `SDKError` with code
+`INVALID_VC_HASH`; issuer mismatch failures use `NOT_REGISTERED_ISSUER`.
+
 ### SDK Method Status Table
 
 | Method | Status | Description |

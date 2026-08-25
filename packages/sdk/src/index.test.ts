@@ -1,7 +1,6 @@
 import {
   StellarDIDCreditSDK,
-  GovernanceClient,
-  GovernanceProposal,
+  SDKError,
   ScoreNotComputedError,
   MIN_SCORE,
   MAX_SCORE,
@@ -11,6 +10,7 @@ import {
   ScoringWeights,
   RepaymentRecord,
   VCRecord,
+  GovernanceProposal,
 } from "./index";
 import { xdr, Keypair } from "@stellar/stellar-sdk";
 
@@ -394,11 +394,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
-      const result = await sdk.revokeVC(
-        issuerKeypair as never,
-        subjectAddress,
-        vcHash,
-      );
+      const result = await sdk.revokeVC(issuerKeypair as never, vcHash);
 
       expect(result).toBe("mock-tx-hash");
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
@@ -409,17 +405,99 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.revocationRegistryId,
         method: "revoke",
       });
-      expect(mockContractCalls[0]?.args).toHaveLength(3);
+      expect(mockContractCalls[0]?.args).toHaveLength(2);
     });
 
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
-      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(31)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "INVALID_VC_HASH",
+        message: "vcHash must be exactly 32 bytes",
+      });
       expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a missing revocation registry configuration", async () => {
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        revocationRegistryId: "",
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "MISSING_REVOCATION_REGISTRY",
+      });
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps IssuerMismatch simulation failures to NOT_REGISTERED_ISSUER", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps confirmed IssuerMismatch failures to NOT_REGISTERED_ISSUER", async () => {
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+    });
+
+    it("polls a pending transaction until it succeeds", async () => {
+      mockGetTransaction
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 100,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 7)),
+      ).resolves.toBe("mock-tx-hash");
+      expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws a typed error when confirmation times out", async () => {
+      mockGetTransaction.mockResolvedValue({ status: "PENDING" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 0,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 8)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "TRANSACTION_TIMEOUT",
+      });
     });
 
     it("reports simulation failures before changing either contract", async () => {
@@ -429,11 +507,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC simulation failed; no revocation state was changed: Error(Contract, #4)",
       );
@@ -452,14 +526,18 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes",
       );
+    });
+
+    it("exports SDKError with its code", () => {
+      const error = new SDKError("INVALID_VC_HASH", "invalid hash");
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe("SDKError");
+      expect(error.code).toBe("INVALID_VC_HASH");
     });
   });
 
@@ -1376,11 +1454,74 @@ describe("test_all_exports_are_defined", () => {
     const _vc: VCRecord = { vcHash: Buffer.alloc(32), issuer: "G", anchoredAt: 0, revoked: false };
     const _score: ScoreRecord = { score: 300, lastUpdated: 0, vcCount: 0, repaymentRate: 0, txVolume30d: 0n, previousScore: null, computedAtLedger: 0, stale: false };
     const _config: ProtocolConfig = { identityOracleId: "", creditOracleId: "", revocationRegistryId: "", networkPassphrase: "", rpcUrl: "", simAccount: "" };
+    const _govProp: GovernanceProposal = { id: 1n, proposer: "G", proposedWeights: _weights, votesFor: 0n, votesAgainst: 0n, expiryLedger: 0, executionDelayLedgers: 0, executed: false, cancelled: false, quorumRequired: 100n };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
     expect(_repayment).toBeDefined();
     expect(_vc).toBeDefined();
     expect(_score).toBeDefined();
     expect(_config).toBeDefined();
+    expect(_govProp).toBeDefined();
   });
 });
+
+describe("listProposals", () => {
+  it("throws error if governanceId is not configured", async () => {
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    await expect(sdk.listProposals(1, 10)).rejects.toThrow(
+      "governanceId is not configured in ProtocolConfig",
+    );
+  });
+
+  it("calls list_proposals contract method and parses result correctly", async () => {
+    const configWithGov = {
+      ...mockConfig,
+      governanceId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAGOV1",
+    };
+    const sdk = new StellarDIDCreditSDK(configWithGov);
+
+    const mockProposalsRaw = [
+      {
+        id: 1n,
+        proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+        proposed_weights: {
+          vc_weight: 40,
+          tx_weight: 30,
+          repayment_weight: 30,
+        },
+        votes_for: 100n,
+        votes_against: 0n,
+        expiry_ledger: 1000,
+        execution_delay_ledgers: 100,
+        executed: false,
+        cancelled: false,
+        quorum_required: 100n,
+      },
+    ];
+
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: { value: mockProposalsRaw } },
+    });
+
+    const proposals = await sdk.listProposals(1, 10, true);
+
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]).toEqual({
+      id: 1n,
+      proposer: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM",
+      proposedWeights: {
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      },
+      votesFor: 100n,
+      votesAgainst: 0n,
+      expiryLedger: 1000,
+      executionDelayLedgers: 100,
+      executed: false,
+      cancelled: false,
+      quorumRequired: 100n,
+    });
+  });
+});
+

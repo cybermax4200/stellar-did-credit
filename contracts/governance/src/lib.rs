@@ -5,7 +5,7 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -708,6 +708,52 @@ impl Governance {
             .unwrap_or(0);
 
         total_weight - used_weight
+    }
+
+    /// List governance proposals starting from `from_id` up to `limit`.
+    ///
+    /// Iterates proposal IDs in `[from_id, from_id + min(limit, 20))`.
+    /// `limit` is capped at 20 to prevent storage read budget exhaustion.
+    /// Non-existent proposals (deleted or skipped) are omitted.
+    /// If `include_inactive` is `false`, cancelled and executed proposals are skipped.
+    /// Returns an empty vector (not an error) if `from_id` is beyond `NextProposalId` or `limit` is 0.
+    pub fn list_proposals(
+        env: Env,
+        from_id: u64,
+        limit: u32,
+        include_inactive: bool,
+    ) -> Vec<GovernanceProposal> {
+        let mut result = Vec::new(&env);
+        let cap = limit.min(20);
+        if cap == 0 {
+            return result;
+        }
+
+        let next_proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+
+        if from_id >= next_proposal_id {
+            return result;
+        }
+
+        let end_id = from_id.saturating_add(cap as u64).min(next_proposal_id);
+
+        for id in from_id..end_id {
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, GovernanceProposal>(&DataKey::Proposal(id))
+            {
+                if include_inactive || (!proposal.executed && !proposal.cancelled) {
+                    result.push_back(proposal);
+                }
+            }
+        }
+
+        result
     }
 
     /// Cancel a governance proposal.

@@ -235,7 +235,6 @@ You can revoke a credential using the SDK's `revokeVC` method, which atomically 
 try {
   const txHash = await sdk.revokeVC(
     issuerKeypair,
-    subjectAddress,
     vcHash
   );
   console.log(`Credential revoked successfully. TX: ${txHash}`);
