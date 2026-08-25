@@ -1,11 +1,11 @@
-#![no_std]
+﻿#![no_std]
 //! Governance contract for the Stellar DID Credit protocol.
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -24,7 +24,7 @@ pub enum GovernanceError {
     ProposalNotExpired = 5,
     /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
-    /// Proposed scoring weights do not sum to 100.
+    /// Proposed scoring weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
     InvalidWeights = 7,
     /// Quorum value must be positive.
     InvalidQuorum = 8,
@@ -61,6 +61,7 @@ pub enum DataKey {
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
     VoteWeightUsed(u64, Address),
+    TotalRegisteredWeight,
 }
 
 /// Instance-storage TTL bump constants.
@@ -77,6 +78,10 @@ pub enum DataKey {
 /// proposals are being created/voted on.
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
+// Persistent voter entries must survive long voting periods.
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+const PERS_TTL_EXTEND: u32 = 518_400;
 
 #[contracttype]
 #[derive(Clone)]
@@ -193,6 +198,16 @@ impl Governance {
             return Err(GovernanceError::NotAuthorized);
         }
         admin.require_auth();
+
+        let total_weight: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        if quorum_required > total_weight {
+            return Err(GovernanceError::InvalidQuorum);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
@@ -204,6 +219,14 @@ impl Governance {
         env.storage()
             .instance()
             .get(&DataKey::QuorumRequired)
+            .unwrap_or(0)
+    }
+
+    /// Returns the total registered voting weight across all voters.
+    pub fn get_total_registered_weight(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
             .unwrap_or(0)
     }
 
@@ -223,7 +246,7 @@ impl Governance {
         execution_delay_ledgers: u32,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(GovernanceError::InvalidWeights);
         }
 
@@ -295,6 +318,11 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoterWeight(voter.clone()))
             .ok_or(GovernanceError::VoterNotRegistered)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         // Check how much weight this voter has already used for this proposal
         let used_weight: i128 = env
@@ -302,6 +330,13 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoteWeightUsed(proposal_id, voter.clone()))
             .unwrap_or(0);
+        if used_weight > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        }
 
         let available_weight = total_weight - used_weight;
         if vote_weight > available_weight {
@@ -341,6 +376,11 @@ impl Governance {
         env.storage().persistent().set(
             &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
             &new_used_weight,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
         );
 
         // Store updated proposal
@@ -426,6 +466,58 @@ impl Governance {
         Ok(())
     }
 
+    /// Cleanup VoteWeightUsed entries for a completed proposal.
+    ///
+    /// Only the contract admin can call this function. The proposal must be
+    /// executed (`proposal.executed == true`) before cleanup is allowed.
+    /// This removes all VoteWeightUsed entries for the specified voters on
+    /// the completed proposal.
+    ///
+    /// If the proposal is not executed, this is a no-op (not an error).
+    ///
+    /// Auth: `admin` must sign the transaction.
+    pub fn cleanup_proposal_votes(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+        voters: Vec<Address>,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        // No-op if proposal not executed
+        if !proposal.executed {
+            return Ok(());
+        }
+
+        // Remove VoteWeightUsed entries for each voter
+        for voter in voters.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::VoteWeightUsed(proposal_id, voter.clone()));
+        }
+
+        env.events().publish(
+            (symbol_short!("VCln"), proposal_id),
+            voters.len(),
+        );
+
+        Ok(())
+    }
+
     /// Apply pending weights to the credit-oracle after the timelock expires.
     ///
     /// This function should be called after `execute` has successfully queued
@@ -499,6 +591,20 @@ impl Governance {
         env.storage()
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total + weight));
 
         env.events()
             .publish((symbol_short!("VoterReg"), voter.clone()), weight);
@@ -531,6 +637,12 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         if weight == 0 {
             env.storage()
                 .persistent()
@@ -539,7 +651,21 @@ impl Governance {
             env.storage()
                 .persistent()
                 .set(&DataKey::VoterWeight(voter.clone()), &weight);
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoterWeight(voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
         }
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
 
         env.events()
             .publish((symbol_short!("VoterUpd"), voter.clone()), weight);
@@ -568,9 +694,24 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         env.storage()
             .persistent()
             .remove(&DataKey::VoterWeight(voter.clone()));
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight));
 
         env.events()
             .publish((symbol_short!("VoterDer"), voter.clone()), ());
@@ -619,6 +760,52 @@ impl Governance {
             .unwrap_or(0);
 
         total_weight - used_weight
+    }
+
+    /// List governance proposals starting from `from_id` up to `limit`.
+    ///
+    /// Iterates proposal IDs in `[from_id, from_id + min(limit, 20))`.
+    /// `limit` is capped at 20 to prevent storage read budget exhaustion.
+    /// Non-existent proposals (deleted or skipped) are omitted.
+    /// If `include_inactive` is `false`, cancelled and executed proposals are skipped.
+    /// Returns an empty vector (not an error) if `from_id` is beyond `NextProposalId` or `limit` is 0.
+    pub fn list_proposals(
+        env: Env,
+        from_id: u64,
+        limit: u32,
+        include_inactive: bool,
+    ) -> Vec<GovernanceProposal> {
+        let mut result = Vec::new(&env);
+        let cap = limit.min(20);
+        if cap == 0 {
+            return result;
+        }
+
+        let next_proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(1);
+
+        if from_id >= next_proposal_id {
+            return result;
+        }
+
+        let end_id = from_id.saturating_add(cap as u64).min(next_proposal_id);
+
+        for id in from_id..end_id {
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, GovernanceProposal>(&DataKey::Proposal(id))
+            {
+                if include_inactive || (!proposal.executed && !proposal.cancelled) {
+                    result.push_back(proposal);
+                }
+            }
+        }
+
+        result
     }
 
     /// Cancel a governance proposal.
@@ -1271,6 +1458,50 @@ mod tests {
     }
 
     #[test]
+    fn test_vote_weight_used_survives_long_voting_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 25,
+            repayment_weight: 25,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &100);
+        gov_client.vote(&voter, &proposal_id, &true, &60);
+
+        // Keep the proposal alive so this test isolates voter-entry TTLs.
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(500_001, 500_001);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Proposal(proposal_id),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        });
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number += 500_001;
+        });
+
+        gov_client.vote(&voter, &proposal_id, &false, &40);
+
+        assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 100);
+        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 0);
+    }
+
+    #[test]
     fn test_weight_tracking_per_proposal() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1384,5 +1615,86 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+    }
+
+    #[test]
+    fn test_create_proposal_weight_component_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+
+        // Proposal with tx_weight = 0 fails with InvalidWeights
+        let res_tx_zero = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 60,
+                tx_weight: 0,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_zero, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 9 (< MIN_COMPONENT_WEIGHT) fails with InvalidWeights
+        let res_tx_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 51,
+                tx_weight: 9,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with vc_weight = 9 fails with InvalidWeights
+        let res_vc_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 9,
+                tx_weight: 45,
+                repayment_weight: 46,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_vc_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with repayment_weight = 9 fails with InvalidWeights
+        let res_repayment_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 45,
+                tx_weight: 46,
+                repayment_weight: 9,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_repayment_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 10 (exact MIN_COMPONENT_WEIGHT bound) passes
+        let prop_id = gov_client.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 10,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(prop_id, 1);
     }
 }

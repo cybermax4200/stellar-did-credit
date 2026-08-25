@@ -1,8 +1,8 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeRecord,
-        DisputeStatus, RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
+        RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -31,38 +31,60 @@ mod tests {
         // Initialize identity-oracle and verify Init event
         identity.initialize(&admin);
         let events = env.events().all();
-        let id_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == identity_id).collect();
+        let id_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == identity_id)
+            .collect();
         assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
         let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(topic0, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
+        assert_eq!(
+            event_admin, admin,
+            "Initialized event admin mismatch for identity-oracle"
+        );
 
         // Initialize credit-oracle and verify Initialized event
         credit.initialize(&admin);
         let events = env.events().all();
-        let credit_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == credit_id).collect();
+        let credit_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == credit_id)
+            .collect();
         assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
         let topic1: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(topic1, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
+        assert_eq!(
+            event_admin, admin,
+            "Initialized event admin mismatch for credit-oracle"
+        );
 
         // Initialize revocation-registry and verify Initialized event
         revocation.initialize(&admin);
         let events = env.events().all();
-        let rev_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == revocation_id).collect();
-        assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
+        let rev_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == revocation_id)
+            .collect();
+        assert_eq!(
+            rev_events.len(),
+            1,
+            "revocation-registry should emit 1 event"
+        );
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
         let topic2: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(topic2, symbol_short!("Init"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
+        assert_eq!(
+            event_admin, admin,
+            "Init event admin mismatch for revocation-registry"
+        );
 
         // Issue #302: governance contract must also emit an Initialized event
         // with the admin and credit-oracle target addresses so off-chain
@@ -79,7 +101,11 @@ mod tests {
             "governance contract should emit exactly 1 event on initialize"
         );
         let (_, topics, data) = &gov_events[0];
-        assert_eq!(topics.len(), 1, "topic count mismatch for governance Initialized");
+        assert_eq!(
+            topics.len(),
+            1,
+            "topic count mismatch for governance Initialized"
+        );
         let gov_topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(
             gov_topic,
@@ -303,7 +329,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let initial_score = credit.compute_score(&subject);
-        assert!(initial_score > 300, "expected initial_score > 300, got {}", initial_score);
+        assert!(
+            initial_score > 300,
+            "expected initial_score > 300, got {}",
+            initial_score
+        );
 
         // 2. Revoke the VC on identity-oracle
         identity.mark_vc_revoked(&issuer, &subject, &vc_hash);
@@ -365,7 +395,10 @@ mod tests {
         revocation.initialize(&admin);
 
         let result = identity.try_set_revocation_registry(&bad_address);
-        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidRevocationRegistry)));
+        assert_eq!(
+            result,
+            Err(Ok(IdentityOracleError::InvalidRevocationRegistry))
+        );
     }
 
     #[test]
@@ -524,7 +557,7 @@ mod tests {
             vc_hashes.push_back(vc_hash);
         }
 
-// 5. Assert is_verified is true (5 active VCs)
+        // 5. Assert is_verified is true (5 active VCs)
         assert!(identity.is_verified(&subject));
 
         // 6. Assert get_total_vc_count returns 5
@@ -880,13 +913,16 @@ mod tests {
                 if *id != gov_id || topics.len() != 2 {
                     return false;
                 }
-                let sym: Result<soroban_sdk::Symbol, _> =
-                    topics.get(0).unwrap().try_into_val(&env);
+                let sym: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
                 sym.map(|s| s == soroban_sdk::symbol_short!("PropCanc"))
                     .unwrap_or(false)
             })
             .collect();
-        assert_eq!(cancel_events.len(), 1, "exactly one PropCanc event must be emitted");
+        assert_eq!(
+            cancel_events.len(),
+            1,
+            "exactly one PropCanc event must be emitted"
+        );
         let (_, topics, data) = &cancel_events[0];
         let event_proposal_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_proposal_id, proposal_id);
@@ -936,7 +972,10 @@ mod tests {
         gov.cancel_proposal(&admin, &proposal_id);
 
         let proposal = gov.get_proposal(&proposal_id).unwrap();
-        assert!(proposal.cancelled, "admin should be able to cancel a proposal");
+        assert!(
+            proposal.cancelled,
+            "admin should be able to cancel a proposal"
+        );
     }
 
     /// A third party (neither proposer nor admin) cannot cancel a proposal.
@@ -1063,7 +1102,10 @@ mod tests {
         // Votes cast before cancellation are preserved for audit.
         let proposal = gov.get_proposal(&proposal_id).unwrap();
         assert!(proposal.cancelled, "proposal must be marked cancelled");
-        assert_eq!(proposal.votes_for, 300, "pre-cancel votes must be preserved");
+        assert_eq!(
+            proposal.votes_for, 300,
+            "pre-cancel votes must be preserved"
+        );
 
         // Advance past the voting period: execution stays rejected.
         env.ledger().with_mut(|l| {
@@ -1496,7 +1538,8 @@ mod tests {
         assert!(identity.is_deactivated(&subject));
         assert!(!identity.is_verified(&subject));
         // Advance ledger to satisfy compute_score cooldown
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
 
         // 3. compute_score should now return 300 for deactivated subject
         let score_after_deactivation = credit.compute_score(&subject);
@@ -1619,14 +1662,15 @@ mod tests {
             env.storage()
                 .instance()
                 .set(&DataKey::Config, &default_weights);
-            env.storage().instance().set(
-                &DataKey::ComputeCooldownLedgers,
-                &1u32,
-            );
+            env.storage()
+                .instance()
+                .set(&DataKey::ComputeCooldownLedgers, &1u32);
         }
 
         pub fn register_lender(env: Env, lender: soroban_sdk::Address) {
-            env.storage().persistent().set(&DataKey::TrustedLender(lender), &true);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TrustedLender(lender), &true);
         }
 
         pub fn record_repayment(
@@ -1956,7 +2000,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let inflated_score = credit.compute_score(&subject);
-        assert!(inflated_score > 300, "expected inflated score > 300, got {}", inflated_score);
+        assert!(
+            inflated_score > 300,
+            "expected inflated score > 300, got {}",
+            inflated_score
+        );
 
         // Step 1: Subject files a dispute against tx_stats.
         let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
@@ -1981,7 +2029,8 @@ mod tests {
         let mut rslv_count = 0;
         for (id, topics, _) in events.iter() {
             if id == credit_id && !topics.is_empty() {
-                let topic_res: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                let topic_res: Result<soroban_sdk::Symbol, _> =
+                    topics.get(0).unwrap().try_into_val(&env);
                 if let Ok(topic) = topic_res {
                     if topic == soroban_sdk::symbol_short!("DsptRslv") {
                         rslv_count += 1;
@@ -2013,7 +2062,11 @@ mod tests {
             corrected_score,
             inflated_score
         );
-        assert!(corrected_score >= 300, "score must be >= 300, got {}", corrected_score);
+        assert!(
+            corrected_score >= 300,
+            "score must be >= 300, got {}",
+            corrected_score
+        );
     }
 
     /// Subjects cannot file a dispute for an unrecognised input key.
@@ -2119,5 +2172,75 @@ mod tests {
 
         let active_count = identity.get_active_vc_count(&subject);
         assert_eq!(active_count, 0); // Revoked VC => 0 active
+    }
+
+    #[test]
+    fn test_full_deployment_sequence() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // 1. Deploy all four contracts
+        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100i128);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer);
+        credit.register_feeder(&admin, &feeder);
+
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Ensure initially verified
+        assert_eq!(identity.is_verified(&subject), true);
+
+        revocation.revoke(&issuer, &subject, &vc_hash);
+
+        // (a) Verify that without set_revocation_registry, revocation-registry revocations are ignored
+        assert_eq!(identity.is_verified(&subject), true);
+
+        // (b) Verify that after set_revocation_registry, they are respected
+        identity.set_revocation_registry(&revocation_id);
+
+        // Now the revocation is respected
+        assert_eq!(identity.is_verified(&subject), false);
+
+        // Call set_identity_oracle on credit-oracle
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Verify compute_score reflects the revoked VC
+        let score_revoked = credit.compute_score(&subject);
+
+        // Add a new VC to see the score increase, showing the score reflects active VCs
+        let vc_hash2 = BytesN::from_array(&env, &[43u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_active = credit.compute_score(&subject);
+
+        assert!(
+            score_active > score_revoked,
+            "Score should increase when an active VC is present"
+        );
     }
 }

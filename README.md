@@ -315,7 +315,7 @@ stellar-did-credit/
 
 ## TypeScript SDK
 
-The `@stellar-did-credit/sdk` package provides a typed client for interacting with the core protocol contracts from a TypeScript application. The governance contract can be called through the same generic Soroban RPC client using the function signatures in [docs/governance.md](docs/governance.md).
+The `@stellar-did-credit/sdk` package provides a typed client for interacting with the core protocol contracts from a TypeScript application. Configure `governanceId` to use the proposal, voting, execution, and weight-application helpers through `sdk.governance`.
 
 ````typescript
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
@@ -349,7 +349,7 @@ if (score) {
 | `anchorDID(keypair, cid)`        | 🚧 Open        |
 | `issueVC(issuer, subject, hash)` | 🚧 Open        |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
-| `revokeVC(issuer, hash)`         | 📋 Planned     |
+| `revokeVC(issuer, hash)`         | ✅ Implemented |
 
 ---
 
@@ -472,7 +472,7 @@ await feeder.runCycle();
 | credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                      |
 | revocation-registry     | ✅ Complete    | Batch revocation supported                                           |
 | governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
-| TypeScript SDK          | 🚧 In progress | `getScore` done, governance helpers and rest open                    |
+| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available |
 | Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                  |
 | CLI tool                | 📋 Planned     |                                                                      |
 | Cross-contract vc_count | 📋 Planned     |                                                                      |

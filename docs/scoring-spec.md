@@ -39,7 +39,7 @@ counterparty_bonus = min(avg_counterparties ÷ 5, 20)      [integer division]
 tx_score          = min(volume_score + counterparty_bonus, 100)
 ```
 
-> **Important:** The counterparty bonus is a sub-component of `tx_score`. It is multiplied by `tx_weight` in the composite calculation (Step 2). If `tx_weight` is set to 0, the counterparty bonus contributes **nothing** to the final score, even with 100+ counterparties. Integrators who want to disable volume-based scoring while preserving network-diversity signals should be aware of this coupling.
+> **Important:** The counterparty bonus is a sub-component of `tx_score`. It is multiplied by `tx_weight` in the composite calculation (Step 2). To prevent degenerate scoring (such as setting `tx_weight` to 0 which would silently eliminate the counterparty bonus), each weight component must satisfy `MIN_COMPONENT_WEIGHT` = 10 (10%). Proposals or weight changes setting any component weight below 10 are rejected with `InvalidWeights`.
 
 **Repayment score** — rewards both on-time repayment rate and repayment volume.
 The volume sub-score gives 1 point per 100,000,000 stroops (1 XLM), capped at
@@ -59,7 +59,7 @@ clamped to zero for scoring.
 
 ### Step 2: Weighted composite (0–100)
 
-Default weights are **vc: 40, tx: 30, repayment: 30** (must sum to 100, configurable by admin):
+Default weights are **vc: 40, tx: 30, repayment: 30** (must sum to 100, each component ≥ `MIN_COMPONENT_WEIGHT` = 10, configurable via governance proposals):
 
 ```
 composite = (vc_score × vc_weight + tx_score × tx_weight + repay_score × repayment_weight) ÷ 100

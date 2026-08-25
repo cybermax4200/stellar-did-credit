@@ -20,7 +20,7 @@ pub enum CreditOracleError {
     FeederNotRegistered = 3,
     /// Lender is not registered.
     LenderNotRegistered = 4,
-    /// Proposed weights do not sum to 100.
+    /// Proposed weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
     InvalidWeights = 5,
     /// No pending admin proposal exists.
     NoPendingAdmin = 6,
@@ -34,6 +34,8 @@ pub enum CreditOracleError {
     InvalidInputKey = 10,
     /// The provided identity oracle contract is invalid or did not respond.
     InvalidIdentityOracle = 11,
+    /// The contract is currently paused and cannot accept writes.
+    ContractPaused = 12,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -94,6 +96,8 @@ pub enum DataKey {
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
+    /// Whether the contract is currently paused for writes.
+    Paused,
 }
 
 /// Pure scoring function that computes a credit score from input parameters.
@@ -292,6 +296,19 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        Err(CreditOracleError::ContractPaused)
+    } else {
+        Ok(())
+    }
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -503,12 +520,57 @@ impl CreditOracle {
     }
 
     /// Update transaction statistics for a user
+    /// Pause all writes on the contract.
+    ///
+    /// Auth: admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    ///
+    /// Auth: admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Returns true if the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn update_tx_stats(
         env: Env,
         feeder: Address,
         subject: Address,
         stats: TxStats,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -531,6 +593,7 @@ impl CreditOracle {
         amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         lender.require_auth();
         if !env
             .storage()
@@ -630,6 +693,7 @@ impl CreditOracle {
         subject: Address,
         count: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -705,6 +769,7 @@ impl CreditOracle {
         vc_id: BytesN<32>,
         vc_type: Option<Symbol>,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -747,6 +812,7 @@ impl CreditOracle {
 
     /// Compute and store credit score for a user
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        ensure_not_paused(&env)?;
         // Reject if last computation was within the cooldown window
         Self::check_compute_cooldown(&env, &subject)?;
 
@@ -991,7 +1057,7 @@ impl CreditOracle {
     /// Propose new scoring weights with timelock
     /// Propose new scoring weights with timelock
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(CreditOracleError::InvalidWeights);
         }
         let stored_admin: Address = env
@@ -1024,6 +1090,7 @@ impl CreditOracle {
 
     /// Apply pending weights after timelock expires
     pub fn apply_weights(env: Env) {
+        let _ = ensure_not_paused(&env);
         let effective_ledger: u32 = env
             .storage()
             .instance()
@@ -1753,13 +1820,43 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights — should return error via try_
+        // Invalid weights (sum != 100) — should return error via try_
         let result = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
             repayment_weight: 40,
         });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        let res_vc_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 9,
+            tx_weight: 45,
+            repayment_weight: 46,
+        });
+        assert_eq!(res_vc_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_tx_zero = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 55,
+            tx_weight: 0,
+            repayment_weight: 45,
+        });
+        assert_eq!(res_tx_zero, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_repayment_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 46,
+            repayment_weight: 9,
+        });
+        assert_eq!(res_repayment_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        let res_valid_min = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 10,
+            repayment_weight: 40,
+        });
+        assert!(res_valid_min.is_ok());
     }
 
     #[test]
@@ -1940,60 +2037,27 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 0
-        client.propose_weights(&ScoringWeights {
+        // Proposing tx_weight = 0 to contract is rejected as InvalidWeights
+        let res_zero = client.try_propose_weights(&ScoringWeights {
             vc_weight: 60,
             tx_weight: 0,
             repayment_weight: 40,
         });
-        let jump = TIMELOCK_LEDGERS + 2;
-        env.as_contract(&contract_id, || {
-            env.storage().instance().extend_ttl(jump, jump);
-        });
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + jump);
-        client.apply_weights();
+        assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        client.register_feeder(&admin, &feeder);
-
-        let subject_with_counterparties = Address::generate(&env);
-        let subject_without_counterparties = Address::generate(&env);
-
-        // Give first subject 100 counterparties (max bonus)
-        client.update_tx_stats(
-            &feeder,
-            &subject_with_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 100,
-            },
-        );
-        // Second subject has no counterparties
-        client.update_tx_stats(
-            &feeder,
-            &subject_without_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 0,
-            },
-        );
-
-        let score_with = client.compute_score(&subject_with_counterparties);
-        let score_without = client.compute_score(&subject_without_counterparties);
-
-        // Both scores must be identical — tx_weight=0 suppresses the counterparty bonus
+        // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
         );
     }
 
-    /// When tx_weight = 100, the counterparty bonus is fully applied and
+    /// When tx_weight is high (e.g., 80), the counterparty bonus is applied and
     /// a subject with 100+ counterparties scores higher than one with none.
     #[test]
-    fn test_counterparty_bonus_applied_when_tx_weight_is_100() {
+    fn test_counterparty_bonus_applied_when_tx_weight_is_high() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -2003,11 +2067,11 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 100
+        // Propose and apply valid weights with tx_weight = 80
         client.propose_weights(&ScoringWeights {
-            vc_weight: 0,
-            tx_weight: 100,
-            repayment_weight: 0,
+            vc_weight: 10,
+            tx_weight: 80,
+            repayment_weight: 10,
         });
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {

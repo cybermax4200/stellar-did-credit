@@ -28,9 +28,10 @@ IDENTITY_ORACLE_ID=C... \
 CREDIT_ORACLE_ID=C... \
 REVOCATION_REG_ID=C... \
 npm run issue -- \
-  --subject GSUBJECTADDRESSXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX \
+  --subject GSUBJECT... \
   --kyc-level basic \
-  --country NG
+  --country NG \
+  --revoke
 ```
 
 ### Environment variables
@@ -54,7 +55,8 @@ The script exits immediately with a clear error message if any required variable
 3. Computes the SHA-256 hash of the canonical bytes.
 4. Calls `sdk.issueVC(issuerKeypair, subjectAddress, vcHash)`, which submits a Soroban transaction invoking `anchor_vc` on the identity-oracle contract.
 5. Calls `sdk.verifyVC` to confirm the anchor is readable on-chain.
-6. Prints the off-chain record (VC + hash + transaction hash) that you should persist in your database.
+6. When `--revoke` is set, calls `sdk.revokeVC(issuerKeypair, vcHash)` and waits for final transaction confirmation.
+7. Prints the off-chain record (VC + hash + transaction hashes) that you should persist in your database.
 
 ## Storing the off-chain record
 
