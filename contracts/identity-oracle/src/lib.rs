@@ -2,7 +2,7 @@
 //! Identity oracle contract for the Stellar DID Credit protocol.
 //!
 //! Manages trusted credential issuers, DID document anchoring, and
-//! verifiable credential (VC) lifecycle — including anchoring, revocation,
+//! verifiable credential (VC) lifecycle ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â including anchoring, revocation,
 //! and active-count queries used by the credit-oracle.
 #[cfg(test)]
 extern crate std;
@@ -71,11 +71,11 @@ fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
     )
 }
 
-// ── Persistent TTL constants ─────────────────────────────────────
+// ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ Persistent TTL constants ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚ÂÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬
   // Persistent entries are extended to ~30 days on every write.
   //
   // Threshold: if remaining TTL drops below this, extend.
-  // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+  // Extend to: the new TTL value in ledger counts (ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€¹Ã¢â‚¬Â 5 s/ledger).
   //
 const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
@@ -102,7 +102,13 @@ pub enum IdentityOracleError {
     ContractPaused = 8,
     /// The provided revocation registry contract is invalid or did not respond.
     InvalidRevocationRegistry = 9,
+    /// The subject has reached the maximum number of active VCs allowed.
+    VCLimitReached = 10,
 }
+
+/// Maximum number of active (non-revoked) VCs a subject can have anchored.
+/// Prevents unbounded Vec growth and gas exhaustion on read paths.
+const MAX_VCS_PER_SUBJECT: u32 = 100;
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -132,7 +138,7 @@ pub enum DataKey {
     StorageVersion,
     /// Append-only index of every address ever registered as a trusted
     /// issuer. Entries are never removed on deregistration (that would
-    /// require an O(n) rewrite on every `deregister_issuer` call) — a
+    /// require an O(n) rewrite on every `deregister_issuer` call) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â a
     /// deregistered issuer's entry is left in place and its `TrustedIssuer`
     /// flag is flipped to `false` instead. Use `list_issuers` (which filters
     /// this index against `TrustedIssuer`) to get the currently-active set.
@@ -155,7 +161,7 @@ pub enum DataKey {
     ActiveVCCount(Address),
     /// The ID of the revocation registry contract.
     RevocationRegistryId,
-    /// Issuer trust multiplier in basis points (100 = 1×). Defaults to 100 when unset.
+    /// Issuer trust multiplier in basis points (100 = 1ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â). Defaults to 100 when unset.
     IssuerTier(Address),
     /// Credential type label for a subject's anchored VC hash.
     VCCredentialType(Address, BytesN<32>),
@@ -184,7 +190,7 @@ pub struct VCRecord {
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
-/// Default issuer trust multiplier: 100 basis points (1×).
+/// Default issuer trust multiplier: 100 basis points (1ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â).
 pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
@@ -215,7 +221,7 @@ fn store_credential_type(
 }
 
 /// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
-/// `prefix` must be ≤ 32 bytes.
+/// `prefix` must be ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â°Ãƒâ€šÃ‚Â¤ 32 bytes.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
     let plen = prefix.len() as usize;
     if (s.len() as usize) < plen {
@@ -350,7 +356,7 @@ fn load_active_vc_count(env: &Env, subject: &Address) -> Option<u32> {
 /// 3. Zeroes the cached active-VC count.
 /// 4. Bumps the `total_vcs_revoked` protocol stat.
 ///
-/// Does **not** touch the DID document CID or emit any event — callers are
+/// Does **not** touch the DID document CID or emit any event ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â callers are
 /// responsible for those two pieces, since that's the only place the two
 /// public functions actually differ.
 ///
@@ -444,7 +450,7 @@ impl IdentityOracle {
 
     /// Upgrade the storage layout to the latest version.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn migrate(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         let version: u32 = env
@@ -471,7 +477,7 @@ impl IdentityOracle {
     ///
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn validate_revocation_registry(env: Env, registry_id: Address) -> bool {
         validate_revocation_registry_ref(&env, &registry_id)
     }
@@ -507,7 +513,7 @@ impl IdentityOracle {
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn register_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage()
@@ -549,12 +555,12 @@ impl IdentityOracle {
     ///
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
     ///
-    /// This is a single tombstone write (`TrustedIssuer(issuer) = false`) —
+    /// This is a single tombstone write (`TrustedIssuer(issuer) = false`) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
     /// it does not touch `IssuersIndex`, so cost does not scale with the
     /// number of registered issuers. `list_issuers` is what hides
     /// deregistered issuers from the returned set.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage()
@@ -613,7 +619,7 @@ impl IdentityOracle {
     ///
     /// **Authentication:** The `subject` must provide a valid signature.
     ///
-    /// **Overwrite behavior:** This function is idempotent — calling it multiple times with
+    /// **Overwrite behavior:** This function is idempotent ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â calling it multiple times with
     /// different CIDs will silently replace the previous value in storage. Each call emits
     /// a `DIDAnch` event. DID documents are considered **mutable** in this protocol;
     /// subjects may update their DID document (e.g., to rotate keys or add service
@@ -667,7 +673,7 @@ impl IdentityOracle {
     }
 
     /// Deactivate the subject's DID. This is the **canonical, full**
-    /// deactivation path — prefer this over `deactivate_identity`
+    /// deactivation path ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â prefer this over `deactivate_identity`
     /// unless you specifically need to keep the DID document resolvable
     /// (see that function's doc comment for when that applies).
     ///
@@ -675,20 +681,20 @@ impl IdentityOracle {
     ///    so `is_deactivated` returns `true` and `is_verified` /
     ///    credit scoring are suppressed for this subject via `credit-oracle`.
     /// 2. Revokes all active verifiable credentials anchored for the subject.
-    /// 3. Removes the anchored DID Document CID entirely — after this call,
+    /// 3. Removes the anchored DID Document CID entirely ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â after this call,
     ///    `get_did_document` returns `None`.
     /// 4. Emits a `DIDDeact` event.
     ///
     /// Reversible via `reactivate_identity`, which clears the `Deactivated`
     /// flag but does **not** restore the removed DID document CID or any
-    /// revoked VCs — the subject must re-anchor a DID document (and their
+    /// revoked VCs ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â the subject must re-anchor a DID document (and their
     /// issuers must re-anchor VCs) after reactivating.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
-        // 1 & 2: shared with `deactivate_identity` — sets the Deactivated
+        // 1 & 2: shared with `deactivate_identity` ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â sets the Deactivated
         // flag and revokes all anchored VCs.
         deactivate_core(&env, &subject);
 
@@ -746,6 +752,15 @@ impl IdentityOracle {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 return Ok(());
             }
+        }
+
+        // Enforce active VC cap: revoked VCs do not count toward the limit.
+        let active_count: u32 = anchors
+            .iter()
+            .filter(|r| !r.revoked && !is_record_revoked(&env, r))
+            .count() as u32;
+        if active_count >= MAX_VCS_PER_SUBJECT {
+            return Err(IdentityOracleError::VCLimitReached);
         }
 
         let record = VCRecord {
@@ -858,7 +873,7 @@ impl IdentityOracle {
     /// Use this instead of `deactivate_did` only when the subject
     /// wants to suppress verification and credit scoring while keeping
     /// their DID document CID resolvable (e.g. `get_did_document` still
-    /// returns a value) — for example, a temporary suspension where the
+    /// returns a value) ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â for example, a temporary suspension where the
     /// document itself should remain publicly retrievable. For a full,
     /// permanent-style deactivation, prefer `deactivate_did`.
     ///
@@ -985,9 +1000,9 @@ impl IdentityOracle {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
-    /// Set an issuer's trust multiplier in basis points (100 = 1×, 200 = 2×).
+    /// Set an issuer's trust multiplier in basis points (100 = 1ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â, 200 = 2ÃƒÆ’Ã†â€™ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â).
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn set_issuer_tier(
         env: Env,
         admin: Address,
@@ -1062,7 +1077,7 @@ impl IdentityOracle {
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
     /// The transfer only completes once `new_admin` calls `accept_admin`.
     ///
-    /// Auth: current admin only — verified via `require_admin`.
+    /// Auth: current admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1104,7 +1119,7 @@ impl IdentityOracle {
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1121,7 +1136,7 @@ impl IdentityOracle {
     /// # Important
     ///
     /// If `None` is returned, `is_verified`, `get_active_vc_count`, and
-    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag —
+    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â
     /// any revocations performed through the `RevocationRegistry` contract
     /// will be **silently ignored**.
     ///
@@ -1140,7 +1155,7 @@ impl IdentityOracle {
     /// configuration (Admin, RevocationRegistryId) does not expire on
     /// an idle contract.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1736,7 +1751,7 @@ mod tests {
         // require_auth() inside require_admin() has nothing authorizing the
         // invocation, so it fails before the call ever reaches
         // deployer().update_current_contract_wasm() (which would separately
-        // fail on an unregistered hash regardless of auth — that's not what
+        // fail on an unregistered hash regardless of auth ÃƒÆ’Ã‚Â¢ÃƒÂ¢Ã¢â‚¬Å¡Ã‚Â¬ÃƒÂ¢Ã¢â€šÂ¬Ã‚Â that's not what
         // this test is checking).
         env.mock_auths(&[]);
         let res = client.try_upgrade(&BytesN::from_array(&env, &[0u8; 32]));
@@ -2272,5 +2287,77 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+
+    #[test]
+    fn test_vc_limit_reached_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 1;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 1;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash_101);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
+
+    #[test]
+    fn test_revoked_vcs_do_not_count_toward_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+        }
+
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 3;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        assert_eq!(client.get_active_vc_count(&subject), 100);
     }
 }

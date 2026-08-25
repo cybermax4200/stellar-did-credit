@@ -274,3 +274,22 @@ See [`packages/issuer-example/README.md`](../packages/issuer-example/README.md) 
 - [Architecture overview](architecture.md) — how the three contracts interact
 - [W3C Verifiable Credentials Data Model](https://www.w3.org/TR/vc-data-model/)
 - [RFC 8785 — JSON Canonicalization Scheme](https://www.rfc-editor.org/rfc/rfc8785)
+
+## VC Anchor Limit
+
+Each subject can have a maximum of **100 active (non-revoked) VCs** anchored at any time.
+
+### What counts toward the limit
+- Any non-revoked VC anchored via `anchor_vc` or `anchor_vc_typed`
+
+### What does NOT count toward the limit
+- Revoked VCs (marked via `mark_vc_revoked`)
+- Duplicate (issuer, vc_hash) pairs (these are no-ops)
+
+### Recovery flow when the cap is reached
+1. The subject (or issuer) calls `mark_vc_revoked` on old/unused VCs
+2. Once active VC count drops below 100, new VCs can be anchored
+
+### Error
+If a new anchor would exceed the cap, the contract returns:
+`IdentityOracleError::VCLimitReached` (error code 10)
