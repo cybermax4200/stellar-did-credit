@@ -106,11 +106,272 @@ export class SDKError extends Error {
 /** A Stellar keypair, or a minimal object exposing a public key. */
 export type KeypairLike = Keypair | { publicKey: string };
 
+export type GovernanceInteger = number | bigint;
+
+/**
+ * Client for the governance contract's proposal and weight-management flow.
+ *
+ * A successful proposal passes through two independent timelocks: the
+ * governance execution delay, followed by the credit-oracle's fixed
+ * approximately 24-hour timelock. Callers must wait for the first delay before
+ * `execute`, then wait for the credit-oracle pending record's effective ledger
+ * before calling `applyWeights`.
+ */
+export class GovernanceClient {
+  private readonly server: SorobanRpc.Server;
+
+  constructor(
+    private readonly config: ProtocolConfig,
+    server?: SorobanRpc.Server,
+  ) {
+    this.server = server ?? new SorobanRpc.Server(config.rpcUrl);
+  }
+
+  /**
+   * Create a scoring-weight proposal and return its on-chain ID.
+   *
+   * This starts the governance voting window. If the proposal passes, callers
+   * must still wait for its governance execution delay, call `execute`, wait
+   * approximately 24 hours for the credit-oracle timelock, and then call
+   * `applyWeights` before the new weights become active.
+   */
+  async createProposal(
+    proposerKeypair: Keypair,
+    weights: ScoringWeights,
+    votingPeriodLedgers: number,
+    executionDelayLedgers: number,
+  ): Promise<bigint> {
+    const proposer = getPublicKey(proposerKeypair);
+    const contract = this.governanceContract();
+    const result = await this.submitSignedTransaction(
+      proposerKeypair,
+      contract.call(
+        "create_proposal",
+        new Address(proposer).toScVal(),
+        scoringWeightsToScVal(weights),
+        nativeToScVal(votingPeriodLedgers, { type: "u32" }),
+        nativeToScVal(executionDelayLedgers, { type: "u32" }),
+      ),
+      "createProposal",
+    );
+
+    if (!result.retval) {
+      throw new Error("createProposal returned no proposal ID");
+    }
+    return BigInt(scValToNative(result.retval) as bigint | number | string);
+  }
+
+  /**
+   * Cast a weighted vote on an open proposal.
+   *
+   * Voting only affects the proposal's governance phase. A successful vote
+   * does not start the credit-oracle timelock; that happens only after the
+   * voting period and governance execution delay have elapsed and `execute`
+   * succeeds.
+   */
+  async vote(
+    voterKeypair: Keypair,
+    proposalId: GovernanceInteger,
+    voteFor: boolean,
+    voteWeight: GovernanceInteger,
+  ): Promise<string> {
+    const voter = getPublicKey(voterKeypair);
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        voterKeypair,
+        contract.call(
+          "vote",
+          new Address(voter).toScVal(),
+          nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+          nativeToScVal(voteFor),
+          nativeToScVal(toPositiveBigInt(voteWeight), { type: "i128" }),
+        ),
+        "vote",
+      )
+    ).hash;
+  }
+
+  /**
+   * Execute a proposal after voting and the governance execution delay finish.
+   *
+   * For a passing proposal, this queues the new weights in the credit-oracle;
+   * it does not activate them. Callers must wait approximately 24 hours, or
+   * until the credit-oracle pending record's `effective_ledger`, before calling
+   * `applyWeights` to complete the second timelock.
+   */
+  async execute(
+    payerKeypair: Keypair,
+    proposalId: GovernanceInteger,
+  ): Promise<string> {
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        payerKeypair,
+        contract.call(
+          "execute",
+          nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+        ),
+        "execute",
+      )
+    ).hash;
+  }
+
+  /**
+   * Apply weights queued by a previously executed passing proposal.
+   *
+   * This call must be made only after the credit-oracle's fixed timelock has
+   * expired, approximately 24 hours after `execute` at the normal five-second
+   * ledger cadence. Calling earlier is rejected by the credit-oracle.
+   */
+  async applyWeights(payerKeypair: Keypair): Promise<string> {
+    const contract = this.governanceContract();
+    return (
+      await this.submitSignedTransaction(
+        payerKeypair,
+        contract.call("apply_weights"),
+        "applyWeights",
+      )
+    ).hash;
+  }
+
+  /**
+   * Fetch one governance proposal, or `null` when the ID is not present.
+   *
+   * An `executed` proposal may still have weights pending in the
+   * credit-oracle. The new weights become active only after the second,
+   * approximately 24-hour timelock and a successful `applyWeights` call.
+   */
+  async getProposal(
+    proposalId: GovernanceInteger,
+  ): Promise<GovernanceProposal | null> {
+    const contract = this.governanceContract();
+    const retval = await this.simulateRead(
+      contract.call(
+        "get_proposal",
+        nativeToScVal(toUnsignedBigInt(proposalId), { type: "u64" }),
+      ),
+    );
+    const native = scValToNative(retval);
+    return native === null || native === undefined
+      ? null
+      : parseGovernanceProposal(native);
+  }
+
+  /**
+   * Fetch proposals by scanning the contract's monotonically increasing IDs.
+   *
+   * The governance contract exposes `get_proposal`, but no list endpoint, so
+   * this helper performs up to `limit` read-only RPC simulations starting at
+   * `fromId` and omits IDs that no longer have stored proposals.
+   * Proposal execution state does not imply active weights until the
+   * credit-oracle timelock has elapsed and `applyWeights` succeeds.
+   */
+  async listProposals(
+    fromId: GovernanceInteger,
+    limit: number,
+  ): Promise<GovernanceProposal[]> {
+    if (!Number.isInteger(limit) || limit < 0) {
+      throw new Error("limit must be a non-negative integer");
+    }
+
+    const firstId = toUnsignedBigInt(fromId);
+    const proposals: GovernanceProposal[] = [];
+    for (let offset = 0n; offset < BigInt(limit); offset += 1n) {
+      const proposal = await this.getProposal(firstId + offset);
+      if (proposal) {
+        proposals.push(proposal);
+      }
+    }
+    return proposals;
+  }
+
+  private governanceContract(): Contract {
+    if (!this.config.governanceId?.trim()) {
+      throw new Error(
+        "governanceId is required to use the governance client",
+      );
+    }
+    return new Contract(this.config.governanceId);
+  }
+
+  private async simulateRead(operation: xdr.Operation): Promise<xdr.ScVal> {
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+    const retval = sim.result?.retval;
+    if (!retval) {
+      throw new Error("No return value in simulation result");
+    }
+    return retval;
+  }
+
+  private async submitSignedTransaction(
+    keypair: Keypair,
+    operation: xdr.Operation,
+    operationName: string,
+  ): Promise<{ hash: string; retval?: xdr.ScVal }> {
+    const publicKey = getPublicKey(keypair);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(
+      publicKey,
+      accountData.sequenceNumber(),
+    );
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`${operationName} simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error(`${operationName} simulation returned unexpected response`);
+    }
+
+    const retval = sim.result?.retval;
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(keypair);
+    const response = await this.server.sendTransaction(preparedTx);
+    if (response.status !== "PENDING") {
+      throw new Error(
+        `${operationName} transaction submission failed: ${response.errorResult}`,
+      );
+    }
+
+    await waitForTransactionConfirmation(
+      this.server,
+      response.hash,
+      operationName,
+    );
+    return { hash: response.hash, retval };
+  }
+}
+
 export class StellarDIDCreditSDK {
   private server: SorobanRpc.Server;
+  public readonly governance: GovernanceClient;
 
   constructor(private config: ProtocolConfig) {
     this.server = new SorobanRpc.Server(this.config.rpcUrl);
+    this.governance = new GovernanceClient(this.config, this.server);
   }
 
   /**
@@ -959,6 +1220,53 @@ export class ScoreNotComputedError extends Error {
   }
 }
 
+function getPublicKey(keypair: KeypairLike): string {
+  return typeof keypair.publicKey === "function"
+    ? keypair.publicKey()
+    : keypair.publicKey;
+}
+
+function toUnsignedBigInt(value: GovernanceInteger): bigint {
+  assertSafeInteger(value);
+  const result = BigInt(value);
+  if (result < 0n) {
+    throw new Error("integer values must be non-negative");
+  }
+  return result;
+}
+
+function toPositiveBigInt(value: GovernanceInteger): bigint {
+  assertSafeInteger(value);
+  const result = BigInt(value);
+  if (result <= 0n) {
+    throw new Error("voteWeight must be positive");
+  }
+  return result;
+}
+
+function assertSafeInteger(value: GovernanceInteger): void {
+  if (typeof value === "number" && !Number.isSafeInteger(value)) {
+    throw new Error("number values must be safe integers; use bigint instead");
+  }
+}
+
+function scoringWeightsToScVal(weights: ScoringWeights): xdr.ScVal {
+  return nativeToScVal(
+    {
+      vc_weight: weights.vcWeight,
+      tx_weight: weights.txWeight,
+      repayment_weight: weights.repaymentWeight,
+    },
+    {
+      type: {
+        vc_weight: ["symbol", "u32"],
+        tx_weight: ["symbol", "u32"],
+        repayment_weight: ["symbol", "u32"],
+      },
+    },
+  );
+}
+
 /**
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
  * Returns the ScoreRecord if Some, returns null if None.
@@ -996,6 +1304,40 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
     vcWeight: Number(raw["vc_weight"]),
     txWeight: Number(raw["tx_weight"]),
     repaymentWeight: Number(raw["repayment_weight"]),
+  };
+}
+
+function parseGovernanceProposal(native: unknown): GovernanceProposal {
+  if (typeof native !== "object" || native === null) {
+    throw new Error("get_proposal returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  const weights = raw["proposed_weights"];
+  if (typeof weights !== "object" || weights === null) {
+    throw new Error("get_proposal returned invalid proposed weights");
+  }
+
+  const rawWeights = weights as Record<string, unknown>;
+  return {
+    id: BigInt(raw["id"] as bigint | number | string),
+    proposer: String(raw["proposer"]),
+    proposedWeights: {
+      vcWeight: Number(rawWeights["vc_weight"]),
+      txWeight: Number(rawWeights["tx_weight"]),
+      repaymentWeight: Number(rawWeights["repayment_weight"]),
+    },
+    votesFor: BigInt(raw["votes_for"] as bigint | number | string),
+    votesAgainst: BigInt(
+      raw["votes_against"] as bigint | number | string,
+    ),
+    expiryLedger: Number(raw["expiry_ledger"]),
+    executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
+    executed: Boolean(raw["executed"]),
+    cancelled: Boolean(raw["cancelled"]),
+    quorumRequired: BigInt(
+      raw["quorum_required"] as bigint | number | string,
+    ),
   };
 }
 

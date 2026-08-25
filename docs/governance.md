@@ -500,7 +500,17 @@ Also subscribe to credit-oracle events for the downstream weight-change steps:
 
 ### 4.4 TypeScript SDK
 
-The governance contract is currently **not exposed in `packages/sdk/src/index.ts`** (as of the workspace state at time of writing). Score-reading methods are implemented; `anchorDID`, `issueVC`, and governance helpers are listed as open/planned. Integration from TypeScript today should use the generic `SorobanRpc.Server` + contract spec directly, calling the same function names and argument order documented above. The `ScoringWeights` struct type IS already exported by the SDK (per CHANGELOG #20), so callers can reuse it for proposal and pending-weight payloads.
+The SDK exposes `GovernanceClient` as `sdk.governance` when
+`ProtocolConfig.governanceId` is configured. It provides signed helpers for
+`createProposal`, `vote`, `execute`, and `applyWeights`, plus read-only
+`getProposal` and `listProposals` helpers. See
+[`packages/sdk/README.md`](../packages/sdk/README.md#governance) for the
+TypeScript API and examples.
+
+`listProposals` scans the contract's monotonically increasing proposal IDs
+because the governance contract exposes `get_proposal` but does not expose a
+bulk list entrypoint. Its `fromId` and `limit` arguments therefore bound the
+number of read-only simulations performed by the client.
 
 ---
 
