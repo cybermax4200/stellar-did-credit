@@ -349,7 +349,7 @@ if (score) {
 | `anchorDID(keypair, cid)`        | 🚧 Open        |
 | `issueVC(issuer, subject, hash)` | 🚧 Open        |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
-| `revokeVC(issuer, hash)`         | 📋 Planned     |
+| `revokeVC(issuer, hash)`         | ✅ Implemented |
 
 ---
 

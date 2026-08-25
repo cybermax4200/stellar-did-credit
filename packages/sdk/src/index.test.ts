@@ -1,5 +1,6 @@
 import {
   StellarDIDCreditSDK,
+  SDKError,
   ScoreNotComputedError,
   MIN_SCORE,
   MAX_SCORE,
@@ -211,11 +212,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
 
-      const result = await sdk.revokeVC(
-        issuerKeypair as never,
-        subjectAddress,
-        vcHash,
-      );
+      const result = await sdk.revokeVC(issuerKeypair as never, vcHash);
 
       expect(result).toBe("mock-tx-hash");
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
@@ -226,17 +223,99 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.revocationRegistryId,
         method: "revoke",
       });
-      expect(mockContractCalls[0]?.args).toHaveLength(3);
+      expect(mockContractCalls[0]?.args).toHaveLength(2);
     });
 
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(issuerKeypair as never, subjectAddress, Buffer.alloc(31)),
-      ).rejects.toThrow("vcHash must be exactly 32 bytes");
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(31)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "INVALID_VC_HASH",
+        message: "vcHash must be exactly 32 bytes",
+      });
       expect(mockGetAccount).not.toHaveBeenCalled();
       expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("rejects a missing revocation registry configuration", async () => {
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        revocationRegistryId: "",
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "MISSING_REVOCATION_REGISTRY",
+      });
+      expect(mockGetAccount).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps IssuerMismatch simulation failures to NOT_REGISTERED_ISSUER", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("maps confirmed IssuerMismatch failures to NOT_REGISTERED_ISSUER", async () => {
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "IssuerMismatch",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "NOT_REGISTERED_ISSUER",
+      });
+    });
+
+    it("polls a pending transaction until it succeeds", async () => {
+      mockGetTransaction
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 100,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 7)),
+      ).resolves.toBe("mock-tx-hash");
+      expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+    });
+
+    it("throws a typed error when confirmation times out", async () => {
+      mockGetTransaction.mockResolvedValue({ status: "PENDING" });
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        confirmationTimeoutMs: 0,
+        pollIntervalMs: 1,
+      });
+
+      await expect(
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 8)),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "TRANSACTION_TIMEOUT",
+      });
     });
 
     it("reports simulation failures before changing either contract", async () => {
@@ -246,11 +325,7 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC simulation failed; no revocation state was changed: Error(Contract, #4)",
       );
@@ -269,14 +344,18 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.revokeVC(
-          issuerKeypair as never,
-          subjectAddress,
-          Buffer.alloc(32, 4),
-        ),
+        sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toThrow(
         "revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes",
       );
+    });
+
+    it("exports SDKError with its code", () => {
+      const error = new SDKError("INVALID_VC_HASH", "invalid hash");
+
+      expect(error).toBeInstanceOf(Error);
+      expect(error.name).toBe("SDKError");
+      expect(error.code).toBe("INVALID_VC_HASH");
     });
   });
 

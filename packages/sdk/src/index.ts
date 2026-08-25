@@ -62,6 +62,31 @@ export interface ProtocolConfig {
   timeoutSeconds?: number;
   maxRetries?: number;
   baseFee?: string;
+  confirmationTimeoutMs?: number;
+  pollIntervalMs?: number;
+}
+
+export type SDKErrorCode =
+  | "INVALID_VC_HASH"
+  | "MISSING_REVOCATION_REGISTRY"
+  | "NOT_REGISTERED_ISSUER"
+  | "TRANSACTION_FAILED"
+  | "TRANSACTION_TIMEOUT";
+
+export class SDKError extends Error {
+  constructor(
+    public readonly code: SDKErrorCode,
+    message: string,
+    options?: { cause?: unknown },
+  ) {
+    super(message);
+    if (options?.cause !== undefined) {
+      this.cause = options.cause;
+    }
+    this.name = "SDKError";
+  }
+
+  declare readonly cause?: unknown;
 }
 
 /** A Stellar keypair, or a minimal object exposing a public key. */
@@ -405,25 +430,33 @@ export class StellarDIDCreditSDK {
   /**
    * Revoke a verifiable credential by its hash.
    *
-   * Submits one Soroban operation to the revocation-registry. The registry calls
-   * `mark_vc_revoked` on the identity-oracle in the same contract invocation.
-   * Soroban transactions execute atomically, so a failure in either contract
-   * discards every state change made by the invocation.
-   *
-   * @see https://developers.stellar.org/docs/learn/fundamentals/contract-development/contract-interactions/transaction-simulation
+   * The issuer signs one transaction calling `revocation_registry.revoke`.
+   * The registry is responsible for synchronizing the identity-oracle state.
+   * A submitted transaction is polled until it succeeds, fails, or reaches
+   * the configured confirmation deadline.
    *
    * @param issuerKeypair - Stellar keypair of the credential issuer
-   * @param subjectAddress - Stellar G... address of the credential subject
    * @param vcHash - SHA-256 hash of the verifiable credential (must be exactly 32 bytes)
    * @returns Transaction hash after successful ledger confirmation
+   * @throws SDKError with code `INVALID_VC_HASH` for a non-32-byte hash
+   * @throws SDKError with code `NOT_REGISTERED_ISSUER` for `IssuerMismatch`
    */
   async revokeVC(
     issuerKeypair: KeypairLike,
-    subjectAddress: string,
     vcHash: Buffer,
   ): Promise<string> {
     if (vcHash.length !== 32) {
-      throw new Error("vcHash must be exactly 32 bytes");
+      throw new SDKError(
+        "INVALID_VC_HASH",
+        "vcHash must be exactly 32 bytes",
+      );
+    }
+
+    if (!this.config.revocationRegistryId.trim()) {
+      throw new SDKError(
+        "MISSING_REVOCATION_REGISTRY",
+        "revocationRegistryId is required to revoke a VC",
+      );
     }
 
     const server = this.server;
@@ -449,24 +482,25 @@ export class StellarDIDCreditSDK {
         registryContract.call(
           "revoke",
           new Address(publicKey).toScVal(),
-          new Address(subjectAddress).toScVal(),
           hashScVal,
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     // Simulate to ensure the call succeeds
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(
+      throw createRevokeError(
         `revokeVC simulation failed; no revocation state was changed: ${sim.error}`,
+        sim.error,
       );
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error(
+      throw new SDKError(
+        "TRANSACTION_FAILED",
         "revokeVC simulation returned an unexpected response; no revocation state was changed",
       );
     }
@@ -479,17 +513,25 @@ export class StellarDIDCreditSDK {
     const response = await server.sendTransaction(preparedTx);
 
     if (response.status !== "PENDING") {
-      throw new Error(
+      throw createRevokeError(
         `revokeVC submission failed; no revocation was applied: ${response.errorResult}`,
+        response.errorResult,
       );
     }
 
     try {
-      await waitForTransactionConfirmation(server, response.hash, "revokeVC");
+      await waitForTransactionConfirmation(
+        server,
+        response.hash,
+        "revokeVC",
+        this.config.confirmationTimeoutMs ??
+          (this.config.timeoutSeconds ?? 30) * 1000,
+        this.config.pollIntervalMs ?? 1000,
+      );
     } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
-        `revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes: ${message}`,
+      throw createRevokeError(
+        `revokeVC failed; the atomic transaction rolled back both registry and identity-oracle changes: ${getErrorMessage(error)}`,
+        error,
       );
     }
 
@@ -883,10 +925,14 @@ async function waitForTransactionConfirmation(
   server: SorobanRpc.Server,
   txHash: string,
   operationName: string,
-  attempts = 20,
+  timeoutMs = 20_000,
   delayMs = 1000,
 ): Promise<void> {
-  for (let attempt = 0; attempt < attempts; attempt++) {
+  const deadline = Date.now() + timeoutMs;
+  let firstAttempt = true;
+
+  while (firstAttempt || Date.now() <= deadline) {
+    firstAttempt = false;
     const result = await server.getTransaction(txHash);
 
     const status = result.status as string;
@@ -901,9 +947,16 @@ async function waitForTransactionConfirmation(
         );
       }
       case "NOT_FOUND":
-      case "PENDING":
-        await sleep(delayMs);
+      case "PENDING": {
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) {
+          throw new Error(
+            `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
+          );
+        }
+        await sleep(Math.min(delayMs, remainingMs));
         break;
+      }
       default:
         throw new Error(
           `Unexpected transaction status for ${txHash}: ${String((result as unknown as { status: string }).status)}`,
@@ -914,6 +967,45 @@ async function waitForTransactionConfirmation(
   throw new Error(
     `Timed out waiting for ${operationName} transaction confirmation: ${txHash}`,
   );
+}
+
+function createRevokeError(message: string, details: unknown): SDKError {
+  if (containsIssuerMismatch(details)) {
+    return new SDKError(
+      "NOT_REGISTERED_ISSUER",
+      "The issuer is not registered for this VC hash",
+      { cause: details },
+    );
+  }
+
+  if (message.includes("Timed out waiting")) {
+    return new SDKError("TRANSACTION_TIMEOUT", message, { cause: details });
+  }
+
+  return new SDKError("TRANSACTION_FAILED", message, { cause: details });
+}
+
+function containsIssuerMismatch(value: unknown): boolean {
+  const text = getErrorMessage(value).toLowerCase();
+  return (
+    text.includes("issuermismatch") ||
+    text.includes("issuer mismatch") ||
+    /error\(contract,\s*#3\)/i.test(text)
+  );
+}
+
+function getErrorMessage(value: unknown): string {
+  if (value instanceof Error) {
+    return value.message;
+  }
+  if (typeof value === "string") {
+    return value;
+  }
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function sleep(ms: number): Promise<void> {
