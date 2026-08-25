@@ -138,52 +138,60 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 
 ---
 
-## Subscribing to Events (Node.js Example)
+## Subscribing to Events with the SDK
 
-Here is a Node.js example using the `@stellar/stellar-sdk` to subscribe to `VCAnch` events on the Identity Oracle contract.
+The TypeScript SDK provides polling helpers for the three events most useful to
+off-chain lenders, feeders, and analytics services. Each helper polls
+Soroban RPC's `getEvents` method and returns an unsubscribe function. Configure
+the polling interval with `pollIntervalMs`; no WebSocket connection is
+required.
 
 ```typescript
-import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
+import StellarDIDCreditSDK from "@stellar-did-credit/sdk";
 
-const rpcUrl = "https://soroban-testnet.stellar.org";
-const server = new SorobanRpc.Server(rpcUrl);
-const contractId = "CATORJPJ..."; // Replace with Identity Oracle contract ID
+const sdkConfig = {
+  identityOracleId: "C...",       // Identity Oracle contract ID
+  creditOracleId: "C...",         // Credit Oracle contract ID
+  revocationRegistryId: "C...",   // Revocation Registry contract ID
+  networkPassphrase: "Test SDF Network ; September 2015",
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  simAccount: "G...",             // Account used for read-only simulations
+  pollIntervalMs: 5_000,
+};
+const sdk = new StellarDIDCreditSDK(sdkConfig);
 
-async function pollEvents() {
-  const currentLedger = await server.getLatestLedger();
-  const startLedger = currentLedger.sequence - 100; // Start polling from 100 ledgers ago
+const stopAnchored = sdk.onVCAnchored(
+  sdkConfig.identityOracleId,
+  (issuer, subject, vcHash) => {
+    console.log("VC anchored", { issuer, subject, vcHash });
+    // Trigger your feeder sync logic here.
+  },
+);
 
-  console.log(`Polling events starting from ledger ${startLedger}...`);
+const stopScored = sdk.onScoreComputed(
+  sdkConfig.creditOracleId,
+  (subject, score) => {
+    console.log("Score computed", { subject, score });
+  },
+);
 
-  const response = await server.getEvents({
-    startLedger,
-    filters: [
-      {
-        type: "contract",
-        contractIds: [contractId],
-        topics: [
-          [
-            xdr.ScVal.scvSymbol("VCAnch").toXDR("base64")
-          ]
-        ]
-      }
-    ],
-    limit: 50
-  });
+const stopRevoked = sdk.onVCRevoked(
+  sdkConfig.revocationRegistryId,
+  (issuer, vcHash) => {
+    console.log("VC revoked", { issuer, vcHash });
+  },
+);
 
-  for (const event of response.events) {
-    const value = scValToNative(event.value);
-    // VCAnch value is a tuple/array: [issuer, subject, vc_hash]
-    const [issuer, subject, vcHash] = value;
-    console.log(`[VCAnch] Issuer: ${issuer}, Subject: ${subject}, Hash: ${vcHash}`);
-    
-    // Trigger your feeder sync logic here:
-    // await syncSubjectVCs(subject);
-  }
-}
-
-pollEvents().catch(console.error);
+// Call the returned functions during shutdown.
+void stopAnchored;
+void stopScored;
+void stopRevoked;
 ```
+
+The first poll begins at the latest ledger available from the RPC server.
+After each successful response, the SDK advances the subscription cursor to the
+next ledger after the latest ledger seen, so events are not delivered again by
+later polls.
 
 ---
 

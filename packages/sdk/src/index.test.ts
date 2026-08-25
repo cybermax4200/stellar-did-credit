@@ -19,6 +19,8 @@ const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
 const mockSendTransaction = jest.fn();
 const mockGetTransaction = jest.fn();
+const mockGetEvents = jest.fn();
+const mockGetLatestLedger = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -43,6 +45,9 @@ jest.mock("@stellar/stellar-sdk", () => ({
     },
     ScVal: {
       scvVoid: () => ({ switch: () => "scvVoid" }),
+      scvSymbol: (symbol: string) => ({
+        toXDR: () => `symbol:${symbol}`,
+      }),
     },
   },
   Keypair: {},
@@ -80,6 +85,8 @@ jest.mock("@stellar/stellar-sdk", () => ({
       sendTransaction: mockSendTransaction,
       simulateTransaction: mockSimulateTransaction,
       getTransaction: mockGetTransaction,
+      getEvents: mockGetEvents,
+      getLatestLedger: mockGetLatestLedger,
     })),
     assembleTransaction: jest.fn().mockReturnValue({
       build: jest.fn().mockReturnValue({
@@ -123,6 +130,8 @@ describe("StellarDIDCreditSDK", () => {
     mockGetAccount.mockReset();
     mockSendTransaction.mockReset();
     mockGetTransaction.mockReset();
+    mockGetEvents.mockReset();
+    mockGetLatestLedger.mockReset();
     mockContractCalls.length = 0;
     mockLastContractCall = undefined;
     mockGetAccount.mockResolvedValue({ sequenceNumber: () => "1" });
@@ -343,6 +352,143 @@ describe("StellarDIDCreditSDK", () => {
       await sdk.isVerified(subjectAddress);
 
       expect(serverMock).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe("event subscriptions", () => {
+    const issuer = "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const vcHash = Buffer.alloc(32, 7);
+
+    beforeEach(() => {
+      jest.useFakeTimers();
+      mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+    });
+
+    afterEach(() => {
+      jest.useRealTimers();
+    });
+
+    it("polls VCAnch pages, decodes each event, and stops after unsubscribe", async () => {
+      mockGetEvents
+        .mockResolvedValueOnce({
+          latestLedger: 101,
+          events: [
+            {
+              ledger: 100,
+              value: {
+                value: [issuer, subjectAddress, vcHash],
+              },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          latestLedger: 102,
+          events: [
+            {
+              ledger: 102,
+              value: {
+                value: [issuer, subjectAddress, Buffer.alloc(32, 8)],
+              },
+            },
+          ],
+        });
+
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 10,
+      });
+      const received: Array<[string, string, Buffer]> = [];
+      const unsubscribe = sdk.onVCAnchored(
+        mockConfig.identityOracleId,
+        (eventIssuer, eventSubject, eventHash) => {
+          received.push([eventIssuer, eventSubject, eventHash]);
+        },
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(received).toEqual([[issuer, subjectAddress, vcHash]]);
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({
+          startLedger: 100,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [mockConfig.identityOracleId],
+              topics: [["symbol:VCAnch"]],
+            },
+          ],
+        }),
+      );
+
+      await jest.advanceTimersByTimeAsync(10);
+      expect(received).toEqual([
+        [issuer, subjectAddress, vcHash],
+        [issuer, subjectAddress, Buffer.alloc(32, 8)],
+      ]);
+      expect(mockGetEvents).toHaveBeenLastCalledWith(
+        expect.objectContaining({ startLedger: 102 }),
+      );
+
+      unsubscribe();
+      await jest.advanceTimersByTimeAsync(10);
+      expect(mockGetEvents).toHaveBeenCalledTimes(2);
+    });
+
+    it("decodes Score and Revoked event tuples", async () => {
+      mockGetEvents
+        .mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            {
+              ledger: 100,
+              value: { value: [subjectAddress, 612] },
+            },
+          ],
+        })
+        .mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            {
+              ledger: 100,
+              value: { value: [issuer, vcHash] },
+            },
+          ],
+        });
+
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 10,
+      });
+      const scoreCallback = jest.fn();
+      const revokeCallback = jest.fn();
+      const stopScore = sdk.onScoreComputed(
+        mockConfig.creditOracleId,
+        scoreCallback,
+      );
+      const stopRevoke = sdk.onVCRevoked(
+        mockConfig.revocationRegistryId,
+        revokeCallback,
+      );
+
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(scoreCallback).toHaveBeenCalledWith(subjectAddress, 612);
+      expect(revokeCallback).toHaveBeenCalledWith(issuer, vcHash);
+
+      stopScore();
+      stopRevoke();
+    });
+
+    it("rejects an invalid polling interval", () => {
+      const sdk = new StellarDIDCreditSDK({
+        ...mockConfig,
+        pollIntervalMs: 0,
+      });
+
+      expect(() =>
+        sdk.onScoreComputed(mockConfig.creditOracleId, jest.fn()),
+      ).toThrow("pollIntervalMs must be a positive number");
     });
   });
 

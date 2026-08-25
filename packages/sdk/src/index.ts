@@ -80,6 +80,8 @@ export interface ProtocolConfig {
   pollIntervalMs?: number;
 }
 
+export type Unsubscribe = () => void;
+
 export type SDKErrorCode =
   | "INVALID_VC_HASH"
   | "MISSING_REVOCATION_REGISTRY"
@@ -1210,6 +1212,154 @@ export class StellarDIDCreditSDK {
 
     return parseGovernanceProposalList(resultScVal);
   }
+
+  /**
+   * Poll for VCAnch events emitted by an identity-oracle contract.
+   *
+   * The first poll starts at the latest ledger returned by the RPC server.
+   * Subsequent polls begin after the latest ledger seen by this subscription.
+   *
+   * @param contractId - Identity-oracle contract ID to monitor
+   * @param callback - Called with the issuer, subject, and 32-byte VC hash
+   * @returns A function that stops future polls for this subscription
+   */
+  onVCAnchored(
+    contractId: string,
+    callback: (issuer: string, subject: string, vcHash: Buffer) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "VCAnch",
+      (value) => {
+        const [issuer, subject, vcHash] = parseEventTuple(
+          value,
+          "VCAnch",
+          3,
+        );
+        callback(String(issuer), String(subject), toBuffer(vcHash));
+      },
+    );
+  }
+
+  /**
+   * Poll for Score events emitted by a credit-oracle contract.
+   *
+   * @param contractId - Credit-oracle contract ID to monitor
+   * @param callback - Called with the subject address and computed score
+   * @returns A function that stops future polls for this subscription
+   */
+  onScoreComputed(
+    contractId: string,
+    callback: (subject: string, score: number) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "Score",
+      (value) => {
+        const [subject, score] = parseEventTuple(value, "Score", 2);
+        callback(String(subject), Number(score));
+      },
+    );
+  }
+
+  /**
+   * Poll for Revoked events emitted by a revocation-registry contract.
+   *
+   * @param contractId - Revocation-registry contract ID to monitor
+   * @param callback - Called with the issuer and 32-byte VC hash
+   * @returns A function that stops future polls for this subscription
+   */
+  onVCRevoked(
+    contractId: string,
+    callback: (issuer: string, vcHash: Buffer) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      contractId,
+      "Revoked",
+      (value) => {
+        const [issuer, vcHash] = parseEventTuple(value, "Revoked", 2);
+        callback(String(issuer), toBuffer(vcHash));
+      },
+    );
+  }
+
+  private subscribeToEvents(
+    contractId: string,
+    eventName: string,
+    handleValue: (value: xdr.ScVal) => void,
+  ): Unsubscribe {
+    const pollIntervalMs = this.config.pollIntervalMs ?? 1000;
+    if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
+      throw new Error("pollIntervalMs must be a positive number");
+    }
+
+    let active = true;
+    let polling = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let lastSeenLedger: number | undefined;
+
+    const poll = async (): Promise<void> => {
+      if (!active || polling) {
+        return;
+      }
+
+      polling = true;
+      try {
+        if (lastSeenLedger === undefined) {
+          const latestLedger = await this.server.getLatestLedger();
+          lastSeenLedger = latestLedger.sequence;
+        }
+
+        if (!active) {
+          return;
+        }
+
+        const response = await this.server.getEvents({
+          startLedger: lastSeenLedger,
+          filters: [
+            {
+              type: "contract",
+              contractIds: [contractId],
+              topics: [[xdr.ScVal.scvSymbol(eventName).toXDR("base64")]],
+            },
+          ],
+          limit: 100,
+        });
+
+        const latestEventLedger = response.events.reduce(
+          (highestLedger, event) => Math.max(highestLedger, event.ledger),
+          lastSeenLedger,
+        );
+        lastSeenLedger =
+          Math.max(response.latestLedger, latestEventLedger) + 1;
+
+        for (const event of response.events) {
+          if (!active) {
+            break;
+          }
+          handleValue(event.value);
+        }
+      } catch {
+        // Keep polling after transient RPC failures. The ledger cursor is only
+        // advanced after a successful getEvents response.
+      } finally {
+        polling = false;
+        if (active) {
+          timer = setTimeout(() => void poll(), pollIntervalMs);
+        }
+      }
+    };
+
+    void poll();
+
+    return () => {
+      active = false;
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        timer = undefined;
+      }
+    };
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
@@ -1431,6 +1581,30 @@ async function sendTransactionWithRetry(
 
     await sleep(getRetryDelayMs(attempt));
   }
+}
+
+function parseEventTuple(
+  scVal: xdr.ScVal,
+  eventName: string,
+  expectedLength: number,
+): unknown[] {
+  const native = scValToNative(scVal);
+  if (!Array.isArray(native) || native.length !== expectedLength) {
+    throw new Error(
+      `${eventName} event data must be a tuple with ${expectedLength} values`,
+    );
+  }
+  return native;
+}
+
+function toBuffer(value: unknown): Buffer {
+  if (Buffer.isBuffer(value)) {
+    return value;
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value);
+  }
+  throw new Error("event data contains an invalid byte value");
 }
 
 async function waitForTransactionConfirmation(
