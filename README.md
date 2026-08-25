@@ -345,7 +345,7 @@ if (score) {
 | Method                           | Status         |
 | -------------------------------- | -------------- |
 | `getScore(address)`              | ✅ Implemented |
-| `isVerified(address)`            | 🚧 Open        |
+| `isVerified(address)`            | ✅ Implemented |
 | `anchorDID(keypair, cid)`        | 🚧 Open        |
 | `issueVC(issuer, subject, hash)` | 🚧 Open        |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
