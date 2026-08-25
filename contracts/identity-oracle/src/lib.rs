@@ -224,14 +224,22 @@ fn store_credential_type(
 }
 
 /// Returns true if `s` starts with `prefix`.
+///
+/// Uses `copy_into_slice` — the only byte-level accessor on
+/// `soroban_sdk::String` in SDK v22 — to extract the relevant bytes into a
+/// fixed-size stack buffer before comparing.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
-    let plen = prefix.len();
-    if s.len() < plen {
+    let plen = prefix.len() as usize;
+    let slen = s.len() as usize;
+    if slen < plen {
         return false;
     }
-    let s_bytes = s.to_bytes();
-    let prefix_bytes = prefix.to_bytes();
-    s_bytes.slice(0..plen) == prefix_bytes
+    // Stack buffers sized to the maximum CID length we ever accept.
+    let mut s_buf = [0u8; MAX_CID_LENGTH as usize];
+    let mut p_buf = [0u8; MAX_CID_LENGTH as usize];
+    s.copy_into_slice(&mut s_buf[..slen]);
+    prefix.copy_into_slice(&mut p_buf[..plen]);
+    s_buf[..plen] == p_buf[..plen]
 }
 
 #[contract]
@@ -1203,7 +1211,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
+    use soroban_sdk::testutils::Address as _;
 
     #[contract]
     pub struct MockRevocationRegistry;
