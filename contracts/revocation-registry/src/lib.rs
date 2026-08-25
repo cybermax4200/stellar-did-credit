@@ -91,6 +91,8 @@ pub enum RevocationRegistryError {
     /// A reentrant call into `revoke` was detected while a cross-contract
     /// call to identity-oracle was already in flight.
     ReentrancyDetected = 7,
+    /// Batch limit must be between 1 and MAX_BATCH_SIZE.
+    InvalidBatchLimit = 8,
 }
 
 /// Storage keys for revocation registry contract.
@@ -120,6 +122,8 @@ pub enum RevocationKey {
     /// Reentrancy guard for `revoke`. Present (= true) while a
     /// cross-contract call to identity-oracle is in flight; absent otherwise.
     ReentrancyLock,
+    /// Admin-configurable batch revoke limit. Bounded by MAX_BATCH_SIZE.
+    BatchLimit,
 }
 
 // ── Instance TTL bump constants ──────────────────────────────────
@@ -131,6 +135,9 @@ const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 // Extend persistent entries to ~30 days on every write.
 const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
+
+/// Hard safety cap for batch revoke operations. Admin cannot set a limit above this.
+const MAX_BATCH_SIZE: u32 = 100;
 
 /// On-chain revocation registry contract.
 #[contract]
@@ -150,6 +157,40 @@ impl RevocationRegistry {
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events()
             .publish((symbol_short!("Init"),), admin);
+        env.storage()
+            .instance()
+            .set(&RevocationKey::BatchLimit, &MAX_BATCH_SIZE);
+        Ok(())
+    }
+
+    /// Returns the current admin-configured batch revoke limit.
+    pub fn get_batch_limit(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&RevocationKey::BatchLimit)
+            .unwrap_or(MAX_BATCH_SIZE)
+    }
+
+    /// Admin-only: update the batch revoke limit. Cannot exceed MAX_BATCH_SIZE.
+    pub fn set_batch_limit(
+        env: Env,
+        admin: Address,
+        limit: u32,
+    ) -> Result<(), RevocationRegistryError> {
+        ensure_not_paused(&env)?;
+        let stored_admin = require_admin(&env);
+        if admin != stored_admin {
+            return Err(RevocationRegistryError::NotAuthorized);
+        }
+        if limit == 0 || limit > MAX_BATCH_SIZE {
+            return Err(RevocationRegistryError::InvalidBatchLimit);
+        }
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&RevocationKey::BatchLimit, &limit);
         Ok(())
     }
 
@@ -368,7 +409,12 @@ impl RevocationRegistry {
     ) -> Result<(), RevocationRegistryError> {
         ensure_not_paused(&env)?;
         issuer.require_auth();
-        if vc_hashes.len() > 100 {
+        let batch_limit: u32 = env
+            .storage()
+            .instance()
+            .get(&RevocationKey::BatchLimit)
+            .unwrap_or(MAX_BATCH_SIZE);
+        if vc_hashes.len() > batch_limit as usize {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
 
@@ -556,6 +602,50 @@ mod tests {
 
         let res = client.try_batch_revoke(&issuer, &vc_hashes);
         assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_set_batch_limit_and_enforce() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(client.get_batch_limit(), 100);
+
+        client.set_batch_limit(&admin, &5);
+        assert_eq!(client.get_batch_limit(), 5);
+
+        let issuer = Address::generate(&env);
+        let mut vc_hashes = Vec::new(&env);
+        for i in 0..6 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i as u8;
+            vc_hashes.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+
+        let res = client.try_batch_revoke(&issuer, &vc_hashes);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_set_batch_limit_rejects_invalid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let res = client.try_set_batch_limit(&admin, &0);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::InvalidBatchLimit)));
+
+        let res = client.try_set_batch_limit(&admin, &101);
+        assert_eq!(res, Err(Ok(RevocationRegistryError::InvalidBatchLimit)));
     }
 
     #[test]
