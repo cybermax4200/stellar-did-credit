@@ -16,28 +16,6 @@ export const MAX_SCORE = 850;
 
 export type NetworkType = 'testnet' | 'mainnet' | 'futurenet' | 'custom';
 
-/**
- * Network configurations for Stellar networks.
- */
-const NETWORK_CONFIGS: Record<Exclude<NetworkType, 'custom'>, Partial<ProtocolConfig>> = {
-  testnet: {
-    networkPassphrase: "Test SDF Network ; September 2015",
-    rpcUrl: "https://soroban-testnet.stellar.org",
-    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-  },
-  mainnet: {
-    networkPassphrase: "Public Global Stellar Network ; September 2015",
-    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
-    // Note: SIM_ACCOUNT for mainnet must be set explicitly to a funded account
-    simAccount: "",
-  },
-  futurenet: {
-    networkPassphrase: "Test SDF Future Network ; October 2022",
-    rpcUrl: "https://rpc-futurenet.stellar.org",
-    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
-  },
-};
-
 export interface ScoreRecord {
   score: number;
   lastUpdated: number;
@@ -88,6 +66,28 @@ export interface ProtocolConfig {
   baseFee?: string;
   network?: NetworkType;
 }
+
+/**
+ * Network configurations for Stellar networks.
+ */
+const NETWORK_CONFIGS: Record<Exclude<NetworkType, 'custom'>, Partial<ProtocolConfig>> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    // Note: SIM_ACCOUNT for mainnet must be set explicitly to a funded account
+    simAccount: "",
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022",
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
 
 /** A Stellar keypair, or a minimal object exposing a public key. */
 export type KeypairLike = Keypair | { publicKey: string };
