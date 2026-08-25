@@ -1,4 +1,4 @@
-#![no_std]
+﻿#![no_std]
 //! Governance contract for the Stellar DID Credit protocol.
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
@@ -61,6 +61,7 @@ pub enum DataKey {
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
     VoteWeightUsed(u64, Address),
+    TotalRegisteredWeight,
 }
 
 /// Instance-storage TTL bump constants.
@@ -196,6 +197,15 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+
+        let total_weight: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        if quorum_required > total_weight {
+            return Err(GovernanceError::InvalidQuorum);
+        }
         Ok(())
     }
 
@@ -204,6 +214,14 @@ impl Governance {
         env.storage()
             .instance()
             .get(&DataKey::QuorumRequired)
+            .unwrap_or(0)
+    }
+
+    /// Returns the total registered voting weight across all voters.
+    pub fn get_total_registered_weight(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
             .unwrap_or(0)
     }
 
@@ -500,6 +518,15 @@ impl Governance {
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
 
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total + weight));
+
         env.events()
             .publish((symbol_short!("VoterReg"), voter.clone()), weight);
 
@@ -531,6 +558,12 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         if weight == 0 {
             env.storage()
                 .persistent()
@@ -540,6 +573,15 @@ impl Governance {
                 .persistent()
                 .set(&DataKey::VoterWeight(voter.clone()), &weight);
         }
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
 
         env.events()
             .publish((symbol_short!("VoterUpd"), voter.clone()), weight);
@@ -568,9 +610,24 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         env.storage()
             .persistent()
             .remove(&DataKey::VoterWeight(voter.clone()));
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight));
 
         env.events()
             .publish((symbol_short!("VoterDer"), voter.clone()), ());
