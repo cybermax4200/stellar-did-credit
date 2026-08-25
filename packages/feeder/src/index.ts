@@ -84,15 +84,39 @@ export interface TxStats {
 /**
  * Minimal Horizon operation record shape used by fetchHorizonStats.
  * Only the fields needed for 30-day stats aggregation are surfaced.
+ *
+ * Extended to cover:
+ *   - payment               : plain XLM/asset transfer
+ *   - path_payment_strict_send / path_payment_strict_receive :
+ *       source_amount / source_asset_type (send side)
+ *       amount / asset_type (destination side)
+ *   - create_account        : counted toward tx_count only
+ *   - claim_claimable_balance : counted toward tx_count only
  */
 interface HorizonOperationRecord {
   type: string;
   transaction_hash: string;
   created_at: string;
+  /** Sender address (payment, path_payment_strict_send/receive) */
   from?: string;
+  /** Recipient address (payment, path_payment_strict_send/receive) */
   to?: string;
+  /** Destination amount string */
   amount?: string;
+  /** Destination asset type ("native" = XLM) */
   asset_type?: string;
+  /** Source amount string (path payments) */
+  source_amount?: string;
+  /** Source asset type (path payments, "native" = XLM) */
+  source_asset_type?: string;
+  /** New account address (create_account) */
+  account?: string;
+  /** Funder address (create_account) */
+  funder?: string;
+  /** Starting balance in XLM (create_account) */
+  starting_balance?: string;
+  /** Claimant address (claim_claimable_balance) */
+  claimant?: string;
 }
 
 /** Minimal shape of an HTTP error surfaced by Horizon/RPC clients. */
@@ -234,10 +258,23 @@ function isPermanentError(error: unknown): boolean {
 /**
  * Fetches 30-day payment statistics for a Stellar address via the Horizon API.
  *
- * Paginates backwards through the payment operation history, stopping at the
- * 30-day cutoff. Only native (XLM) payment amounts are included in the volume
- * total; non-native assets are counted toward tx_count and counterparties but
- * not volume, matching the credit-oracle's scoring semantics.
+ * Paginates backwards through the operation history (payments endpoint),
+ * stopping at the 30-day cutoff. The following operation types are recognised:
+ *
+ * | Op type                        | volume_30d       | tx_count_30d |
+ * | ------------------------------ | ---------------- | ------------ |
+ * | payment                        | XLM leg only     | ✓            |
+ * | path_payment_strict_send       | XLM source leg   | ✓            |
+ * | path_payment_strict_receive    | XLM dest leg     | ✓            |
+ * | create_account                 | —                | ✓            |
+ * | claim_claimable_balance        | —                | ✓            |
+ *
+ * Only native (XLM) asset amounts are included in volume; non-native assets
+ * are counted toward tx_count and counterparties but not volume, matching
+ * the credit-oracle's scoring semantics.
+ *
+ * This change is backward-compatible: existing scores cannot decrease because
+ * we only ever add to volume and tx_count.
  *
  * Returns empty stats if the address is invalid or the account is not found.
  */
@@ -341,6 +378,48 @@ export async function fetchHorizonStats(
         // Track the other party in this payment
         const counterparty = op.from === address ? op.to : op.from;
         if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (
+        op.type === "path_payment_strict_send" ||
+        op.type === "path_payment_strict_receive"
+      ) {
+        // For path payments we count whichever leg(s) are native (XLM).
+        // path_payment_strict_send:    source_amount / source_asset_type is the
+        //   amount the sender spent; amount / asset_type is what the recipient got.
+        // path_payment_strict_receive: same field layout from Horizon.
+        //
+        // Strategy: if the subject is the sender, count the XLM source leg;
+        //           if the subject is the recipient, count the XLM destination leg;
+        //           both legs can be XLM simultaneously (same-asset path).
+        if (op.from === address && op.source_asset_type === "native" && op.source_amount) {
+          const amountXLM = parseFloat(op.source_amount);
+          volumeStroops += BigInt(Math.round(amountXLM * 10_000_000));
+        }
+        if (op.to === address && op.asset_type === "native" && op.amount) {
+          const amountXLM = parseFloat(op.amount);
+          volumeStroops += BigInt(Math.round(amountXLM * 10_000_000));
+        }
+
+        // Track counterparty
+        const counterparty = op.from === address ? op.to : op.from;
+        if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (op.type === "create_account") {
+        // create_account counts as a transaction; no XLM volume is added
+        // (the starting_balance is locked in the new account, not a payment flow).
+        // Track the funder/new-account as a counterparty.
+        const counterparty = op.funder === address ? op.account : op.funder;
+        if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (op.type === "claim_claimable_balance") {
+        // Claimable balance claims represent real XLM flows but the amount
+        // requires a separate API call which is too expensive per-operation.
+        // Count them toward tx_count only; volume is not updated.
+        const counterparty = op.claimant;
+        if (counterparty && counterparty !== address) {
           counterpartiesPerTx.get(txHash)!.add(counterparty);
         }
       }

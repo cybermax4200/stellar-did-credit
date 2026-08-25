@@ -896,3 +896,209 @@ describe("Feeder oracle configuration handling", () => {
     getHasIdentityOracleSpy.mockRestore();
   }, 15_000);
 });
+
+// ---------------------------------------------------------------------------
+// fetchHorizonStats — mixed operation types (issue #503)
+// ---------------------------------------------------------------------------
+
+describe("fetchHorizonStats — mixed operation types", () => {
+  const SUBJECT = "GBAD5234567234567234567234567234567234567234567234567231";
+  const OTHER   = "GBAD5234567234567234567234567234567234567234567234567232";
+  const NOW_ISO = new Date(Date.now() - 60_000).toISOString(); // 1 minute ago
+
+  it("counts path_payment_strict_send XLM source leg in volume and tx_count", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "txhash-pps",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          // Source leg: 5 XLM native
+          source_asset_type: "native",
+          source_amount: "5.0000000",
+          // Destination leg: non-native asset
+          asset_type: "credit_alphanum4",
+          amount: "100.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // 5 XLM = 50_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(50_000_000));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("counts path_payment_strict_receive XLM destination leg in volume and tx_count", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_receive",
+          transaction_hash: "txhash-ppr",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          // Source leg: non-native
+          source_asset_type: "credit_alphanum4",
+          source_amount: "50.0000000",
+          // Destination leg: 10 XLM native received by SUBJECT
+          asset_type: "native",
+          amount: "10.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // 10 XLM = 100_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(100_000_000));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("does NOT count non-native path payment legs in volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "txhash-nonxlm",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          source_asset_type: "credit_alphanum4",
+          source_amount: "999.0000000",
+          asset_type: "credit_alphanum4",
+          amount: "888.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // No XLM legs — volume stays 0 but tx is counted
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("counts create_account in tx_count but not volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "create_account",
+          transaction_hash: "txhash-ca",
+          created_at: NOW_ISO,
+          funder: SUBJECT,
+          account: OTHER,
+          starting_balance: "1.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+    // OTHER is tracked as a counterparty
+    expect(stats.avgCounterparties).toBe(1);
+  });
+
+  it("counts claim_claimable_balance in tx_count but not volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "claim_claimable_balance",
+          transaction_hash: "txhash-ccb",
+          created_at: NOW_ISO,
+          claimant: SUBJECT,
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("aggregates mixed operation types correctly across one page", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        // 1) plain XLM payment — 3 XLM
+        {
+          type: "payment",
+          transaction_hash: "tx1",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          asset_type: "native",
+          amount: "3.0000000",
+        },
+        // 2) path_payment_strict_send — SUBJECT sends 5 XLM, receives non-native
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "tx2",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          source_asset_type: "native",
+          source_amount: "5.0000000",
+          asset_type: "credit_alphanum4",
+          amount: "200.0000000",
+        },
+        // 3) create_account — SUBJECT funded a new account (no volume)
+        {
+          type: "create_account",
+          transaction_hash: "tx3",
+          created_at: NOW_ISO,
+          funder: SUBJECT,
+          account: OTHER,
+          starting_balance: "1.0000000",
+        },
+        // 4) claim_claimable_balance — no volume
+        {
+          type: "claim_claimable_balance",
+          transaction_hash: "tx4",
+          created_at: NOW_ISO,
+          claimant: SUBJECT,
+        },
+        // 5) non-XLM payment — should not add to volume
+        {
+          type: "payment",
+          transaction_hash: "tx5",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          asset_type: "credit_alphanum4",
+          amount: "999.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // volume = 3 XLM (payment) + 5 XLM (path_payment source) = 8 XLM = 80_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(80_000_000));
+    // all 5 ops are in distinct transactions
+    expect(stats.txCount30d).toBe(5);
+  });
+});

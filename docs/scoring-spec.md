@@ -10,11 +10,34 @@ The credit-oracle contract computes a score in the range **`MIN_SCORE` (300)–`
 | ------------------------------- | ----------------------------- | ------------------------------------- |
 | `vc_count`                      | Feeder via `set_vc_count`     | `VcCount(subject)`                    |
 | `volume_30d`                    | Feeder via `update_tx_stats`  | `TxStats(subject).volume_30d`         |
+| `tx_count_30d`                  | Feeder via `update_tx_stats`  | `TxStats(subject).tx_count_30d`       |
 | `avg_counterparties`            | Feeder via `update_tx_stats`  | `TxStats(subject).avg_counterparties` |
 | `on_time_count` / `total_count` | Lender via `record_repayment` | `RepaymentRecord(subject)`            |
 | `total_repaid`                  | Lender via `record_repayment` | `RepaymentRecord(subject)`            |
 
 All inputs default to zero if never set. A subject with no history always scores exactly 300.
+
+### Horizon operation types included by the feeder
+
+The feeder's `fetchHorizonStats` function queries the Horizon **payments** endpoint
+(which also returns path payments, account creations, and claimable balance claims)
+and aggregates the following operation types for each subject:
+
+| Horizon op type                   | Counts toward `volume_30d`                             | Counts toward `tx_count_30d` |
+| --------------------------------- | ------------------------------------------------------ | ---------------------------- |
+| `payment`                         | Yes — XLM (`native`) leg only; non-native excluded     | Yes                          |
+| `path_payment_strict_send`        | Yes — XLM source leg if subject is sender              | Yes                          |
+| `path_payment_strict_receive`     | Yes — XLM destination leg if subject is recipient      | Yes                          |
+| `create_account`                  | No (starting balance is not a discretionary flow)      | Yes                          |
+| `claim_claimable_balance`         | No (balance amount requires a separate API lookup)     | Yes                          |
+
+**XLM-only rule:** only `asset_type === "native"` amounts are counted toward `volume_30d`.
+Non-native (USDC, custom tokens, etc.) path-payment legs are excluded from volume but still
+increment `tx_count_30d` and `avg_counterparties`.
+
+**Backward-compatibility:** these additions can only increase `volume_30d` and `tx_count_30d`
+relative to earlier feeder versions; existing subjects' scores will never decrease as a result
+of this change.
 
 ---
 
