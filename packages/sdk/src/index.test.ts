@@ -1,5 +1,6 @@
 import {
   StellarDIDCreditSDK,
+  GovernanceClient,
   SDKError,
   ScoreNotComputedError,
   MIN_SCORE,
@@ -1467,7 +1468,10 @@ describe("test_all_exports_are_defined", () => {
 
 describe("listProposals", () => {
   it("throws error if governanceId is not configured", async () => {
-    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const sdk = new StellarDIDCreditSDK({
+      ...mockConfig,
+      governanceId: undefined,
+    });
     await expect(sdk.listProposals(1, 10)).rejects.toThrow(
       "governanceId is not configured in ProtocolConfig",
     );
@@ -1524,4 +1528,3 @@ describe("listProposals", () => {
     });
   });
 });
-
