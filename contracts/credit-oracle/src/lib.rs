@@ -34,6 +34,8 @@ pub enum CreditOracleError {
     InvalidInputKey = 10,
     /// The provided identity oracle contract is invalid or did not respond.
     InvalidIdentityOracle = 11,
+    /// The contract is currently paused and cannot accept writes.
+    ContractPaused = 12,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -94,6 +96,8 @@ pub enum DataKey {
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
+    /// Whether the contract is currently paused for writes.
+    Paused,
 }
 
 /// Pure scoring function that computes a credit score from input parameters.
@@ -292,6 +296,19 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        Err(CreditOracleError::ContractPaused)
+    } else {
+        Ok(())
+    }
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -503,12 +520,57 @@ impl CreditOracle {
     }
 
     /// Update transaction statistics for a user
+    /// Pause all writes on the contract.
+    ///
+    /// Auth: admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    ///
+    /// Auth: admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Returns true if the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn update_tx_stats(
         env: Env,
         feeder: Address,
         subject: Address,
         stats: TxStats,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -531,6 +593,7 @@ impl CreditOracle {
         amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         lender.require_auth();
         if !env
             .storage()
@@ -630,6 +693,7 @@ impl CreditOracle {
         subject: Address,
         count: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -705,6 +769,7 @@ impl CreditOracle {
         vc_id: BytesN<32>,
         vc_type: Option<Symbol>,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
         if !env
             .storage()
@@ -747,6 +812,7 @@ impl CreditOracle {
 
     /// Compute and store credit score for a user
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        ensure_not_paused(&env)?;
         // Reject if last computation was within the cooldown window
         Self::check_compute_cooldown(&env, &subject)?;
 
@@ -1024,6 +1090,7 @@ impl CreditOracle {
 
     /// Apply pending weights after timelock expires
     pub fn apply_weights(env: Env) {
+        let _ = ensure_not_paused(&env);
         let effective_ledger: u32 = env
             .storage()
             .instance()

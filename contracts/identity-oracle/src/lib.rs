@@ -102,7 +102,13 @@ pub enum IdentityOracleError {
     ContractPaused = 8,
     /// The provided revocation registry contract is invalid or did not respond.
     InvalidRevocationRegistry = 9,
+    /// The subject has reached the maximum number of active VCs allowed.
+    VCLimitReached = 10,
 }
+
+/// Maximum number of active (non-revoked) VCs a subject can have anchored.
+/// Prevents unbounded Vec growth and gas exhaustion on read paths.
+const MAX_VCS_PER_SUBJECT: u32 = 100;
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -746,6 +752,15 @@ impl IdentityOracle {
             if record.vc_hash == vc_hash && record.issuer == issuer {
                 return Ok(());
             }
+        }
+
+        // Enforce active VC cap: revoked VCs do not count toward the limit.
+        let active_count: u32 = anchors
+            .iter()
+            .filter(|r| !r.revoked && !is_record_revoked(&env, r))
+            .count() as u32;
+        if active_count >= MAX_VCS_PER_SUBJECT {
+            return Err(IdentityOracleError::VCLimitReached);
         }
 
         let record = VCRecord {
@@ -2272,6 +2287,78 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+
+    #[test]
+    fn test_vc_limit_reached_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 1;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 1;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash_101);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
+
+    #[test]
+    fn test_revoked_vcs_do_not_count_toward_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+        }
+
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 3;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        assert_eq!(client.get_active_vc_count(&subject), 100);
     }
 
     #[test]
