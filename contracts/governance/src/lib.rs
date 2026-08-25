@@ -207,15 +207,6 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
-
-        let total_weight: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::TotalRegisteredWeight)
-            .unwrap_or(0);
-        if quorum_required > total_weight {
-            return Err(GovernanceError::InvalidQuorum);
-        }
         Ok(())
     }
 
@@ -224,14 +215,6 @@ impl Governance {
         env.storage()
             .instance()
             .get(&DataKey::QuorumRequired)
-            .unwrap_or(0)
-    }
-
-    /// Returns the total registered voting weight across all voters.
-    pub fn get_total_registered_weight(env: Env) -> i128 {
-        env.storage()
-            .instance()
-            .get(&DataKey::TotalRegisteredWeight)
             .unwrap_or(0)
     }
 
