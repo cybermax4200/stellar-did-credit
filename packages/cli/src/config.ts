@@ -2,14 +2,34 @@ import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import type { ProtocolConfig } from "@stellar-did-credit/sdk";
 
+export type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
+
 /**
- * Default network configuration — targets Stellar testnet when no overrides
- * are provided via environment variables or config files.
+ * Network configurations for Stellar networks.
  */
-const DEFAULTS: Partial<ProtocolConfig> = {
-  networkPassphrase: "Test SDF Network ; September 2015",
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+const NETWORK_CONFIGS: Record<NetworkType, Partial<ProtocolConfig>> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    // Note: SIM_ACCOUNT for mainnet must be set via env var to a funded account
+    simAccount: "",
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022",
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
+
+/**
+ * Default configuration values that apply across all networks.
+ */
+const BASE_DEFAULTS: Partial<ProtocolConfig> = {
   timeoutSeconds: 30,
   maxRetries: 3,
 };
@@ -27,13 +47,18 @@ const CONFIG_FILE_NAMES = [
  * Load the CLI configuration by merging values from (in order of precedence):
  *   1. Environment variables (highest priority)
  *   2. A JSON config file (searched in cwd then $HOME)
- *   3. Built-in defaults (testnet)
+ *   3. Network-specific defaults (testnet/mainnet/futurenet)
+ *   4. Base defaults
  *
  * Required fields throw if not set anywhere.
  */
-export function loadConfig(): ProtocolConfig {
-  // 1. Start with defaults
-  const config: Record<string, unknown> = { ...DEFAULTS };
+export function loadConfig(network?: NetworkType): ProtocolConfig {
+  // 1. Start with base defaults and network-specific defaults
+  const selectedNetwork = network || getNetworkFromEnv() || 'testnet';
+  const config: Record<string, unknown> = { 
+    ...BASE_DEFAULTS,
+    ...NETWORK_CONFIGS[selectedNetwork],
+  };
 
   // 2. Try loading from a config file
   const configPath = findConfigFile();
@@ -58,7 +83,7 @@ export function loadConfig(): ProtocolConfig {
   mergeEnvOverrides(config);
 
   // 4. Validate required fields
-  assertRequired(config);
+  assertRequired(config, selectedNetwork);
 
   return config as unknown as ProtocolConfig;
 }
@@ -66,6 +91,14 @@ export function loadConfig(): ProtocolConfig {
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+function getNetworkFromEnv(): NetworkType | null {
+  const networkEnv = process.env['NETWORK']?.toLowerCase();
+  if (networkEnv === 'testnet' || networkEnv === 'mainnet' || networkEnv === 'futurenet') {
+    return networkEnv;
+  }
+  return null;
+}
 
 function findConfigFile(): string | null {
   const cwd = process.cwd();
@@ -164,20 +197,41 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
   }
 }
 
-function assertRequired(config: Record<string, unknown>): void {
+function assertRequired(config: Record<string, unknown>, network: NetworkType): void {
   const required: string[] = [
     "identityOracleId",
-    "creditOracleId",
+    "creditOracleId", 
     "revocationRegistryId",
   ];
   const missing = required.filter((k) => !config[k]);
   if (missing.length > 0) {
+    if (network === 'mainnet') {
+      console.error(
+        `Error: No ${network} contract IDs configured. Set ${missing.map(k => {
+          switch(k) {
+            case 'identityOracleId': return 'IDENTITY_ORACLE_ID=C...';
+            case 'creditOracleId': return 'CREDIT_ORACLE_ID=C...';
+            case 'revocationRegistryId': return 'REVOCATION_REGISTRY_ID=C...';
+            default: return `${k.toUpperCase()}=C...`;
+          }
+        }).join(', ')} for mainnet.`
+      );
+    } else {
+      console.error(
+        `Error: Missing required configuration for: ${missing.join(", ")}`,
+      );
+      console.error(
+        "Set them via environment variables (IDENTITY_ORACLE_ID, CREDIT_ORACLE_ID, " +
+          "REVOCATION_REGISTRY_ID) or a config file (stellar-did-config.json).",
+      );
+    }
+    process.exit(1);
+  }
+
+  // Validate mainnet SIM_ACCOUNT requirement
+  if (network === 'mainnet' && !config.simAccount) {
     console.error(
-      `Error: Missing required configuration for: ${missing.join(", ")}`,
-    );
-    console.error(
-      "Set them via environment variables (IDENTITY_ORACLE_ID, CREDIT_ORACLE_ID, " +
-        "REVOCATION_REGISTRY_ID) or a config file (stellar-did-config.json).",
+      "Error: SIM_ACCOUNT is required for mainnet operations. Set SIM_ACCOUNT=G... to a funded mainnet account."
     );
     process.exit(1);
   }

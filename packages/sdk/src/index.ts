@@ -14,6 +14,30 @@ import {
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
 
+export type NetworkType = 'testnet' | 'mainnet' | 'futurenet' | 'custom';
+
+/**
+ * Network configurations for Stellar networks.
+ */
+const NETWORK_CONFIGS: Record<Exclude<NetworkType, 'custom'>, Partial<ProtocolConfig>> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    // Note: SIM_ACCOUNT for mainnet must be set explicitly to a funded account
+    simAccount: "",
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022",
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
+
 export interface ScoreRecord {
   score: number;
   lastUpdated: number;
@@ -62,17 +86,54 @@ export interface ProtocolConfig {
   timeoutSeconds?: number;
   maxRetries?: number;
   baseFee?: string;
+  network?: NetworkType;
 }
 
 /** A Stellar keypair, or a minimal object exposing a public key. */
 export type KeypairLike = Keypair | { publicKey: string };
 
+/**
+ * Create a ProtocolConfig with network-specific defaults.
+ * 
+ * @param network - Network type (testnet, mainnet, futurenet, custom)
+ * @param overrides - Configuration overrides
+ * @returns Complete ProtocolConfig with network defaults applied
+ */
+export function createNetworkConfig(
+  network: NetworkType,
+  overrides: Partial<ProtocolConfig> = {}
+): Partial<ProtocolConfig> {
+  if (network === 'custom') {
+    return overrides;
+  }
+  
+  const networkDefaults = NETWORK_CONFIGS[network];
+  return {
+    ...networkDefaults,
+    ...overrides,
+    network,
+  };
+}
+
 export class StellarDIDCreditSDK {
   private server: SorobanRpc.Server;
 
-  constructor(private config: ProtocolConfig) {
+  constructor(config: ProtocolConfig) {
+    // Apply network defaults if network is specified but URL fields are missing
+    if (config.network && config.network !== 'custom') {
+      const networkDefaults = NETWORK_CONFIGS[config.network];
+      this.config = {
+        ...networkDefaults,
+        ...config,
+      } as ProtocolConfig;
+    } else {
+      this.config = config;
+    }
+
     this.server = new SorobanRpc.Server(this.config.rpcUrl);
   }
+
+  private config: ProtocolConfig;
 
   /**
    * Anchor a DID document on-chain by storing its IPFS CID.

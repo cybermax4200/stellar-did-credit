@@ -43,6 +43,38 @@ import {
 } from "@stellar/stellar-sdk";
 
 // ---------------------------------------------------------------------------
+// Network configurations
+// ---------------------------------------------------------------------------
+
+type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
+
+const NETWORK_CONFIGS: Record<NetworkType, {
+  networkPassphrase: string;
+  rpcUrl: string;
+  horizonUrl: string;
+  simAccount: string;
+}> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org", 
+    horizonUrl: "https://horizon-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    horizonUrl: "https://horizon.stellar.org",
+    simAccount: "", // Must be set via env var for mainnet
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022", 
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    horizonUrl: "https://horizon-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -69,6 +101,8 @@ export interface FeederConfig {
   retryBaseDelayMs?: number;
   /** Whether to skip legacy set_vc_count calls when identity oracle is configured */
   skipLegacyVcCount?: boolean;
+  /** Network type for configuration */
+  network?: string;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -975,15 +1009,28 @@ if (require.main === module) {
   const creditOracleId = requireEnv("CREDIT_ORACLE_ID");
   const identityOracleId = requireEnv("IDENTITY_ORACLE_ID");
 
-  const networkPassphrase =
-    process.env["NETWORK_PASSPHRASE"] ?? "Test SDF Network ; September 2015";
-  const rpcUrl =
-    process.env["RPC_URL"] ?? "https://soroban-testnet.stellar.org";
-  const horizonUrl =
-    process.env["HORIZON_URL"] ?? "https://horizon-testnet.stellar.org";
-  const simAccount =
-    process.env["SIM_ACCOUNT"] ??
-    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  // Get network from NETWORK env var, default to testnet
+  const network = (process.env["NETWORK"]?.toLowerCase() as NetworkType) || 'testnet';
+  if (network !== 'testnet' && network !== 'mainnet' && network !== 'futurenet') {
+    console.error(`Error: NETWORK must be one of: testnet, mainnet, futurenet. Got: ${process.env["NETWORK"]}`);
+    process.exit(1);
+  }
+
+  // Get network defaults, allow env var overrides
+  const networkDefaults = NETWORK_CONFIGS[network];
+  const networkPassphrase = process.env["NETWORK_PASSPHRASE"] ?? networkDefaults.networkPassphrase;
+  const rpcUrl = process.env["RPC_URL"] ?? networkDefaults.rpcUrl;
+  const horizonUrl = process.env["HORIZON_URL"] ?? networkDefaults.horizonUrl;
+  const simAccount = process.env["SIM_ACCOUNT"] ?? networkDefaults.simAccount;
+
+  // Validate mainnet SIM_ACCOUNT requirement
+  if (network === 'mainnet' && !simAccount) {
+    console.error(
+      "Error: SIM_ACCOUNT is required for mainnet feeder operations. Set SIM_ACCOUNT=G... to a funded mainnet account."
+    );
+    process.exit(1);
+  }
+
   const pollIntervalMs = parsePollIntervalMs(
     process.env["POLL_INTERVAL_MS"] ?? "3600000",
   );
@@ -1038,6 +1085,7 @@ if (require.main === module) {
 
   console.log("[feeder] starting");
   console.log(`  feeder     : ${feederKeypair.publicKey()}`);
+  console.log(`  network    : ${network}`);
   console.log(`  subjects   : ${validSubjects.join(", ")}`);
   console.log(`  interval   : ${pollIntervalMs}ms`);
   console.log(`  rpc        : ${rpcUrl}`);
@@ -1056,6 +1104,7 @@ if (require.main === module) {
     pollIntervalMs,
     maxRetries,
     retryBaseDelayMs,
+    network,
   };
 
   const feeder = new Feeder(config, feederKeypair);
