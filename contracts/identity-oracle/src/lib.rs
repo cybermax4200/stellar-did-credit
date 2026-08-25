@@ -189,6 +189,9 @@ pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 
+/// Maximum allowed CID length in bytes.
+pub const MAX_CID_LENGTH: u32 = 128;
+
 fn generic_credential_type(_env: &Env) -> Symbol {
     symbol_short!("generic")
 }
@@ -214,18 +217,15 @@ fn store_credential_type(
         .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
-/// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
-/// `prefix` must be ≤ 32 bytes.
+/// Returns true if `s` starts with `prefix`.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
-    let plen = prefix.len() as usize;
-    if (s.len() as usize) < plen {
+    let plen = prefix.len();
+    if s.len() < plen {
         return false;
     }
-    let mut sbuf = [0u8; 64];
-    let mut pbuf = [0u8; 32];
-    s.copy_into_slice(&mut sbuf[..s.len() as usize]);
-    prefix.copy_into_slice(&mut pbuf[..plen]);
-    sbuf[..plen] == pbuf[..plen]
+    let s_bytes = s.to_bytes();
+    let prefix_bytes = prefix.to_bytes();
+    s_bytes.slice(0..plen) == prefix_bytes
 }
 
 #[contract]
@@ -628,7 +628,7 @@ impl IdentityOracle {
         subject.require_auth();
 
         let len = did_doc_cid.len();
-        if len < 7 {
+        if len < 7 || len > MAX_CID_LENGTH {
             return Err(IdentityOracleError::InvalidCID);
         }
 
@@ -2272,5 +2272,43 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+
+    #[test]
+    fn test_anchor_did_accepts_exactly_65_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 65 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        client.anchor_did(&subject, &cid);
+        
+        let stored = client.get_did_document(&subject);
+        assert_eq!(stored.unwrap(), cid);
+    }
+
+    #[test]
+    fn test_anchor_did_rejects_256_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 256 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        let result = client.try_anchor_did(&subject, &cid);
+        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
     }
 }
