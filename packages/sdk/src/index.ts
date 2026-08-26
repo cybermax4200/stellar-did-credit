@@ -87,7 +87,8 @@ export type SDKErrorCode =
   | "MISSING_REVOCATION_REGISTRY"
   | "NOT_REGISTERED_ISSUER"
   | "TRANSACTION_FAILED"
-  | "TRANSACTION_TIMEOUT";
+  | "TRANSACTION_TIMEOUT"
+  | "COOLDOWN_ACTIVE";
 
 export class SDKError extends Error {
   constructor(
@@ -542,36 +543,40 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * Compute and persist a subject's credit score, then return the stored ScoreRecord.
+   * Compute and persist a subject's credit score, then return the computed score.
    *
    * Submits a signed transaction to the credit-oracle contract, waits for ledger
-   * confirmation, then fetches the persisted score via `getScore`.
+   * confirmation, then fetches the persisted score via `getScore` and returns
+   * the numeric score value.
    *
-   * **Note on Cooldowns:** The `compute_score` contract method is protected by a 
-   * cooldown period (`ComputeCooldownLedgers`). If this method is called while the 
-   * cooldown is active (or immediately after a fresh deployment before the initial 
-   * cooldown has passed), the transaction will fail.
+   * **Note on Cooldowns:** The `compute_score` contract method is protected by a
+   * cooldown period (`ComputeCooldownLedgers`). If this method is called while the
+   * cooldown is active (or immediately after a fresh deployment before the initial
+   * cooldown has passed), the transaction will fail and throw an `SDKError` with
+   * code `COOLDOWN_ACTIVE`.
    *
-   * @param payerKeypair - Stellar keypair paying the transaction fee
+   * @param payerKeypair - Stellar keypair (or object with publicKey) paying the transaction fee
    * @param subjectAddress - Stellar G... address of the subject
-   * @returns Persisted ScoreRecord after the compute_score transaction is confirmed
-   * @throws Error if the transaction fails due to the cooldown period being active
+   * @returns The computed score number (300–850)
+   * @throws SDKError with code `COOLDOWN_ACTIVE` if the cooldown period is active
+   * @throws SDKError with code `TRANSACTION_FAILED` if the transaction fails
+   * @throws SDKError with code `TRANSACTION_TIMEOUT` if confirmation times out
    */
   async computeScore(
-    payerKeypair: Keypair,
+    payerKeypair: KeypairLike,
     subjectAddress: string,
-  ): Promise<ScoreRecord> {
+  ): Promise<number> {
     const contract = new Contract(this.config.creditOracleId);
 
-    const publicKey = payerKeypair.publicKey();
+    const publicKey = getPublicKey(payerKeypair);
 
     const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
 
     const tx = new TransactionBuilder(sourceAccount, {
-          fee: this.config.baseFee ?? BASE_FEE,
-          networkPassphrase: this.config.networkPassphrase,
-        })
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
       .addOperation(
         contract.call("compute_score", new Address(subjectAddress).toScVal()),
       )
@@ -582,17 +587,26 @@ export class StellarDIDCreditSDK {
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
       if (sim.error && sim.error.toLowerCase().includes("cooldown")) {
-        throw new Error(`computeScore failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.`);
+        throw new SDKError(
+          "COOLDOWN_ACTIVE",
+          "Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
+        );
       }
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throw new SDKError(
+        "TRANSACTION_FAILED",
+        `Simulation failed: ${sim.error}`,
+      );
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error("Simulation returned unexpected response");
+      throw new SDKError(
+        "TRANSACTION_FAILED",
+        "Simulation returned unexpected response",
+      );
     }
 
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
-    preparedTx.sign(payerKeypair);
+    preparedTx.sign(payerKeypair as Keypair);
 
     const txHash = await sendTransactionWithRetry(
       this.server,
@@ -605,33 +619,50 @@ export class StellarDIDCreditSDK {
             .toLowerCase()
             .includes("cooldown")
         ) {
-          return new Error(
-            "Transaction submission failed: Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
+          return new SDKError(
+            "COOLDOWN_ACTIVE",
+            "Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
           );
         }
-        return new Error(
+        return new SDKError(
+          "TRANSACTION_FAILED",
           `Transaction submission failed: ${String(submissionResponse.errorResult)}`,
         );
       },
     );
 
-    await waitForTransactionConfirmation(
-      this.server,
-      txHash,
-      "computeScore",
-      getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
-    );
+    try {
+      await waitForTransactionConfirmation(
+        this.server,
+        txHash,
+        "computeScore",
+        getConfirmationTimeoutMs(this.config),
+        this.config.pollIntervalMs ?? 1000,
+      );
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.toLowerCase().includes("cooldown")) {
+        throw new SDKError(
+          "COOLDOWN_ACTIVE",
+          "Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.",
+        );
+      }
+      throw error;
+    }
 
     try {
       const score = await this.getScore(subjectAddress);
       if (!score) {
         throw new ScoreNotComputedError(subjectAddress);
       }
-      return score;
+      return score.score;
     } catch (error) {
+      if (error instanceof SDKError) {
+        throw error;
+      }
       const message = error instanceof Error ? error.message : String(error);
-      throw new Error(
+      throw new SDKError(
+        "TRANSACTION_FAILED",
         `computeScore transaction succeeded and was confirmed, but fetching the stored score for ${subjectAddress} failed: ${message}`,
       );
     }

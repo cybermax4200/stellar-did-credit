@@ -78,9 +78,10 @@ describeE2E("E2E: deployed testnet contracts", () => {
     expect(txHash.length).toBeGreaterThan(0);
   }, TIMEOUT_MS);
 
-  it("computeScore persists a score and getScore returns score > MIN_SCORE", async () => {
-    const record = await sdk.computeScore(subjectKeypair, subjectKeypair.publicKey());
-    expect(record.score).toBeGreaterThan(MIN_SCORE);
+  it("computeScore persists a score and returns score > MIN_SCORE", async () => {
+    const score = await sdk.computeScore(subjectKeypair, subjectKeypair.publicKey());
+    expect(typeof score).toBe("number");
+    expect(score).toBeGreaterThan(MIN_SCORE);
   }, TIMEOUT_MS);
 
   it.skip("documents the complete governance proposal lifecycle", async () => {
