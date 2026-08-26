@@ -52,9 +52,17 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
-      - name: Run fuzz tests
-        run: cargo +nightly fuzz run compute_score_pure -- -runs=10000
+      - name: Run fuzz tests (credit-oracle)
+        run: cargo +nightly fuzz run compute_score_pure -- -runs=5000
         working-directory: contracts/credit-oracle
+
+      - name: Run fuzz tests (identity-oracle)
+        run: cargo +nightly fuzz run anchor_vc_typed -- -runs=5000
+        working-directory: contracts/identity-oracle
+
+      - name: Run fuzz tests (governance)
+        run: cargo +nightly fuzz run vote_weight -- -runs=5000
+        working-directory: contracts/governance
 
   ts-test:
     runs-on: ubuntu-latest

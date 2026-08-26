@@ -1,0 +1,25 @@
+[package]
+name = "identity-oracle-fuzz"
+version = "0.1.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.identity-oracle]
+path = ".."
+
+# Prevent this from interfering with workspaces
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "anchor_vc_typed"
+path = "fuzz_targets/anchor_vc_typed.rs"
+bench = false
+test = false
+doc = false
