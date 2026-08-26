@@ -17,10 +17,10 @@
  *   SIM_ACCOUNT          — Any funded testnet account used as fee source for read-only sims
  */
 
-import { createHash } from "crypto";
 import { Keypair } from "@stellar/stellar-sdk";
 import canonicalize from "canonicalize";
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
+import { buildKycCredential, hashVC } from "./hash";
 
 // ---------------------------------------------------------------------------
 // CLI argument parsing
@@ -50,6 +50,9 @@ let subjectAddress = args["subject"];
 const kycLevel = args["kyc-level"] ?? "basic";
 const country = args["country"] ?? "XX";
 const revokeAfterIssue = args["revoke"] === "true";
+/** Stable defaults from docs/issuer-guide.md — same inputs always yield the same hash. */
+const issuanceDate = args["issuance-date"] ?? "2026-06-28T12:00:00Z";
+const verifiedAt = args["verified-at"] ?? "2026-06-28T10:00:00Z";
 
 if (!subjectAddress) {
   console.error("Error: --subject <G... or C...> is required");
@@ -103,18 +106,14 @@ const issuerAddress = issuerKeypair.publicKey();
 const issuerDid = `did:stellar:testnet:${issuerAddress}`;
 const subjectDid = `did:stellar:testnet:${subjectAddress}`;
 
-const vc = {
-  "@context": ["https://www.w3.org/2018/credentials/v1"],
-  type: ["VerifiableCredential", "KYCCredential"],
-  issuer: issuerDid,
-  issuanceDate: new Date().toISOString(),
-  credentialSubject: {
-    id: subjectDid,
-    kycLevel,
-    country,
-    verifiedAt: new Date().toISOString(),
-  },
-};
+const vc = buildKycCredential({
+  issuerDid,
+  subjectDid,
+  kycLevel,
+  country,
+  issuanceDate,
+  verifiedAt,
+});
 
 console.log("\nVerifiable Credential:");
 console.log(JSON.stringify(vc, null, 2));
@@ -131,9 +130,7 @@ if (!canonical) {
 console.log("\nCanonical form:");
 console.log(canonical);
 
-const vcHash: Buffer = createHash("sha256")
-  .update(Buffer.from(canonical, "utf8"))
-  .digest();
+const vcHash = hashVC(vc);
 
 console.log("\nSHA-256 hash (hex):", vcHash.toString("hex"));
 
@@ -150,6 +147,12 @@ async function main(): Promise<void> {
     rpcUrl,
     simAccount,
   });
+
+  const alreadyAnchored = await sdk.verifyVC(subjectAddress, vcHash);
+  if (alreadyAnchored) {
+    console.log("\nVC already anchored, skipping.");
+    return;
+  }
 
   console.log("\nAnchoring credential hash on-chain...");
   console.log("  Issuer :", issuerAddress);
@@ -191,7 +194,7 @@ async function main(): Promise<void> {
     revocationTxHash,
     subject: subjectAddress,
     issuer: issuerAddress,
-    anchoredAt: new Date().toISOString(),
+    anchoredAt: issuanceDate,
     vc,
   });
 }
