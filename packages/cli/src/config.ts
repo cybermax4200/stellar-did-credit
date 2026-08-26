@@ -123,6 +123,7 @@ function mergeFromContractsBlock(
     "identity-oracle": "identityOracleId",
     "credit-oracle": "creditOracleId",
     "revocation-registry": "revocationRegistryId",
+    "governance": "governanceId",
   };
   for (const [contractName, configKey] of Object.entries(mapping)) {
     if (contracts[contractName] && !config[configKey]) {
@@ -139,6 +140,7 @@ function mergeConfigOverrides(
     "identityOracleId",
     "creditOracleId",
     "revocationRegistryId",
+    "governanceId",
     "networkPassphrase",
     "rpcUrl",
     "simAccount",
@@ -159,6 +161,7 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
     IDENTITY_ORACLE_ID: "identityOracleId",
     CREDIT_ORACLE_ID: "creditOracleId",
     REVOCATION_REGISTRY_ID: "revocationRegistryId",
+    GOVERNANCE_ID: "governanceId",
     NETWORK_PASSPHRASE: "networkPassphrase",
     RPC_URL: "rpcUrl",
     SIM_ACCOUNT: "simAccount",
