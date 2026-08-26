@@ -125,6 +125,8 @@ export interface TxStats {
   txCount30d: number;
   /** Average number of distinct counterparties per transaction. */
   avgCounterparties: number;
+  /** True if mid-pagination failed and partial stats are returned. */
+  partial?: boolean;
 }
 
 /**
@@ -347,6 +349,8 @@ function isPermanentError(error: unknown): boolean {
 export async function fetchHorizonStats(
   horizonUrl: string,
   address: string,
+  maxRetries: number = process.env.MAX_RETRIES ? parseInt(process.env.MAX_RETRIES, 10) : 3,
+  allowPartialStats: boolean = process.env.FEEDER_ALLOW_PARTIAL_STATS !== 'false'
 ): Promise<TxStats> {
   // Validate address before making API calls
   if (!isValidStellarAddress(address)) {
@@ -419,6 +423,7 @@ export async function fetchHorizonStats(
     return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
   }
 
+  let isPartial = false;
   outer: while (page.records.length > 0) {
     for (const record of page.records) {
       const op = record;
@@ -491,7 +496,28 @@ export async function fetchHorizonStats(
       }
     }
 
-    page = await callWithHorizonRateLimit(() => page.next());
+    let nextFailureCount = 0;
+    while (true) {
+      try {
+        page = await callWithHorizonRateLimit(() => page.next());
+        break; // success
+      } catch (err) {
+        if (isTransientError(err)) {
+          nextFailureCount++;
+          if (nextFailureCount <= maxRetries) {
+            console.warn(`[feeder] Transient error mid-pagination for ${address}, retrying (${nextFailureCount}/${maxRetries})...`);
+            await sleep(1000 * Math.pow(2, nextFailureCount - 1));
+            continue;
+          }
+          if (allowPartialStats) {
+            console.warn(`[feeder] Mid-pagination failed after ${maxRetries} retries for ${address}, using partial stats`);
+            isPartial = true;
+            break outer; // exit the pagination loop and compute stats
+          }
+        }
+        throw err; // permanent error, or partial stats not allowed, or max retries exceeded
+      }
+    }
   }
 
   const txCount30d = txHashes.size;
@@ -503,7 +529,7 @@ export async function fetchHorizonStats(
   const avgCounterparties =
     txCount30d > 0 ? Math.round(totalCounterparties / txCount30d) : 0;
 
-  return { volume30d: volumeStroops, txCount30d, avgCounterparties };
+  return { volume30d: volumeStroops, txCount30d, avgCounterparties, ...(isPartial ? { partial: true } : {}) };
 }
 
 /** Extract the sequence number string from a Soroban RPC account response. */
@@ -774,7 +800,7 @@ export class Feeder {
       `fetch_horizon_stats(${subjectAddress})`,
       maxRetries,
       retryBaseDelayMs,
-      () => fetchHorizonStats(this.config.horizonUrl, subjectAddress),
+      () => fetchHorizonStats(this.config.horizonUrl, subjectAddress, maxRetries),
     );
     if (signal?.aborted) {
       console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
@@ -803,6 +829,9 @@ export class Feeder {
     );
     console.log(`  tx_count_30d      = ${stats.txCount30d}`);
     console.log(`  avg_counterparties = ${stats.avgCounterparties}`);
+    if (stats.partial) {
+      console.log(`  partial           = ${stats.partial}`);
+    }
 
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
