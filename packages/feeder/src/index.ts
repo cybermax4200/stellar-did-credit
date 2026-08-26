@@ -26,6 +26,10 @@
  *   POLL_INTERVAL_MS     — Feed cycle interval in ms (default: 3 600 000 = 1 hour)
  *   MAX_RETRIES          — Max retry attempts for transient RPC/Horizon failures (default: 3)
  *   RETRY_BASE_DELAY_MS  — Base backoff delay in ms (default: 1 000)
+ *   REVOCATION_REGISTRY_ID — Revocation-registry contract address (optional; needed
+ *                            for event-driven revocation sync)
+ *   GOVERNANCE_ID        — Governance contract address (optional; reserved for future
+ *                          governance-aware features; the feeder does not call it yet)
  */
 
 import {
@@ -89,6 +93,10 @@ export interface FeederConfig {
   creditOracleId: string;
   /** identity-oracle contract address */
   identityOracleId: string;
+  /** revocation-registry contract address; needed for event-driven revocation sync (optional) */
+  revocationRegistryId?: string;
+  /** governance contract address; reserved for future governance-aware features (optional) */
+  governanceId?: string;
   /** Any funded account used as fee source for read-only simulations */
   simAccount: string;
   /** Subject G... addresses to sync on every cycle */
@@ -213,6 +221,26 @@ function isValidStellarAddress(address: string): boolean {
   // Validate against Stellar SDK
   try {
     Keypair.fromPublicKey(address);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if a string is a valid Soroban contract address (C-address).
+ * Must start with 'C', be 56 characters total, and pass Stellar SDK validation.
+ *
+ * Used for the optional `revocationRegistryId` / `governanceId` configuration.
+ */
+export function isValidSorobanContractId(address: string): boolean {
+  if (!address || typeof address !== "string") return false;
+  if (!address.startsWith("C")) return false;
+  if (address.length !== 56) return false;
+
+  // Validate against Stellar SDK (verifies the contract ID checksum)
+  try {
+    Address.fromString(address);
     return true;
   } catch {
     return false;
@@ -1119,6 +1147,26 @@ if (require.main === module) {
     10,
   );
 
+  // Optional contract integrations. The feeder must not fail when these are
+  // absent — they only enable additional behaviour (event-driven revocation
+  // sync, future governance-aware features).
+  const revocationRegistryId =
+    process.env["REVOCATION_REGISTRY_ID"]?.trim() || undefined;
+  const governanceId = process.env["GOVERNANCE_ID"]?.trim() || undefined;
+
+  if (revocationRegistryId && !isValidSorobanContractId(revocationRegistryId)) {
+    console.error(
+      "Error: REVOCATION_REGISTRY_ID is not a valid Soroban contract address (must start with 'C' and be 56 characters).",
+    );
+    process.exit(1);
+  }
+  if (governanceId && !isValidSorobanContractId(governanceId)) {
+    console.error(
+      "Error: GOVERNANCE_ID is not a valid Soroban contract address (must start with 'C' and be 56 characters).",
+    );
+    process.exit(1);
+  }
+
   const subjects = subjectsRaw
     .split(",")
     .map((s) => s.trim())
@@ -1171,6 +1219,11 @@ if (require.main === module) {
   console.log(`  horizon    : ${horizonUrl}`);
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
+  console.log("  optional integrations:");
+  console.log(
+    `    revocationRegistry : ${revocationRegistryId ?? "not configured"}`,
+  );
+  console.log(`    governance        : ${governanceId ?? "not configured"}`);
 
   const config: FeederConfig = {
     rpcUrl,
@@ -1178,6 +1231,8 @@ if (require.main === module) {
     networkPassphrase,
     creditOracleId,
     identityOracleId,
+    revocationRegistryId,
+    governanceId,
     simAccount,
     subjects: validSubjects,
     pollIntervalMs,

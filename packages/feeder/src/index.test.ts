@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Feeder, parsePollIntervalMs, MIN_POLL_INTERVAL_MS } from "./index";
+import {
+  Feeder,
+  parsePollIntervalMs,
+  MIN_POLL_INTERVAL_MS,
+  isValidSorobanContractId,
+} from "./index";
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
@@ -67,9 +72,22 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Account: jest.fn(),
   scValToNative: jest.fn().mockReturnValue(3),
   nativeToScVal: jest.fn().mockReturnValue({}),
-  Address: jest.fn().mockImplementation(() => ({
-    toScVal: jest.fn().mockReturnValue({}),
-  })),
+  Address: Object.assign(
+    jest.fn().mockImplementation(() => ({
+      toScVal: jest.fn().mockReturnValue({}),
+    })),
+    {
+      fromString: jest.fn((address: string) => {
+        if (
+          (address.startsWith("C") || address.startsWith("G")) &&
+          address.length === 56
+        ) {
+          return {};
+        }
+        throw new Error("Invalid address");
+      }),
+    },
+  ),
   xdr: {
     ScVal: {
       scvMap: jest.fn().mockReturnValue({}),
@@ -647,6 +665,29 @@ describe("Error classification helpers", () => {
     await expect(
       fetchHorizonStats("https://horizon.example", "GBAD5234567234567234567234567234567234567234567234567233"),
     ).rejects.toThrow("Network timeout");
+  });
+});
+
+describe("isValidSorobanContractId", () => {
+  it("accepts a well-formed Soroban contract address", () => {
+    expect(isValidSorobanContractId("C" + "A".repeat(55))).toBe(true);
+  });
+
+  it("rejects addresses that do not start with C", () => {
+    expect(isValidSorobanContractId("G" + "A".repeat(55))).toBe(false);
+    expect(isValidSorobanContractId("c" + "A".repeat(55))).toBe(false);
+  });
+
+  it("rejects addresses with the wrong length", () => {
+    expect(isValidSorobanContractId("C" + "A".repeat(10))).toBe(false);
+    expect(isValidSorobanContractId("C" + "A".repeat(54))).toBe(false);
+    expect(isValidSorobanContractId("C" + "A".repeat(56))).toBe(false);
+  });
+
+  it("rejects empty, whitespace, and non-string values", () => {
+    expect(isValidSorobanContractId("")).toBe(false);
+    expect(isValidSorobanContractId("   ")).toBe(false);
+    expect(isValidSorobanContractId("not-an-address")).toBe(false);
   });
 });
 
