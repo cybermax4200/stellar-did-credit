@@ -93,6 +93,173 @@ export type SDKErrorCode =
   | "TRANSACTION_TIMEOUT"
   | "COOLDOWN_ACTIVE";
 
+// ---------------------------------------------------------------------------
+// Contract error hierarchy
+// ---------------------------------------------------------------------------
+
+/** Base class for typed errors returned by Soroban smart contracts. */
+export class ContractError extends Error {
+  constructor(
+    public readonly code: number,
+    public readonly contractName: string,
+    message: string,
+  ) {
+    super(message);
+    this.name = "ContractError";
+  }
+}
+
+export class IdentityOracleError extends ContractError {
+  constructor(code: number, message: string) {
+    super(code, "identity-oracle", message);
+    this.name = "IdentityOracleError";
+  }
+}
+
+export class CreditOracleError extends ContractError {
+  constructor(code: number, message: string) {
+    super(code, "credit-oracle", message);
+    this.name = "CreditOracleError";
+  }
+}
+
+export class RevocationRegistryError extends ContractError {
+  constructor(code: number, message: string) {
+    super(code, "revocation-registry", message);
+    this.name = "RevocationRegistryError";
+  }
+}
+
+export class GovernanceError extends ContractError {
+  constructor(code: number, message: string) {
+    super(code, "governance", message);
+    this.name = "GovernanceError";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Error code maps (numeric code → human-readable variant name)
+// ---------------------------------------------------------------------------
+
+const IDENTITY_ORACLE_ERROR_CODES: Record<number, string> = {
+  1: "AlreadyInitialized",
+  2: "NotAuthorized",
+  3: "IssuerNotRegistered",
+  4: "InvalidCID",
+  5: "NoPendingAdmin",
+  6: "DuplicateVC",
+  7: "VCNotFound",
+  8: "ContractPaused",
+  9: "InvalidRevocationRegistry",
+  10: "VCLimitReached",
+};
+
+const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
+  1: "AlreadyInitialized",
+  2: "NotAuthorized",
+  3: "FeederNotRegistered",
+  4: "LenderNotRegistered",
+  5: "InvalidWeights",
+  6: "NoPendingAdmin",
+  7: "ComputeCooldownActive",
+  8: "DisputeAlreadyPending",
+  9: "DisputeNotFound",
+  10: "InvalidInputKey",
+  11: "InvalidIdentityOracle",
+  12: "ContractPaused",
+};
+
+const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {
+  1: "AlreadyInitialized",
+  2: "NotAuthorized",
+  3: "IssuerMismatch",
+  4: "NoPendingAdmin",
+  5: "BatchTooLarge",
+  6: "ContractPaused",
+  7: "ReentrancyDetected",
+  8: "InvalidBatchLimit",
+};
+
+const GOVERNANCE_ERROR_CODES: Record<number, string> = {
+  1: "AlreadyInitialized",
+  2: "NotAuthorized",
+  3: "ProposalNotFound",
+  4: "ProposalExpired",
+  5: "ProposalNotExpired",
+  6: "ProposalAlreadyExecuted",
+  7: "InvalidWeights",
+  8: "InvalidQuorum",
+  9: "InvalidVoteWeight",
+  10: "QuorumNotMet",
+  11: "TimelockNotExpired",
+  12: "VoterNotRegistered",
+  13: "InsufficientVoteWeight",
+  14: "ProposalAlreadyCancelled",
+};
+
+const ERROR_CODE_MAPS: Record<string, Record<number, string>> = {
+  "identity-oracle": IDENTITY_ORACLE_ERROR_CODES,
+  "credit-oracle": CREDIT_ORACLE_ERROR_CODES,
+  "revocation-registry": REVOCATION_REGISTRY_ERROR_CODES,
+  governance: GOVERNANCE_ERROR_CODES,
+};
+
+// ---------------------------------------------------------------------------
+// Contract error parsing
+// ---------------------------------------------------------------------------
+
+const CONTRACT_ERROR_RE = /Error\(Contract,\s*#(\d+)\)/i;
+
+/**
+ * Parse a Soroban simulation or transaction error string and return the
+ * numeric contract error code, or `null` if the string does not match the
+ * `Error(Contract, #N)` pattern.
+ */
+export function parseContractErrorCode(errorString: string): number | null {
+  const match = CONTRACT_ERROR_RE.exec(errorString);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Parse a Soroban error string and throw the appropriate typed contract error
+ * for the given contract name.
+ *
+ * @param errorString - The raw error string from Soroban RPC
+ * @param contractName - One of "identity-oracle", "credit-oracle",
+ *   "revocation-registry", "governance"
+ * @throws {IdentityOracleError | CreditOracleError | RevocationRegistryError |
+ *   GovernanceError} when a recognized contract error code is found
+ * @throws {Error} when the error string does not match a known contract error
+ *   pattern (re-thrown as-is)
+ */
+export function throwContractError(
+  errorString: string,
+  contractName:
+    | "identity-oracle"
+    | "credit-oracle"
+    | "revocation-registry"
+    | "governance",
+): never {
+  const code = parseContractErrorCode(errorString);
+  const codeMap = ERROR_CODE_MAPS[contractName];
+  const variantName = code !== null && codeMap ? codeMap[code] : undefined;
+  const message =
+    code !== null && variantName
+      ? `${variantName} (code ${code})`
+      : errorString;
+
+  switch (contractName) {
+    case "identity-oracle":
+      throw new IdentityOracleError(code ?? 0, message);
+    case "credit-oracle":
+      throw new CreditOracleError(code ?? 0, message);
+    case "revocation-registry":
+      throw new RevocationRegistryError(code ?? 0, message);
+    case "governance":
+      throw new GovernanceError(code ?? 0, message);
+  }
+}
+
 export class SDKError extends Error {
   constructor(
     public readonly code: SDKErrorCode,
@@ -365,7 +532,7 @@ export class GovernanceClient {
 
     const sim = await this.server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "governance");
     }
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
       throw new Error("Simulation returned unexpected response");
@@ -398,7 +565,7 @@ export class GovernanceClient {
 
     const sim = await this.server.simulateTransaction(tx);
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`${operationName} simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "governance");
     }
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
       throw new Error(`${operationName} simulation returned unexpected response`);
@@ -496,7 +663,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -580,7 +747,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -664,6 +831,9 @@ export class StellarDIDCreditSDK {
         "TRANSACTION_FAILED",
         `Simulation failed: ${sim.error}`,
       );
+        throw new CreditOracleError(7, "Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.");
+      }
+      throwContractError(sim.error, "credit-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -776,7 +946,7 @@ export class StellarDIDCreditSDK {
         if (sim.error && sim.error.includes("score not computed")) {
           return null;
         }
-        throw new Error(`Simulation failed: ${sim.error}`);
+        throwContractError(sim.error, "credit-oracle");
       }
 
       if (SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -822,7 +992,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -907,10 +1077,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw createRevokeError(
-        `revokeVC simulation failed; no revocation state was changed: ${sim.error}`,
-        sim.error,
-      );
+      throwContractError(sim.error, "revocation-registry");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -979,7 +1146,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1034,7 +1201,7 @@ export class StellarDIDCreditSDK {
       if (isVerifyVCNegativeSimulationError(sim.error)) {
         return false;
       }
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1080,7 +1247,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1123,7 +1290,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1179,7 +1346,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1217,7 +1384,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "credit-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1255,7 +1422,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "identity-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1312,7 +1479,7 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      throw new Error(`Simulation failed: ${sim.error}`);
+      throwContractError(sim.error, "governance");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
@@ -1924,6 +2091,12 @@ function createRevokeError(message: string, details: unknown): SDKError {
 }
 
 function containsIssuerMismatch(value: unknown): boolean {
+  if (value instanceof RevocationRegistryError && value.code === 3) {
+    return true;
+  }
+  if (value instanceof IdentityOracleError && value.code === 3) {
+    return true;
+  }
   const text = getErrorMessage(value).toLowerCase();
   return (
     text.includes("issuermismatch") ||
@@ -1947,6 +2120,9 @@ function getErrorMessage(value: unknown): string {
 }
 
 function isVerifyVCNegativeSimulationError(error: unknown): boolean {
+  if (error instanceof IdentityOracleError) {
+    return error.code === 7 || error.code === 8;
+  }
   const text = getErrorMessage(error).toLowerCase();
   return (
     text.includes("contractpaused") ||
