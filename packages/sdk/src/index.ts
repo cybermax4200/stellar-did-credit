@@ -985,6 +985,9 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (isVerifyVCNegativeSimulationError(sim.error)) {
+        return false;
+      }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
 
@@ -997,7 +1000,12 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    return scValToNative(resultScVal) as boolean;
+    const native = scValToNative(resultScVal);
+    if (typeof native !== "boolean") {
+      throw new Error("verify_vc returned a non-boolean result");
+    }
+
+    return native;
   }
 
   /**
@@ -1835,6 +1843,18 @@ function getErrorMessage(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isVerifyVCNegativeSimulationError(error: unknown): boolean {
+  const text = getErrorMessage(error).toLowerCase();
+  return (
+    text.includes("contractpaused") ||
+    text.includes("contract paused") ||
+    /error\(contract,\s*#8\)/i.test(text) ||
+    text.includes("vcnotfound") ||
+    text.includes("unknown subject") ||
+    text.includes("not found")
+  );
 }
 
 function withTimeout<T>(

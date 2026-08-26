@@ -961,6 +961,72 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("verify_vc");
     });
 
+    it("returns false when verify_vc reports a credential as revoked", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 12));
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+      expect(mockLastContractCall?.args).toHaveLength(2);
+    });
+
+    it("returns false when the contract is paused", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #8)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 9));
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+    });
+
+    it("returns false for an unknown subject with no VC records", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "unknown subject",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(
+        "GUNKNOWN1234567890123456789012345678901234567890123456",
+        Buffer.alloc(32, 10),
+      );
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+    });
+
+    it("uses simAccount as read-only source account", async () => {
+      const { TransactionBuilder } = jest.requireMock("@stellar/stellar-sdk");
+      (TransactionBuilder as jest.Mock).mockClear();
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 11));
+
+      expect(TransactionBuilder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: mockConfig.simAccount,
+          sequence: "0",
+        }),
+        expect.objectContaining({
+          fee: "100",
+          networkPassphrase: mockConfig.networkPassphrase,
+        }),
+      );
+    });
+
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
