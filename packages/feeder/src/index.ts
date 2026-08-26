@@ -69,6 +69,8 @@ export interface FeederConfig {
   retryBaseDelayMs?: number;
   /** Whether to skip legacy set_vc_count calls when identity oracle is configured */
   skipLegacyVcCount?: boolean;
+  /** Max consecutive failures before a subject enters dead-letter state (default: 5) */
+  maxConsecutiveFailures?: number;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -559,12 +561,25 @@ export class Feeder {
   private server: SorobanRpc.Server;
   /** Tracks the last-synced state per subject to avoid redundant syncs. */
   private syncState = new Map<string, SubjectSyncState>();
+  /** Tracks consecutive failure count per subject. */
+  private failureCounts = new Map<string, number>();
+  /** Subjects that have exceeded the maxConsecutiveFailures threshold. */
+  private deadLetterSubjects = new Set<string>();
 
   constructor(
     private config: FeederConfig,
     private feederKeypair: Keypair,
   ) {
     this.server = new SorobanRpc.Server(config.rpcUrl);
+  }
+
+  /**
+   * Returns the current set of dead-letter subjects — those that have failed
+   * at least `maxConsecutiveFailures` consecutive cycles. Subjects are removed
+   * from this set once they feed successfully.
+   */
+  getDeadLetterSubjects(): string[] {
+    return Array.from(this.deadLetterSubjects);
   }
 
   /**
@@ -778,6 +793,8 @@ export class Feeder {
       validSubjects = this.config.subjects.filter(isValidStellarAddress);
     }
 
+    const maxFailures = this.config.maxConsecutiveFailures ?? 5;
+
     let succeeded = 0;
     let skipped = 0;
     let failed = 0;
@@ -792,6 +809,14 @@ export class Feeder {
       try {
         await this.feedSubject(subject, signal);
         succeeded++;
+        // Clear failure tracking and dead-letter state on success
+        if (this.deadLetterSubjects.has(subject)) {
+          console.log(
+            `[feeder] ${subject} recovered — removed from dead-letter queue`,
+          );
+          this.deadLetterSubjects.delete(subject);
+        }
+        this.failureCounts.delete(subject);
       } catch (err) {
         const errorMsg = err instanceof Error ? err.message : String(err);
         const errorType = isPermanentError(err) ? "permanent" : "transient";
@@ -803,6 +828,22 @@ export class Feeder {
           skipped++;
         } else {
           failed++;
+        }
+
+        // Track consecutive failures for dead-letter detection
+        const prev = this.failureCounts.get(subject) ?? 0;
+        const next = prev + 1;
+        this.failureCounts.set(subject, next);
+
+        if (next >= maxFailures) {
+          this.deadLetterSubjects.add(subject);
+          console.error(
+            `[feeder] [dead-letter] ${subject} has failed ${next} consecutive cycles (threshold: ${maxFailures})`,
+          );
+        } else {
+          console.warn(
+            `[feeder] [dead-letter] ${subject} failure ${next}/${maxFailures} — will retry next cycle`,
+          );
         }
       }
     }
@@ -992,6 +1033,10 @@ if (require.main === module) {
     process.env["RETRY_BASE_DELAY_MS"] ?? "1000",
     10,
   );
+  const maxConsecutiveFailures = parseInt(
+    process.env["MAX_CONSECUTIVE_FAILURES"] ?? "5",
+    10,
+  );
 
   const subjects = subjectsRaw
     .split(",")
@@ -1044,6 +1089,7 @@ if (require.main === module) {
   console.log(`  horizon    : ${horizonUrl}`);
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
+  console.log(`  maxFailures: ${maxConsecutiveFailures}`);
 
   const config: FeederConfig = {
     rpcUrl,
@@ -1056,6 +1102,7 @@ if (require.main === module) {
     pollIntervalMs,
     maxRetries,
     retryBaseDelayMs,
+    maxConsecutiveFailures,
   };
 
   const feeder = new Feeder(config, feederKeypair);

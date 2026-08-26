@@ -742,6 +742,135 @@ describe("parsePollIntervalMs", () => {
   });
 });
 
+describe("Dead-letter queue", () => {
+  let consoleLogSpy: jest.SpyInstance;
+  let consoleErrorSpy: jest.SpyInstance;
+  let consoleWarnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("subject appears in dead-letter after MAX_CONSECUTIVE_FAILURES consecutive failures", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    // feedSubject throws every time
+    jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+
+    // Subject should be in dead-letter queue
+    const deadLetters = feeder.getDeadLetterSubjects();
+    expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567232");
+
+    // Should have logged ERROR with [dead-letter] prefix
+    const deadLetterErrors = consoleErrorSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("[dead-letter]") && call[0].includes("has failed"),
+    );
+    expect(deadLetterErrors.length).toBeGreaterThan(0);
+  });
+
+  it("subject is cleared from dead-letter after a successful feed", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail 5 times to enter dead-letter
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+    expect(feeder.getDeadLetterSubjects()).toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Now succeed
+    feedSubjectSpy.mockResolvedValue(undefined);
+    await feeder.runCycle();
+
+    // Dead-letter should be cleared
+    expect(feeder.getDeadLetterSubjects()).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have logged recovery message
+    const recoveryLogs = consoleLogSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("recovered"),
+    );
+    expect(recoveryLogs.length).toBeGreaterThan(0);
+  });
+
+  it("logs sub-threshold failures at warn level with failure count", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail only 3 times (below threshold of 5)
+    for (let i = 0; i < 3; i++) {
+      await feeder.runCycle();
+    }
+
+    // Subject should NOT be in dead-letter yet
+    const deadLetters = feeder.getDeadLetterSubjects();
+    expect(deadLetters).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have logged warn with failure count
+    const warnLogs = consoleWarnSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("[dead-letter]") && call[0].includes("will retry"),
+    );
+    expect(warnLogs.length).toBeGreaterThan(0);
+  });
+
+  it("still retries dead-letter subjects each cycle", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail 5 times to enter dead-letter
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+
+    // Fail one more cycle — feedSubject should still be called for both subjects
+    feedSubjectSpy.mockClear();
+    feedSubjectSpy.mockRejectedValue(new Error("still failing"));
+    await feeder.runCycle();
+
+    // feedSubject was still called for both subjects (dead-letter does not drop)
+    expect(feedSubjectSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
 describe("Feeder oracle configuration handling", () => {
   let consoleLogSpy: jest.SpyInstance;
 
