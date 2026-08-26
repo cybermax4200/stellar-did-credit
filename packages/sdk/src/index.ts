@@ -96,16 +96,24 @@ export class SDKError extends Error {
   constructor(
     public readonly code: SDKErrorCode,
     message: string,
-    options?: { cause?: unknown },
+    options?: {
+      cause?: unknown;
+      transactionHash?: string;
+      resultXdr?: string;
+    },
   ) {
     super(message);
     if (options?.cause !== undefined) {
       this.cause = options.cause;
     }
+    this.transactionHash = options?.transactionHash;
+    this.resultXdr = options?.resultXdr;
     this.name = "SDKError";
   }
 
   declare readonly cause?: unknown;
+  declare readonly transactionHash?: string;
+  declare readonly resultXdr?: string;
 }
 
 /**
@@ -511,7 +519,7 @@ export class StellarDIDCreditSDK {
       txHash,
       "anchorDID",
       getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
+      getTransactionPollIntervalMs(this.config),
     );
 
     return txHash;
@@ -595,7 +603,7 @@ export class StellarDIDCreditSDK {
       txHash,
       "issueVC",
       getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
+      getTransactionPollIntervalMs(this.config),
     );
 
     return txHash;
@@ -680,7 +688,7 @@ export class StellarDIDCreditSDK {
       txHash,
       "computeScore",
       getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
+      getTransactionPollIntervalMs(this.config),
     );
 
     try {
@@ -895,7 +903,7 @@ export class StellarDIDCreditSDK {
         txHash,
         "revokeVC",
         getConfirmationTimeoutMs(this.config),
-        this.config.pollIntervalMs ?? 1000,
+        getTransactionPollIntervalMs(this.config),
       );
     } catch (error) {
       throw createRevokeError(
@@ -1710,9 +1718,15 @@ async function waitForTransactionConfirmation(
       case "SUCCESS":
         return;
       case "FAILED": {
-        const errorDetails = JSON.stringify(result);
-        throw new Error(
-          `${operationName} transaction failed for ${txHash}: ${errorDetails}`,
+        const resultXdr = extractResultXdr(result);
+        throw new SDKError(
+          "TRANSACTION_FAILED",
+          `${operationName} transaction failed for ${txHash}; resultXdr: ${resultXdr ?? "unknown"}`,
+          {
+            cause: result,
+            transactionHash: txHash,
+            resultXdr,
+          },
         );
       }
       case "NOT_FOUND":
@@ -1749,6 +1763,28 @@ function getConfirmationTimeoutMs(config: ProtocolConfig): number {
     config.confirmationTimeoutMs ??
     (config.timeoutSeconds ?? 30) * 1000
   );
+}
+
+function getTransactionPollIntervalMs(config: ProtocolConfig): number {
+  const configured = config.pollIntervalMs;
+  if (!Number.isFinite(configured) || configured === undefined) {
+    return 5000;
+  }
+  return Math.max(1, configured);
+}
+
+function extractResultXdr(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const raw =
+    candidate["resultXdr"] ??
+    candidate["result_xdr"] ??
+    candidate["errorResultXdr"] ??
+    candidate["error_result_xdr"];
+  return raw === undefined || raw === null ? undefined : String(raw);
 }
 
 function normalizeMaxRetries(maxRetries: number): number {
@@ -1808,7 +1844,34 @@ function createRevokeError(message: string, details: unknown): SDKError {
     details instanceof SDKError &&
     details.code === "TRANSACTION_TIMEOUT"
   ) {
-    return new SDKError("TRANSACTION_TIMEOUT", message, { cause: details });
+    return new SDKError("TRANSACTION_TIMEOUT", message, {
+      cause: details,
+      transactionHash: details.transactionHash,
+      resultXdr: details.resultXdr,
+    });
+  }
+
+  if (
+    details instanceof SDKError &&
+    details.code === "TRANSACTION_FAILED"
+  ) {
+    if (containsIssuerMismatch(details.cause)) {
+      return new SDKError(
+        "NOT_REGISTERED_ISSUER",
+        "The issuer is not registered for this VC hash",
+        {
+          cause: details,
+          transactionHash: details.transactionHash,
+          resultXdr: details.resultXdr,
+        },
+      );
+    }
+
+    return new SDKError("TRANSACTION_FAILED", message, {
+      cause: details,
+      transactionHash: details.transactionHash,
+      resultXdr: details.resultXdr,
+    });
   }
 
   return new SDKError("TRANSACTION_FAILED", message, { cause: details });

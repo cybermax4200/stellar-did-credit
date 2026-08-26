@@ -782,6 +782,49 @@ describe("StellarDIDCreditSDK", () => {
       });
     });
 
+    it("polls pending status until SUCCESS and then resolves with tx hash", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "anchor-poll-success-hash",
+      });
+      mockGetTransaction
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk.anchorDID(subjectKeypair as never, "QmExampleCid");
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(5000);
+      await jest.advanceTimersByTimeAsync(5000);
+
+      await expect(promise).resolves.toBe("anchor-poll-success-hash");
+      expect(mockGetTransaction).toHaveBeenCalledTimes(3);
+    });
+
+    it("throws SDKError with transaction hash and result XDR when confirmation fails", async () => {
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "anchor-failed-hash",
+      });
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        resultXdr: "AAAAFAILEDXDR",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
+      ).rejects.toMatchObject({
+        code: "TRANSACTION_FAILED",
+        transactionHash: "anchor-failed-hash",
+        resultXdr: "AAAAFAILEDXDR",
+      });
+    });
+
     it("uses three default retries with exponential backoff", async () => {
       jest.useFakeTimers();
       mockSendTransaction
@@ -833,6 +876,23 @@ describe("StellarDIDCreditSDK", () => {
       expect(error).toBeInstanceOf(SDKError);
       expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses the default 30s confirmation timeout", async () => {
+      jest.useFakeTimers();
+      mockGetTransaction.mockResolvedValue({ status: "PENDING" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk
+        .anchorDID(subjectKeypair as never, "QmExampleCid")
+        .catch((caught: unknown) => caught);
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(30_000);
+      const error = await promise;
+
+      expect(error).toBeInstanceOf(SDKError);
+      expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
     });
 
     it("does not retry permanent submission errors", async () => {
@@ -1063,7 +1123,7 @@ describe("StellarDIDCreditSDK", () => {
       );
 
       await Promise.resolve();
-      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(5000);
 
       await expect(computePromise).resolves.toMatchObject({
         score: 612,
@@ -1113,7 +1173,7 @@ describe("StellarDIDCreditSDK", () => {
       });
       mockGetTransaction.mockResolvedValue({
         status: "FAILED",
-        errorResult: "tx_bad_auth",
+        resultXdr: "AAAAFAILXDR",
       });
       mockSimulateTransaction.mockResolvedValue({
         result: { retval: { value: null } },
@@ -1126,9 +1186,11 @@ describe("StellarDIDCreditSDK", () => {
           { publicKey: () => subjectAddress } as unknown as Keypair,
           subjectAddress,
         ),
-      ).rejects.toThrow(
-        'computeScore transaction failed for tx-hash-3: {"status":"FAILED","errorResult":"tx_bad_auth"}',
-      );
+      ).rejects.toMatchObject({
+        code: "TRANSACTION_FAILED",
+        transactionHash: "tx-hash-3",
+        resultXdr: "AAAAFAILXDR",
+      });
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
     });
 
