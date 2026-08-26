@@ -1,0 +1,29 @@
+[package]
+name = "zk-circuit"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+description = "Groth16 circuit for score > threshold using arkworks-rs (BLS12-381)"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+ark-ff = "0.4"
+ark-ec = "0.4"
+ark-bls12-381 = "0.4"
+ark-r1cs-std = { version = "0.4", features = ["parallel"] }
+ark-relations = "0.4"
+ark-groth16 = "0.4"
+ark-snark = "0.4"
+ark-std = "0.4"
+ark-crypto-primitives = { version = "0.4", features = ["r1cs"] }
+ark-poly = "0.4"
+ark-serialize = "0.4"
+sha2 = "0.10"
+rand = "0.8"
+rand_core = "0.6"
+thiserror = "1"
+
+[dev-dependencies]
+proptest = "1"

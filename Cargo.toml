@@ -6,6 +6,7 @@ members = [
   "contracts/revocation-registry",
   "contracts/tests",
   "contracts/governance",
+  "zk/circuit",
 ]
 resolver = "2"
 
