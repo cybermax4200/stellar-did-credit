@@ -1,6 +1,6 @@
 {
   "generators": {
-    "address": 2,
+    "address": 3,
     "nonce": 0
   },
   "auth": [
@@ -25,9 +25,6 @@
       ]
     ],
     [],
-    [],
-    [],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4",
@@ -35,35 +32,13 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "propose_weights",
+              "function_name": "set_batch_limit",
               "args": [
                 {
-                  "map": [
-                    {
-                      "key": {
-                        "symbol": "repayment_weight"
-                      },
-                      "val": {
-                        "u32": 40
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "tx_weight"
-                      },
-                      "val": {
-                        "u32": 10
-                      }
-                    },
-                    {
-                      "key": {
-                        "symbol": "vc_weight"
-                      },
-                      "val": {
-                        "u32": 50
-                      }
-                    }
-                  ]
+                  "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                },
+                {
+                  "u32": 5
                 }
               ]
             }
@@ -71,7 +46,9 @@
           "sub_invocations": []
         }
       ]
-    ]
+    ],
+    [],
+    []
   ],
   "ledger": {
     "protocol_version": 22,
@@ -122,110 +99,12 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "ComputeCooldownLedgers"
+                              "symbol": "BatchLimit"
                             }
                           ]
                         },
                         "val": {
-                          "u32": 1
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "Config"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": [
-                            {
-                              "key": {
-                                "symbol": "repayment_weight"
-                              },
-                              "val": {
-                                "u32": 30
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "tx_weight"
-                              },
-                              "val": {
-                                "u32": 30
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "vc_weight"
-                              },
-                              "val": {
-                                "u32": 40
-                              }
-                            }
-                          ]
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "PendingWeights"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "map": [
-                            {
-                              "key": {
-                                "symbol": "repayment_weight"
-                              },
-                              "val": {
-                                "u32": 40
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "tx_weight"
-                              },
-                              "val": {
-                                "u32": 10
-                              }
-                            },
-                            {
-                              "key": {
-                                "symbol": "vc_weight"
-                              },
-                              "val": {
-                                "u32": 50
-                              }
-                            }
-                          ]
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "PendingWeightsEffectiveLedger"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 17280
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "StorageVersion"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u32": 2
+                          "u32": 5
                         }
                       }
                     ]
@@ -235,7 +114,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -322,44 +201,10 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ]
     ]
   },
-  "events": [
-    {
-      "event": {
-        "ext": "v0",
-        "contract_id": "0000000000000000000000000000000000000000000000000000000000000001",
-        "type_": "contract",
-        "body": {
-          "v0": {
-            "topics": [
-              {
-                "symbol": "WtProp"
-              }
-            ],
-            "data": {
-              "vec": [
-                {
-                  "u32": 50
-                },
-                {
-                  "u32": 10
-                },
-                {
-                  "u32": 40
-                },
-                {
-                  "u32": 17280
-                }
-              ]
-            }
-          }
-        }
-      },
-      "failed_call": false
-    }
-  ]
+  "events": []
 }

@@ -16,7 +16,7 @@ import {
   type VCRecord,
   type ScoringWeights,
 } from "@stellar-did-credit/sdk";
-import { loadConfig, type NetworkType } from "./config";
+import { loadConfig, validateConfig, type NetworkType } from "./config";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -203,6 +203,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId']);
     const keypair = parseSecret(subjectSecret);
     const publicKey = keypair.publicKey();
 
@@ -244,6 +245,7 @@ program
     const globalOptions = program.opts();
     const network = globalOptions.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
@@ -298,6 +300,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
@@ -347,6 +350,7 @@ program
       const globalOptions = program.opts();
       const network = globalOptions.network as NetworkType;
       const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId']);
       const keypair = parseSecret(payerSecret);
       const upperAddr = subjectAddress.toUpperCase();
       assertStellarAddress("subject-address", upperAddr);
@@ -391,6 +395,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
@@ -430,6 +435,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
@@ -465,6 +471,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
@@ -502,6 +509,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
@@ -575,6 +583,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 
@@ -613,6 +622,7 @@ program
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 

@@ -56,7 +56,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "string": "ipfs://QmTestDID"
+                  "string": "ipfs://QmTestDeactivateDidFlag"
                 }
               ]
             }
@@ -81,7 +81,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                  "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
                 }
               ]
             }
@@ -90,6 +90,7 @@
         }
       ]
     ],
+    [],
     [],
     [],
     [
@@ -111,6 +112,8 @@
         }
       ]
     ],
+    [],
+    [],
     [],
     []
   ],
@@ -370,7 +373,7 @@
                             "symbol": "vc_hash"
                           },
                           "val": {
-                            "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                            "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
                           }
                         }
                       ]
@@ -397,7 +400,7 @@
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                 },
                 {
-                  "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                  "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
                 }
               ]
             },
@@ -420,7 +423,7 @@
                       "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                     },
                     {
-                      "bytes": "0101010101010101010101010101010101010101010101010101010101010101"
+                      "bytes": "0707070707070707070707070707070707070707070707070707070707070707"
                     }
                   ]
                 },

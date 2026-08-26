@@ -82,10 +82,43 @@ export function loadConfig(network?: NetworkType): ProtocolConfig {
   // 3. Environment variables (highest priority)
   mergeEnvOverrides(config);
 
-  // 4. Validate required fields
-  assertRequired(config, selectedNetwork);
-
+  // 4. We no longer validate globally here. Validation is done per-command using validateConfig().
   return config as unknown as ProtocolConfig;
+}
+
+/**
+ * Validates that the provided configuration has the required fields.
+ * If any required fields are missing, it logs an actionable error and exits.
+ * 
+ * @param config - The loaded configuration object
+ * @param requiredFields - Array of required config keys
+ * @param requiresSimAccount - True if the command is a read-only operation requiring a simulation account
+ */
+export function validateConfig(
+  config: Partial<ProtocolConfig>,
+  requiredFields: (keyof ProtocolConfig)[],
+  requiresSimAccount = false
+): void {
+  const missing = requiredFields.filter((k) => !config[k]);
+
+  if (missing.length > 0) {
+    const missingEnvVars = missing.map(k => {
+      switch (k) {
+        case 'identityOracleId': return 'IDENTITY_ORACLE_ID';
+        case 'creditOracleId': return 'CREDIT_ORACLE_ID';
+        case 'revocationRegistryId': return 'REVOCATION_REGISTRY_ID';
+        case 'governanceId': return 'GOVERNANCE_ID';
+        default: return String(k).toUpperCase();
+      }
+    });
+    console.error(`Error: Missing required config: ${missingEnvVars.join(', ')}. Set via environment variable or stellar-did-config.json.`);
+    process.exit(1);
+  }
+
+  if (requiresSimAccount && !config.simAccount) {
+    console.error("Error: Missing required config: SIM_ACCOUNT. Set via environment variable or stellar-did-config.json.");
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -123,6 +156,7 @@ function mergeFromContractsBlock(
     "identity-oracle": "identityOracleId",
     "credit-oracle": "creditOracleId",
     "revocation-registry": "revocationRegistryId",
+    "governance": "governanceId",
   };
   for (const [contractName, configKey] of Object.entries(mapping)) {
     if (contracts[contractName] && !config[configKey]) {
@@ -139,6 +173,7 @@ function mergeConfigOverrides(
     "identityOracleId",
     "creditOracleId",
     "revocationRegistryId",
+    "governanceId",
     "networkPassphrase",
     "rpcUrl",
     "simAccount",
@@ -159,6 +194,7 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
     IDENTITY_ORACLE_ID: "identityOracleId",
     CREDIT_ORACLE_ID: "creditOracleId",
     REVOCATION_REGISTRY_ID: "revocationRegistryId",
+    GOVERNANCE_ID: "governanceId",
     NETWORK_PASSPHRASE: "networkPassphrase",
     RPC_URL: "rpcUrl",
     SIM_ACCOUNT: "simAccount",
@@ -194,45 +230,5 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
 
   if (process.env["BASE_FEE"]) {
     config["baseFee"] = process.env["BASE_FEE"];
-  }
-}
-
-function assertRequired(config: Record<string, unknown>, network: NetworkType): void {
-  const required: string[] = [
-    "identityOracleId",
-    "creditOracleId", 
-    "revocationRegistryId",
-  ];
-  const missing = required.filter((k) => !config[k]);
-  if (missing.length > 0) {
-    if (network === 'mainnet') {
-      console.error(
-        `Error: No ${network} contract IDs configured. Set ${missing.map(k => {
-          switch(k) {
-            case 'identityOracleId': return 'IDENTITY_ORACLE_ID=C...';
-            case 'creditOracleId': return 'CREDIT_ORACLE_ID=C...';
-            case 'revocationRegistryId': return 'REVOCATION_REGISTRY_ID=C...';
-            default: return `${k.toUpperCase()}=C...`;
-          }
-        }).join(', ')} for mainnet.`
-      );
-    } else {
-      console.error(
-        `Error: Missing required configuration for: ${missing.join(", ")}`,
-      );
-      console.error(
-        "Set them via environment variables (IDENTITY_ORACLE_ID, CREDIT_ORACLE_ID, " +
-          "REVOCATION_REGISTRY_ID) or a config file (stellar-did-config.json).",
-      );
-    }
-    process.exit(1);
-  }
-
-  // Validate mainnet SIM_ACCOUNT requirement
-  if (network === 'mainnet' && !config.simAccount) {
-    console.error(
-      "Error: SIM_ACCOUNT is required for mainnet operations. Set SIM_ACCOUNT=G... to a funded mainnet account."
-    );
-    process.exit(1);
   }
 }
