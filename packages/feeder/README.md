@@ -52,6 +52,8 @@ and fill in the values, or export them before running `npm start`.
 | `POLL_INTERVAL_MS`      | `3600000`  | How often to run a full feed cycle, in milliseconds. Minimum enforced value: 1 minute. |
 | `MAX_RETRIES`           | `3`        | Max retry attempts for transient RPC/Horizon failures.                         |
 | `RETRY_BASE_DELAY_MS`   | `1000`     | Base delay for exponential backoff, in milliseconds.                           |
+| `EVENT_DRIVEN`          | `false`    | Enables event-driven mode. Subscribes to `VCAnch` and `Revoked` events to trigger immediate feed cycles. |
+| `EVENT_POLL_INTERVAL_MS`| `30000`    | How often to poll for events, in milliseconds. Used when `EVENT_DRIVEN=true`.  |
 
 ### Optional contract integrations
 

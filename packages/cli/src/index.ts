@@ -631,248 +631,62 @@ program
   });
 
 // ---------------------------------------------------------------------------
-// Command: governance
+// Command: anchor-vc
 // ---------------------------------------------------------------------------
 
-const governance = program.command("governance").description("Governance commands for protocol weight updates");
-
 /**
- * Create a governance proposal to update scoring weights.
+ * Anchor a verifiable credential hash on-chain.
  */
-governance
-  .command("create-proposal")
-  .description("Create a governance proposal to update scoring weights")
-  .argument("<proposer-secret>", "Stellar secret key of the registered proposer (starts with S)")
-  .argument("<vc-weight>", "Weight percentage for verifiable credentials (0-100)")
-  .argument("<tx-weight>", "Weight percentage for transaction stats (0-100)")
-  .argument("<repay-weight>", "Weight percentage for repayment history (0-100)")
-  .option("--voting-period <ledgers>", "Voting period in ledgers (default: 17280 ~24h)")
-  .option("--delay <ledgers>", "Execution delay in ledgers (default: 17280 ~24h)")
+program
+  .command("anchor-vc")
+  .description("Anchor a verifiable credential hash on-chain as a registered issuer.")
+  .argument("<issuer-secret>", "Stellar secret key of the registered issuer (starts with S)")
+  .argument("<subject-address>", "Stellar G... address of the credential subject")
+  .argument("<vc-hash>", "SHA-256 hash of the verifiable credential (64 hex characters)")
+  .option("--type <type>", "Optional credential type label (e.g. kyc, employment)")
   .addHelpText(
     "after",
     `
 Example:
-  $ stellar-did governance create-proposal S... 40 30 30 --voting-period 17280 --delay 17280
+  $ stellar-did anchor-vc S... G... 5c4146... --type kyc
 `
   )
-  .action(async (proposerSecret: string, vcWeightStr: string, txWeightStr: string, repayWeightStr: string, cmdOptions: { votingPeriod?: string, delay?: string }) => {
+  .action(async (issuerSecret: string, subjectAddress: string, vcHashHex: string, cmdOptions: { type?: string }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
-    const keypair = parseSecret(proposerSecret);
-
-    const vc = parseInt(vcWeightStr, 10);
-    const tx = parseInt(txWeightStr, 10);
-    const repay = parseInt(repayWeightStr, 10);
-
-    if (isNaN(vc) || isNaN(tx) || isNaN(repay) || vc < 0 || tx < 0 || repay < 0 || (vc + tx + repay) !== 100) {
-      console.error("Error: Weights must be positive integers that sum to 100.");
-      process.exit(1);
-    }
-
-    const votingPeriod = cmdOptions.votingPeriod ? parseInt(cmdOptions.votingPeriod, 10) : 17280;
-    const executionDelay = cmdOptions.delay ? parseInt(cmdOptions.delay, 10) : 17280;
+    
+    const keypair = parseSecret(issuerSecret);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+    const vcHash = parseVcHash(vcHashHex);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Creating proposal on ${network}...`);
+    console.log(`Anchoring VC for ${upperAddr} on ${network}...`);
+    console.log(`  Issuer:  ${keypair.publicKey()}`);
+    console.log(`  VC Hash: ${vcHashHex}`);
+    if (cmdOptions.type) {
+      console.log(`  Type:    ${cmdOptions.type}`);
+    }
+
     try {
-      const proposalId = await sdk.governance.createProposal(
-        keypair,
-        { vcWeight: vc, txWeight: tx, repaymentWeight: repay },
-        votingPeriod,
-        executionDelay
-      );
-      console.log(`Success! Proposal created with ID: ${proposalId.toString()}`);
+      // @ts-ignore
+      const txHash = await sdk.issueVC(keypair, upperAddr, vcHash, cmdOptions.type);
+
+      console.log();
+      console.log("Success!");
+      console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+      console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
     } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * Cast a vote on a governance proposal.
- */
-governance
-  .command("vote")
-  .description("Cast a weighted vote on an open proposal")
-  .argument("<voter-secret>", "Stellar secret key of the registered voter")
-  .argument("<proposal-id>", "The numeric ID of the proposal")
-  .argument("<vote>", "Vote choice: 'for' or 'against'")
-  .argument("<weight>", "Your registered voting weight")
-  .addHelpText(
-    "after",
-    `
-Example:
-  $ stellar-did governance vote S... 1 for 100
-`
-  )
-  .action(async (voterSecret: string, proposalIdStr: string, voteChoice: string, weightStr: string) => {
-    const options = program.opts();
-    const network = options.network as NetworkType;
-    const config = loadConfig(network);
-    const keypair = parseSecret(voterSecret);
-
-    const proposalId = BigInt(proposalIdStr);
-    const voteFor = voteChoice.toLowerCase() === 'for';
-    if (!voteFor && voteChoice.toLowerCase() !== 'against') {
-      console.error("Error: vote must be 'for' or 'against'");
-      process.exit(1);
-    }
-    const weight = BigInt(weightStr);
-
-    const sdk = new StellarDIDCreditSDK(config);
-
-    console.log(`Casting vote on proposal ${proposalId} on ${network}...`);
-    try {
-      const txHash = await sdk.governance.vote(keypair, proposalId, voteFor, weight);
-      console.log(`Success! Vote transaction: ${txHash}`);
-    } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * Execute a passed governance proposal.
- */
-governance
-  .command("execute")
-  .description("Execute a passing proposal (queues new weights in the credit-oracle)")
-  .argument("<payer-secret>", "Stellar secret key to pay the transaction fee")
-  .argument("<proposal-id>", "The numeric ID of the proposal to execute")
-  .addHelpText(
-    "after",
-    `
-Note: The double-timelock model means execution merely queues the new weights.
-You must wait approximately 24 hours (or the configured delay) before running 'apply-weights'.
-
-Example:
-  $ stellar-did governance execute S... 1
-`
-  )
-  .action(async (payerSecret: string, proposalIdStr: string) => {
-    const options = program.opts();
-    const network = options.network as NetworkType;
-    const config = loadConfig(network);
-    const keypair = parseSecret(payerSecret);
-    const proposalId = BigInt(proposalIdStr);
-    const sdk = new StellarDIDCreditSDK(config);
-
-    console.log(`Executing proposal ${proposalId} on ${network}...`);
-    try {
-      const txHash = await sdk.governance.execute(keypair, proposalId);
-      console.log(`Success! Execute transaction: ${txHash}`);
-      console.log("Note: Weights are now queued. Use 'apply-weights' after the timelock expires.");
-    } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * Apply queued weights after the credit-oracle timelock expires.
- */
-governance
-  .command("apply-weights")
-  .description("Apply weights queued by a previously executed proposal")
-  .argument("<payer-secret>", "Stellar secret key to pay the transaction fee")
-  .addHelpText(
-    "after",
-    `
-Note: This must be called only after the credit-oracle's fixed timelock has
-expired, approximately 24 hours after 'execute' was successful.
-
-Example:
-  $ stellar-did governance apply-weights S...
-`
-  )
-  .action(async (payerSecret: string) => {
-    const options = program.opts();
-    const network = options.network as NetworkType;
-    const config = loadConfig(network);
-    const keypair = parseSecret(payerSecret);
-    const sdk = new StellarDIDCreditSDK(config);
-
-    console.log(`Applying pending weights on ${network}...`);
-    try {
-      const txHash = await sdk.governance.applyWeights(keypair);
-      console.log(`Success! Apply weights transaction: ${txHash}`);
-    } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * Show details of a governance proposal.
- */
-governance
-  .command("show")
-  .description("Show a human-readable view of a proposal's state")
-  .argument("<proposal-id>", "The numeric ID of the proposal to show")
-  .action(async (proposalIdStr: string) => {
-    const options = program.opts();
-    const network = options.network as NetworkType;
-    const config = loadConfig(network);
-    const proposalId = BigInt(proposalIdStr);
-    const sdk = new StellarDIDCreditSDK(config);
-
-    try {
-      const proposal = await sdk.governance.getProposal(proposalId);
-      if (!proposal) {
-        console.error(`Proposal ${proposalId} not found.`);
-        process.exit(1);
+      let msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("IssuerNotRegistered")) {
+         msg = "IssuerNotRegistered. Hint: Ensure this issuer is registered with the admin.";
+      } else if (msg.includes("DuplicateVC")) {
+         msg = "DuplicateVC. This VC hash has already been anchored.";
       }
-
-      console.log(`Proposal ${proposalId}`);
-      console.log(`  Proposer:      ${proposal.proposer}`);
-      console.log(`  Weights:       VC=${proposal.proposedWeights.vcWeight}% TX=${proposal.proposedWeights.txWeight}% REPAY=${proposal.proposedWeights.repaymentWeight}%`);
-      console.log(`  Votes:         FOR: ${proposal.votesFor.toString()} | AGAINST: ${proposal.votesAgainst.toString()}`);
-      console.log(`  Quorum:        ${proposal.quorumRequired.toString()}`);
-      console.log(`  Expiry Ledger: ${proposal.expiryLedger.toString()}`);
-      console.log(`  Delay:         ${proposal.executionDelayLedgers.toString()} ledgers`);
-      
-      const passing = proposal.votesFor > proposal.votesAgainst && (proposal.votesFor + proposal.votesAgainst) >= proposal.quorumRequired;
-      console.log(`  Passing:       ${passing}`);
-      console.log(`  Executed:      ${proposal.executed}`);
-      console.log(`  Cancelled:     ${proposal.cancelled}`);
-    } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
-      process.exit(1);
-    }
-  });
-
-/**
- * List governance proposals.
- */
-governance
-  .command("list")
-  .description("List governance proposals")
-  .option("--from <id>", "Starting proposal ID (default: 0)")
-  .option("--limit <n>", "Number of proposals to fetch (default: 10)")
-  .action(async (cmdOptions: { from?: string, limit?: string }) => {
-    const options = program.opts();
-    const network = options.network as NetworkType;
-    const config = loadConfig(network);
-    const fromId = cmdOptions.from ? BigInt(cmdOptions.from) : 0n;
-    const limit = cmdOptions.limit ? parseInt(cmdOptions.limit, 10) : 10;
-    const sdk = new StellarDIDCreditSDK(config);
-
-    try {
-      const proposals = await sdk.governance.listProposals(fromId, limit);
-      if (proposals.length === 0) {
-        console.log("No proposals found.");
-        return;
-      }
-
-      for (let i = 0; i < proposals.length; i++) {
-        const p = proposals[i];
-        const currentId = fromId + BigInt(i);
-        console.log(`[${currentId}] Weights: ${p.proposedWeights.vcWeight}/${p.proposedWeights.txWeight}/${p.proposedWeights.repaymentWeight} | FOR: ${p.votesFor} AGAINST: ${p.votesAgainst} | Executed: ${p.executed}`);
-      }
-    } catch (err) {
-      console.error("Failed:", err instanceof Error ? err.message : String(err));
+      console.error("Failed:", msg);
       process.exit(1);
     }
   });

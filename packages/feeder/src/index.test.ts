@@ -25,6 +25,8 @@ const mockServerInstance = {
   getTransaction: jest.fn().mockResolvedValue({
     status: "SUCCESS",
   }),
+  getLatestLedger: jest.fn().mockResolvedValue({ sequence: 100 }),
+  getEvents: jest.fn().mockResolvedValue({ events: [], latestLedger: 100 }),
 };
 
 const mockHorizonPaymentsCall = jest
@@ -124,6 +126,8 @@ beforeEach(() => {
   mockServerInstance.getTransaction.mockResolvedValue({
     status: "SUCCESS",
   });
+  mockServerInstance.getLatestLedger.mockResolvedValue({ sequence: 100 });
+  mockServerInstance.getEvents.mockResolvedValue({ events: [], latestLedger: 100 });
   mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
 });
 
@@ -1143,3 +1147,4 @@ describe("fetchHorizonStats — mixed operation types", () => {
     expect(stats.txCount30d).toBe(5);
   });
 });
+

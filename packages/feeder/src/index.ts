@@ -111,6 +111,10 @@ export interface FeederConfig {
   skipLegacyVcCount?: boolean;
   /** Network type for configuration */
   network?: string;
+  /** Whether to run event-driven synchronization mode */
+  eventDriven?: boolean;
+  /** How often to poll for events, in milliseconds */
+  eventPollIntervalMs?: number;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -700,6 +704,8 @@ export class Feeder {
   private server: SorobanRpc.Server;
   /** Tracks the last-synced state per subject to avoid redundant syncs. */
   private syncState = new Map<string, SubjectSyncState>();
+  /** Tracks vc_hash -> subject from VCAnch events. Used for resolving Revoked events. */
+  private hashToSubject = new Map<string, string>();
 
   constructor(
     private config: FeederConfig,
@@ -954,6 +960,178 @@ export class Feeder {
   }
 
   /**
+  /**
+   * Starts the event polling loop. Used when eventDriven = true.
+   * Polls identity-oracle for VCAnch events and revocation-registry for Revoked events.
+   */
+  startEventDriven(signal?: AbortSignal): () => void {
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+    }
+
+    let identityLastLedger: number | undefined;
+    let revocationLastLedger: number | undefined;
+    let isPollingEvents = false;
+    const pollIntervalMs = this.config.eventPollIntervalMs ?? 30_000;
+
+    const pollEvents = async (): Promise<void> => {
+      if (controller.signal.aborted) return;
+      if (isPollingEvents) return;
+      isPollingEvents = true;
+
+      try {
+        if (
+          identityLastLedger === undefined ||
+          (this.config.revocationRegistryId && revocationLastLedger === undefined)
+        ) {
+          const latestLedger = await this.server.getLatestLedger();
+          if (identityLastLedger === undefined) {
+            identityLastLedger = latestLedger.sequence;
+          }
+          if (this.config.revocationRegistryId && revocationLastLedger === undefined) {
+            revocationLastLedger = latestLedger.sequence;
+          }
+        }
+
+        if (controller.signal.aborted) return;
+
+        // Poll Identity Oracle for VCAnch
+        try {
+          const response = await this.server.getEvents({
+            startLedger: identityLastLedger,
+            filters: [
+              {
+                type: "contract",
+                contractIds: [this.config.identityOracleId],
+                topics: [[xdr.ScVal.scvSymbol("VCAnch").toXDR("base64")]],
+              },
+            ],
+            limit: 100,
+          });
+
+          if (response.events.length > 0) {
+            const latestEventLedger = response.events.reduce(
+              (highestLedger, event) => Math.max(highestLedger, event.ledger),
+              identityLastLedger!,
+            );
+            identityLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+
+            for (const event of response.events) {
+              const val = event.value;
+              if (val.switch().name === "scvVec") {
+                const vec = val.vec();
+                if (vec && vec.length >= 3) {
+                  const subjectScVal = vec[1];
+                  const hashScVal = vec[2];
+
+                  let subject: string | undefined;
+                  try {
+                    if (subjectScVal.switch().name === "scvAddress") {
+                      subject = scValToNative(subjectScVal) as string;
+                    }
+                  } catch (e) { /* ignore */ }
+
+                  let hash: string | undefined;
+                  try {
+                    if (hashScVal.switch().name === "scvBytes") {
+                      hash = Buffer.from(hashScVal.bytes()).toString("hex");
+                    }
+                  } catch (e) { /* ignore */ }
+
+                  if (subject && hash) {
+                    this.hashToSubject.set(hash, subject);
+                    if (this.config.subjects.includes(subject)) {
+                      this.feedSubject(subject, controller.signal).catch((err) => {
+                        console.error(`[feeder] Error event-syncing ${subject}:`, err);
+                      });
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            identityLastLedger = response.latestLedger + 1;
+          }
+        } catch (err) {
+          // ignore transient RPC errors in polling
+        }
+
+        // Poll Revocation Registry for Revoked
+        if (this.config.revocationRegistryId) {
+          try {
+            const response = await this.server.getEvents({
+              startLedger: revocationLastLedger,
+              filters: [
+                {
+                  type: "contract",
+                  contractIds: [this.config.revocationRegistryId],
+                  topics: [[xdr.ScVal.scvSymbol("Revoked").toXDR("base64")]],
+                },
+              ],
+              limit: 100,
+            });
+
+            if (response.events.length > 0) {
+              const latestEventLedger = response.events.reduce(
+                (highestLedger, event) => Math.max(highestLedger, event.ledger),
+                revocationLastLedger!,
+              );
+              revocationLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+
+              for (const event of response.events) {
+                const val = event.value;
+                if (val.switch().name === "scvVec") {
+                  const vec = val.vec();
+                  if (vec && vec.length >= 2) {
+                    const hashScVal = vec[1];
+
+                    let hash: string | undefined;
+                    try {
+                      if (hashScVal.switch().name === "scvBytes") {
+                        hash = Buffer.from(hashScVal.bytes()).toString("hex");
+                      }
+                    } catch (e) { /* ignore */ }
+
+                    if (hash) {
+                      const subject = this.hashToSubject.get(hash);
+                      if (subject && this.config.subjects.includes(subject)) {
+                        this.feedSubject(subject, controller.signal).catch((err) => {
+                          console.error(`[feeder] Error event-syncing ${subject}:`, err);
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            } else {
+              revocationLastLedger = response.latestLedger + 1;
+            }
+          } catch (err) {
+            // ignore transient RPC errors in polling
+          }
+        }
+      } finally {
+        isPollingEvents = false;
+        if (!controller.signal.aborted) {
+          setTimeout(() => void pollEvents(), pollIntervalMs);
+        }
+      }
+    };
+
+    void pollEvents();
+    return () => {
+      controller.abort();
+    };
+  }
+
+  /**
    * Starts the polling loop. The first cycle runs immediately; subsequent
    * cycles start after pollIntervalMs elapses. Returns a stop function that
    * triggers graceful shutdown: the in-progress cycle (and whichever subject
@@ -976,6 +1154,11 @@ export class Feeder {
       }
     }
 
+    let stopEventDriven: (() => void) | undefined;
+    if (this.config.eventDriven) {
+      stopEventDriven = this.startEventDriven(controller.signal);
+    }
+
     const tick = async (): Promise<void> => {
       if (controller.signal.aborted) return;
       await this.runCycle(controller.signal);
@@ -987,6 +1170,7 @@ export class Feeder {
     void tick();
     return () => {
       controller.abort();
+      if (stopEventDriven) stopEventDriven();
     };
   }
 }
@@ -1219,11 +1403,21 @@ if (require.main === module) {
   console.log(`  horizon    : ${horizonUrl}`);
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
+  const eventDriven = process.env["EVENT_DRIVEN"] === "true";
+  const eventPollIntervalMsStr = process.env["EVENT_POLL_INTERVAL_MS"];
+  const eventPollIntervalMs = eventPollIntervalMsStr
+    ? parseInt(eventPollIntervalMsStr, 10)
+    : 30_000;
+
   console.log("  optional integrations:");
   console.log(
     `    revocationRegistry : ${revocationRegistryId ?? "not configured"}`,
   );
   console.log(`    governance        : ${governanceId ?? "not configured"}`);
+  console.log(`    eventDriven       : ${eventDriven}`);
+  if (eventDriven) {
+    console.log(`    eventPollInterval : ${eventPollIntervalMs}ms`);
+  }
 
   const config: FeederConfig = {
     rpcUrl,
@@ -1239,6 +1433,8 @@ if (require.main === module) {
     maxRetries,
     retryBaseDelayMs,
     network,
+    eventDriven,
+    eventPollIntervalMs,
   };
 
   const feeder = new Feeder(config, feederKeypair);
