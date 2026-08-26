@@ -62,6 +62,30 @@ and fill in the values, or export them before running `npm start`.
 | `REVOCATION_REGISTRY_ID`  | unset     | Soroban contract address (C...) of the revocation-registry. Needed for event-driven mode so the feeder can watch for `Revoked` events and re-sync affected subjects. Validated as a contract address when set. |
 | `GOVERNANCE_ID`           | unset     | Soroban contract address (C...) of the governance contract. Reserved for future governance-aware features — the feeder does not call governance today. Validated as a contract address when set. |
 
+### Health monitoring
+
+When `HEALTH_PORT` is set, the feeder starts a lightweight HTTP server (using Node's built-in `http` module — no extra dependencies) alongside the polling loop. This is intended for Kubernetes, ECS, or other orchestrator liveness/readiness probes.
+
+| Variable      | Default | Description |
+| ------------- | ------- | ----------- |
+| `HEALTH_PORT` | unset   | TCP port for the health HTTP server. When unset, no health server is started. |
+
+**Endpoints** (available only when `HEALTH_PORT` is set):
+
+| Endpoint       | Status | Description |
+| -------------- | ------ | ----------- |
+| `GET /health`  | 200    | Always returns liveness info: `{"status":"ok","lastCycleAt":"<iso or null>","successCount":<n>,"failureCount":<n>}`. Counts are cumulative per-subject sync outcomes across all completed cycles. |
+| `GET /ready`   | 200    | Last feed cycle completed with zero failures. |
+| `GET /ready`   | 503    | Feeder has never completed a cycle, or the last cycle had at least one failure. |
+
+Example:
+
+```bash
+HEALTH_PORT=8080 FEEDER_SECRET=S... SUBJECTS=G... \
+CREDIT_ORACLE_ID=C... IDENTITY_ORACLE_ID=C... \
+npm start
+```
+
 > **Note:** `REVOCATION_REGISTRY_ID` and `GOVERNANCE_ID` are optional. The feeder
 > starts normally without them and logs which optional integrations are
 > configured at startup.

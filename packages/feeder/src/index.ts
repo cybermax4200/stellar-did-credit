@@ -30,6 +30,8 @@
  *                            for event-driven revocation sync)
  *   GOVERNANCE_ID        — Governance contract address (optional; reserved for future
  *                          governance-aware features; the feeder does not call it yet)
+ *   HEALTH_PORT          — When set, starts an HTTP server on this port exposing
+ *                          GET /health and GET /ready for production monitoring
  */
 
 import {
@@ -45,6 +47,11 @@ import {
   Keypair,
   Horizon,
 } from "@stellar/stellar-sdk";
+import {
+  HealthTracker,
+  createHealthServer,
+  parseHealthPort,
+} from "./health";
 
 // ---------------------------------------------------------------------------
 // Network configurations
@@ -115,6 +122,8 @@ export interface FeederConfig {
   eventDriven?: boolean;
   /** How often to poll for events, in milliseconds */
   eventPollIntervalMs?: number;
+  /** Optional in-memory health tracker for /health and /ready endpoints */
+  healthTracker?: HealthTracker;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -957,6 +966,8 @@ export class Feeder {
     console.log(
       `[feeder] Cycle complete: ${succeeded} succeeded, ${skipped} skipped, ${failed} failed`,
     );
+
+    this.config.healthTracker?.recordCycleResult(succeeded, failed);
   }
 
   /**
@@ -1419,6 +1430,14 @@ if (require.main === module) {
     console.log(`    eventPollInterval : ${eventPollIntervalMs}ms`);
   }
 
+  const healthPort = parseHealthPort(process.env["HEALTH_PORT"]);
+  const healthTracker = healthPort !== undefined ? new HealthTracker() : undefined;
+
+  if (healthPort !== undefined && healthTracker) {
+    createHealthServer(healthPort, healthTracker);
+    console.log(`  healthPort  : ${healthPort} (/health, /ready)`);
+  }
+
   const config: FeederConfig = {
     rpcUrl,
     horizonUrl,
@@ -1435,6 +1454,7 @@ if (require.main === module) {
     network,
     eventDriven,
     eventPollIntervalMs,
+    healthTracker,
   };
 
   const feeder = new Feeder(config, feederKeypair);
