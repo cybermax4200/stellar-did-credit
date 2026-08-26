@@ -26,6 +26,10 @@
  *   POLL_INTERVAL_MS     — Feed cycle interval in ms (default: 3 600 000 = 1 hour)
  *   MAX_RETRIES          — Max retry attempts for transient RPC/Horizon failures (default: 3)
  *   RETRY_BASE_DELAY_MS  — Base backoff delay in ms (default: 1 000)
+ *   REVOCATION_REGISTRY_ID — Revocation-registry contract address (optional; needed
+ *                            for event-driven revocation sync)
+ *   GOVERNANCE_ID        — Governance contract address (optional; reserved for future
+ *                          governance-aware features; the feeder does not call it yet)
  */
 
 import {
@@ -43,6 +47,38 @@ import {
 } from "@stellar/stellar-sdk";
 
 // ---------------------------------------------------------------------------
+// Network configurations
+// ---------------------------------------------------------------------------
+
+type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
+
+const NETWORK_CONFIGS: Record<NetworkType, {
+  networkPassphrase: string;
+  rpcUrl: string;
+  horizonUrl: string;
+  simAccount: string;
+}> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org", 
+    horizonUrl: "https://horizon-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    horizonUrl: "https://horizon.stellar.org",
+    simAccount: "", // Must be set via env var for mainnet
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022", 
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    horizonUrl: "https://horizon-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Public types
 // ---------------------------------------------------------------------------
 
@@ -57,6 +93,10 @@ export interface FeederConfig {
   creditOracleId: string;
   /** identity-oracle contract address */
   identityOracleId: string;
+  /** revocation-registry contract address; needed for event-driven revocation sync (optional) */
+  revocationRegistryId?: string;
+  /** governance contract address; reserved for future governance-aware features (optional) */
+  governanceId?: string;
   /** Any funded account used as fee source for read-only simulations */
   simAccount: string;
   /** Subject G... addresses to sync on every cycle */
@@ -71,6 +111,12 @@ export interface FeederConfig {
   skipLegacyVcCount?: boolean;
   /** Max consecutive failures before a subject enters dead-letter state (default: 5) */
   maxConsecutiveFailures?: number;
+  /** Network type for configuration */
+  network?: string;
+  /** Whether to run event-driven synchronization mode */
+  eventDriven?: boolean;
+  /** How often to poll for events, in milliseconds */
+  eventPollIntervalMs?: number;
 }
 
 /** Transaction statistics to be written to the credit-oracle via update_tx_stats. */
@@ -86,15 +132,39 @@ export interface TxStats {
 /**
  * Minimal Horizon operation record shape used by fetchHorizonStats.
  * Only the fields needed for 30-day stats aggregation are surfaced.
+ *
+ * Extended to cover:
+ *   - payment               : plain XLM/asset transfer
+ *   - path_payment_strict_send / path_payment_strict_receive :
+ *       source_amount / source_asset_type (send side)
+ *       amount / asset_type (destination side)
+ *   - create_account        : counted toward tx_count only
+ *   - claim_claimable_balance : counted toward tx_count only
  */
 interface HorizonOperationRecord {
   type: string;
   transaction_hash: string;
   created_at: string;
+  /** Sender address (payment, path_payment_strict_send/receive) */
   from?: string;
+  /** Recipient address (payment, path_payment_strict_send/receive) */
   to?: string;
+  /** Destination amount string */
   amount?: string;
+  /** Destination asset type ("native" = XLM) */
   asset_type?: string;
+  /** Source amount string (path payments) */
+  source_amount?: string;
+  /** Source asset type (path payments, "native" = XLM) */
+  source_asset_type?: string;
+  /** New account address (create_account) */
+  account?: string;
+  /** Funder address (create_account) */
+  funder?: string;
+  /** Starting balance in XLM (create_account) */
+  starting_balance?: string;
+  /** Claimant address (claim_claimable_balance) */
+  claimant?: string;
 }
 
 /** Minimal shape of an HTTP error surfaced by Horizon/RPC clients. */
@@ -157,6 +227,26 @@ function isValidStellarAddress(address: string): boolean {
   // Validate against Stellar SDK
   try {
     Keypair.fromPublicKey(address);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Checks if a string is a valid Soroban contract address (C-address).
+ * Must start with 'C', be 56 characters total, and pass Stellar SDK validation.
+ *
+ * Used for the optional `revocationRegistryId` / `governanceId` configuration.
+ */
+export function isValidSorobanContractId(address: string): boolean {
+  if (!address || typeof address !== "string") return false;
+  if (!address.startsWith("C")) return false;
+  if (address.length !== 56) return false;
+
+  // Validate against Stellar SDK (verifies the contract ID checksum)
+  try {
+    Address.fromString(address);
     return true;
   } catch {
     return false;
@@ -236,10 +326,23 @@ function isPermanentError(error: unknown): boolean {
 /**
  * Fetches 30-day payment statistics for a Stellar address via the Horizon API.
  *
- * Paginates backwards through the payment operation history, stopping at the
- * 30-day cutoff. Only native (XLM) payment amounts are included in the volume
- * total; non-native assets are counted toward tx_count and counterparties but
- * not volume, matching the credit-oracle's scoring semantics.
+ * Paginates backwards through the operation history (payments endpoint),
+ * stopping at the 30-day cutoff. The following operation types are recognised:
+ *
+ * | Op type                        | volume_30d       | tx_count_30d |
+ * | ------------------------------ | ---------------- | ------------ |
+ * | payment                        | XLM leg only     | ✓            |
+ * | path_payment_strict_send       | XLM source leg   | ✓            |
+ * | path_payment_strict_receive    | XLM dest leg     | ✓            |
+ * | create_account                 | —                | ✓            |
+ * | claim_claimable_balance        | —                | ✓            |
+ *
+ * Only native (XLM) asset amounts are included in volume; non-native assets
+ * are counted toward tx_count and counterparties but not volume, matching
+ * the credit-oracle's scoring semantics.
+ *
+ * This change is backward-compatible: existing scores cannot decrease because
+ * we only ever add to volume and tx_count.
  *
  * Returns empty stats if the address is invalid or the account is not found.
  */
@@ -343,6 +446,48 @@ export async function fetchHorizonStats(
         // Track the other party in this payment
         const counterparty = op.from === address ? op.to : op.from;
         if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (
+        op.type === "path_payment_strict_send" ||
+        op.type === "path_payment_strict_receive"
+      ) {
+        // For path payments we count whichever leg(s) are native (XLM).
+        // path_payment_strict_send:    source_amount / source_asset_type is the
+        //   amount the sender spent; amount / asset_type is what the recipient got.
+        // path_payment_strict_receive: same field layout from Horizon.
+        //
+        // Strategy: if the subject is the sender, count the XLM source leg;
+        //           if the subject is the recipient, count the XLM destination leg;
+        //           both legs can be XLM simultaneously (same-asset path).
+        if (op.from === address && op.source_asset_type === "native" && op.source_amount) {
+          const amountXLM = parseFloat(op.source_amount);
+          volumeStroops += BigInt(Math.round(amountXLM * 10_000_000));
+        }
+        if (op.to === address && op.asset_type === "native" && op.amount) {
+          const amountXLM = parseFloat(op.amount);
+          volumeStroops += BigInt(Math.round(amountXLM * 10_000_000));
+        }
+
+        // Track counterparty
+        const counterparty = op.from === address ? op.to : op.from;
+        if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (op.type === "create_account") {
+        // create_account counts as a transaction; no XLM volume is added
+        // (the starting_balance is locked in the new account, not a payment flow).
+        // Track the funder/new-account as a counterparty.
+        const counterparty = op.funder === address ? op.account : op.funder;
+        if (counterparty) {
+          counterpartiesPerTx.get(txHash)!.add(counterparty);
+        }
+      } else if (op.type === "claim_claimable_balance") {
+        // Claimable balance claims represent real XLM flows but the amount
+        // requires a separate API call which is too expensive per-operation.
+        // Count them toward tx_count only; volume is not updated.
+        const counterparty = op.claimant;
+        if (counterparty && counterparty !== address) {
           counterpartiesPerTx.get(txHash)!.add(counterparty);
         }
       }
@@ -565,6 +710,8 @@ export class Feeder {
   private failureCounts = new Map<string, number>();
   /** Subjects that have exceeded the maxConsecutiveFailures threshold. */
   private deadLetterSubjects = new Set<string>();
+  /** Tracks vc_hash -> subject from VCAnch events. Used for resolving Revoked events. */
+  private hashToSubject = new Map<string, string>();
 
   constructor(
     private config: FeederConfig,
@@ -854,6 +1001,178 @@ export class Feeder {
   }
 
   /**
+  /**
+   * Starts the event polling loop. Used when eventDriven = true.
+   * Polls identity-oracle for VCAnch events and revocation-registry for Revoked events.
+   */
+  startEventDriven(signal?: AbortSignal): () => void {
+    const controller = new AbortController();
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        signal.addEventListener("abort", () => controller.abort(), {
+          once: true,
+        });
+      }
+    }
+
+    let identityLastLedger: number | undefined;
+    let revocationLastLedger: number | undefined;
+    let isPollingEvents = false;
+    const pollIntervalMs = this.config.eventPollIntervalMs ?? 30_000;
+
+    const pollEvents = async (): Promise<void> => {
+      if (controller.signal.aborted) return;
+      if (isPollingEvents) return;
+      isPollingEvents = true;
+
+      try {
+        if (
+          identityLastLedger === undefined ||
+          (this.config.revocationRegistryId && revocationLastLedger === undefined)
+        ) {
+          const latestLedger = await this.server.getLatestLedger();
+          if (identityLastLedger === undefined) {
+            identityLastLedger = latestLedger.sequence;
+          }
+          if (this.config.revocationRegistryId && revocationLastLedger === undefined) {
+            revocationLastLedger = latestLedger.sequence;
+          }
+        }
+
+        if (controller.signal.aborted) return;
+
+        // Poll Identity Oracle for VCAnch
+        try {
+          const response = await this.server.getEvents({
+            startLedger: identityLastLedger,
+            filters: [
+              {
+                type: "contract",
+                contractIds: [this.config.identityOracleId],
+                topics: [[xdr.ScVal.scvSymbol("VCAnch").toXDR("base64")]],
+              },
+            ],
+            limit: 100,
+          });
+
+          if (response.events.length > 0) {
+            const latestEventLedger = response.events.reduce(
+              (highestLedger, event) => Math.max(highestLedger, event.ledger),
+              identityLastLedger!,
+            );
+            identityLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+
+            for (const event of response.events) {
+              const val = event.value;
+              if (val.switch().name === "scvVec") {
+                const vec = val.vec();
+                if (vec && vec.length >= 3) {
+                  const subjectScVal = vec[1];
+                  const hashScVal = vec[2];
+
+                  let subject: string | undefined;
+                  try {
+                    if (subjectScVal.switch().name === "scvAddress") {
+                      subject = scValToNative(subjectScVal) as string;
+                    }
+                  } catch (e) { /* ignore */ }
+
+                  let hash: string | undefined;
+                  try {
+                    if (hashScVal.switch().name === "scvBytes") {
+                      hash = Buffer.from(hashScVal.bytes()).toString("hex");
+                    }
+                  } catch (e) { /* ignore */ }
+
+                  if (subject && hash) {
+                    this.hashToSubject.set(hash, subject);
+                    if (this.config.subjects.includes(subject)) {
+                      this.feedSubject(subject, controller.signal).catch((err) => {
+                        console.error(`[feeder] Error event-syncing ${subject}:`, err);
+                      });
+                    }
+                  }
+                }
+              }
+            }
+          } else {
+            identityLastLedger = response.latestLedger + 1;
+          }
+        } catch (err) {
+          // ignore transient RPC errors in polling
+        }
+
+        // Poll Revocation Registry for Revoked
+        if (this.config.revocationRegistryId) {
+          try {
+            const response = await this.server.getEvents({
+              startLedger: revocationLastLedger,
+              filters: [
+                {
+                  type: "contract",
+                  contractIds: [this.config.revocationRegistryId],
+                  topics: [[xdr.ScVal.scvSymbol("Revoked").toXDR("base64")]],
+                },
+              ],
+              limit: 100,
+            });
+
+            if (response.events.length > 0) {
+              const latestEventLedger = response.events.reduce(
+                (highestLedger, event) => Math.max(highestLedger, event.ledger),
+                revocationLastLedger!,
+              );
+              revocationLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+
+              for (const event of response.events) {
+                const val = event.value;
+                if (val.switch().name === "scvVec") {
+                  const vec = val.vec();
+                  if (vec && vec.length >= 2) {
+                    const hashScVal = vec[1];
+
+                    let hash: string | undefined;
+                    try {
+                      if (hashScVal.switch().name === "scvBytes") {
+                        hash = Buffer.from(hashScVal.bytes()).toString("hex");
+                      }
+                    } catch (e) { /* ignore */ }
+
+                    if (hash) {
+                      const subject = this.hashToSubject.get(hash);
+                      if (subject && this.config.subjects.includes(subject)) {
+                        this.feedSubject(subject, controller.signal).catch((err) => {
+                          console.error(`[feeder] Error event-syncing ${subject}:`, err);
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+            } else {
+              revocationLastLedger = response.latestLedger + 1;
+            }
+          } catch (err) {
+            // ignore transient RPC errors in polling
+          }
+        }
+      } finally {
+        isPollingEvents = false;
+        if (!controller.signal.aborted) {
+          setTimeout(() => void pollEvents(), pollIntervalMs);
+        }
+      }
+    };
+
+    void pollEvents();
+    return () => {
+      controller.abort();
+    };
+  }
+
+  /**
    * Starts the polling loop. The first cycle runs immediately; subsequent
    * cycles start after pollIntervalMs elapses. Returns a stop function that
    * triggers graceful shutdown: the in-progress cycle (and whichever subject
@@ -876,6 +1195,11 @@ export class Feeder {
       }
     }
 
+    let stopEventDriven: (() => void) | undefined;
+    if (this.config.eventDriven) {
+      stopEventDriven = this.startEventDriven(controller.signal);
+    }
+
     const tick = async (): Promise<void> => {
       if (controller.signal.aborted) return;
       await this.runCycle(controller.signal);
@@ -887,6 +1211,7 @@ export class Feeder {
     void tick();
     return () => {
       controller.abort();
+      if (stopEventDriven) stopEventDriven();
     };
   }
 }
@@ -1016,15 +1341,28 @@ if (require.main === module) {
   const creditOracleId = requireEnv("CREDIT_ORACLE_ID");
   const identityOracleId = requireEnv("IDENTITY_ORACLE_ID");
 
-  const networkPassphrase =
-    process.env["NETWORK_PASSPHRASE"] ?? "Test SDF Network ; September 2015";
-  const rpcUrl =
-    process.env["RPC_URL"] ?? "https://soroban-testnet.stellar.org";
-  const horizonUrl =
-    process.env["HORIZON_URL"] ?? "https://horizon-testnet.stellar.org";
-  const simAccount =
-    process.env["SIM_ACCOUNT"] ??
-    "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF";
+  // Get network from NETWORK env var, default to testnet
+  const network = (process.env["NETWORK"]?.toLowerCase() as NetworkType) || 'testnet';
+  if (network !== 'testnet' && network !== 'mainnet' && network !== 'futurenet') {
+    console.error(`Error: NETWORK must be one of: testnet, mainnet, futurenet. Got: ${process.env["NETWORK"]}`);
+    process.exit(1);
+  }
+
+  // Get network defaults, allow env var overrides
+  const networkDefaults = NETWORK_CONFIGS[network];
+  const networkPassphrase = process.env["NETWORK_PASSPHRASE"] ?? networkDefaults.networkPassphrase;
+  const rpcUrl = process.env["RPC_URL"] ?? networkDefaults.rpcUrl;
+  const horizonUrl = process.env["HORIZON_URL"] ?? networkDefaults.horizonUrl;
+  const simAccount = process.env["SIM_ACCOUNT"] ?? networkDefaults.simAccount;
+
+  // Validate mainnet SIM_ACCOUNT requirement
+  if (network === 'mainnet' && !simAccount) {
+    console.error(
+      "Error: SIM_ACCOUNT is required for mainnet feeder operations. Set SIM_ACCOUNT=G... to a funded mainnet account."
+    );
+    process.exit(1);
+  }
+
   const pollIntervalMs = parsePollIntervalMs(
     process.env["POLL_INTERVAL_MS"] ?? "3600000",
   );
@@ -1037,6 +1375,26 @@ if (require.main === module) {
     process.env["MAX_CONSECUTIVE_FAILURES"] ?? "5",
     10,
   );
+
+  // Optional contract integrations. The feeder must not fail when these are
+  // absent — they only enable additional behaviour (event-driven revocation
+  // sync, future governance-aware features).
+  const revocationRegistryId =
+    process.env["REVOCATION_REGISTRY_ID"]?.trim() || undefined;
+  const governanceId = process.env["GOVERNANCE_ID"]?.trim() || undefined;
+
+  if (revocationRegistryId && !isValidSorobanContractId(revocationRegistryId)) {
+    console.error(
+      "Error: REVOCATION_REGISTRY_ID is not a valid Soroban contract address (must start with 'C' and be 56 characters).",
+    );
+    process.exit(1);
+  }
+  if (governanceId && !isValidSorobanContractId(governanceId)) {
+    console.error(
+      "Error: GOVERNANCE_ID is not a valid Soroban contract address (must start with 'C' and be 56 characters).",
+    );
+    process.exit(1);
+  }
 
   const subjects = subjectsRaw
     .split(",")
@@ -1083,6 +1441,7 @@ if (require.main === module) {
 
   console.log("[feeder] starting");
   console.log(`  feeder     : ${feederKeypair.publicKey()}`);
+  console.log(`  network    : ${network}`);
   console.log(`  subjects   : ${validSubjects.join(", ")}`);
   console.log(`  interval   : ${pollIntervalMs}ms`);
   console.log(`  rpc        : ${rpcUrl}`);
@@ -1090,6 +1449,21 @@ if (require.main === module) {
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
   console.log(`  maxFailures: ${maxConsecutiveFailures}`);
+  const eventDriven = process.env["EVENT_DRIVEN"] === "true";
+  const eventPollIntervalMsStr = process.env["EVENT_POLL_INTERVAL_MS"];
+  const eventPollIntervalMs = eventPollIntervalMsStr
+    ? parseInt(eventPollIntervalMsStr, 10)
+    : 30_000;
+
+  console.log("  optional integrations:");
+  console.log(
+    `    revocationRegistry : ${revocationRegistryId ?? "not configured"}`,
+  );
+  console.log(`    governance        : ${governanceId ?? "not configured"}`);
+  console.log(`    eventDriven       : ${eventDriven}`);
+  if (eventDriven) {
+    console.log(`    eventPollInterval : ${eventPollIntervalMs}ms`);
+  }
 
   const config: FeederConfig = {
     rpcUrl,
@@ -1097,12 +1471,17 @@ if (require.main === module) {
     networkPassphrase,
     creditOracleId,
     identityOracleId,
+    revocationRegistryId,
+    governanceId,
     simAccount,
     subjects: validSubjects,
     pollIntervalMs,
     maxRetries,
     retryBaseDelayMs,
     maxConsecutiveFailures,
+    network,
+    eventDriven,
+    eventPollIntervalMs,
   };
 
   const feeder = new Feeder(config, feederKeypair);

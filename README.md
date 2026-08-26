@@ -519,6 +519,7 @@ Contract IDs are loaded from (in order of precedence):
 | `IDENTITY_ORACLE_ID`     | identity-oracle contract address         |
 | `CREDIT_ORACLE_ID`       | credit-oracle contract address           |
 | `REVOCATION_REGISTRY_ID` | revocation-registry contract address     |
+| `GOVERNANCE_ID`          | governance contract address              |
 | `NETWORK_PASSPHRASE`     | Stellar network passphrase (default: testnet) |
 | `RPC_URL`                | Soroban RPC endpoint (default: testnet)  |
 | `SIM_ACCOUNT`            | Funded account for read-only simulations |
@@ -532,6 +533,7 @@ Create a `stellar-did-config.json` file:
   "identityOracleId": "C...",
   "creditOracleId": "C...",
   "revocationRegistryId": "C...",
+  "governanceId": "C...",
   "networkPassphrase": "Test SDF Network ; September 2015",
   "rpcUrl": "https://soroban-testnet.stellar.org"
 }
@@ -544,7 +546,8 @@ You can also use a `deployments.testnet.json`-style file with a `contracts` bloc
   "contracts": {
     "identity-oracle": "C...",
     "credit-oracle": "C...",
-    "revocation-registry": "C..."
+    "revocation-registry": "C...",
+    "governance": "C..."
   }
 }
 ```
@@ -566,6 +569,29 @@ stellar-did anchor-did YOUR_STELLAR_SECRET_KEY QmExampleCid123
 ```
 Anchoring DID for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
   DID Doc CID: QmExampleCid123
+
+Success!
+  Transaction: abc123def456...
+  Explorer:    https://stellar.expert/explorer/testnet/tx/abc123def456...
+```
+
+#### `anchor-vc` — Anchor a Verifiable Credential
+
+Anchors a verifiable credential hash on-chain. Must be executed by a registered trusted issuer.
+
+```bash
+stellar-did anchor-vc <issuer-secret> <subject-address> <vc-hash> [--type <type>]
+
+# Example
+stellar-did anchor-vc YOUR_STELLAR_SECRET_KEY GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 --type kyc
+```
+
+**Output:**
+```
+Anchoring VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX on testnet...
+  Issuer:  GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
+  VC Hash: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+  Type:    kyc
 
 Success!
   Transaction: abc123def456...
@@ -699,6 +725,51 @@ stellar-did compute-score --json YOUR_STELLAR_SECRET_KEY G...
 ```
 
 **Output:** (same format as `get-score`)
+
+#### `governance` — Protocol Governance
+
+Provides subcommands to create proposals, vote, execute, and apply weight changes. Requires `GOVERNANCE_ID` to be configured.
+
+**Create a proposal**
+```bash
+stellar-did governance create-proposal <proposer-secret> <vc-weight> <tx-weight> <repay-weight> [--voting-period <ledgers>] [--delay <ledgers>]
+
+# Example
+stellar-did governance create-proposal YOUR_STELLAR_SECRET_KEY 40 30 30
+```
+
+**Vote on a proposal**
+```bash
+stellar-did governance vote <voter-secret> <proposal-id> <for|against> <weight>
+
+# Example
+stellar-did governance vote YOUR_STELLAR_SECRET_KEY 1 for 100
+```
+
+**Execute a proposal**
+Queues a passing proposal's weights in the credit-oracle.
+```bash
+stellar-did governance execute <payer-secret> <proposal-id>
+```
+
+**Apply weights**
+Applies queued weights after the credit-oracle timelock expires (~24 hours).
+```bash
+stellar-did governance apply-weights <payer-secret>
+```
+
+**Show a proposal**
+```bash
+stellar-did governance show <proposal-id>
+
+# Example
+stellar-did governance show 1
+```
+
+**List proposals**
+```bash
+stellar-did governance list [--from <id>] [--limit <n>]
+```
 
 ---
 

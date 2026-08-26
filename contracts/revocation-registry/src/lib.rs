@@ -35,18 +35,18 @@ fn ensure_not_paused(env: &Env) -> Result<(), RevocationRegistryError> {
 }
 
 fn enter_guard(env: &Env) -> Result<(), RevocationRegistryError> {
-    if env.storage().instance().has(&RevocationKey::ReentrancyLock) {
+    if env.storage().temporary().has(&RevocationKey::ReentrancyLock) {
         return Err(RevocationRegistryError::ReentrancyDetected);
     }
     env.storage()
-        .instance()
+        .temporary()
         .set(&RevocationKey::ReentrancyLock, &true);
     Ok(())
 }
 
 fn exit_guard(env: &Env) {
     env.storage()
-        .instance()
+        .temporary()
         .remove(&RevocationKey::ReentrancyLock);
 }
 
@@ -765,7 +765,7 @@ mod tests {
         assert!(client.is_revoked(&vc_hash));
 
         let lock_present: bool = env.as_contract(&contract_id, || {
-            env.storage().instance().has(&RevocationKey::ReentrancyLock)
+            env.storage().temporary().has(&RevocationKey::ReentrancyLock)
         });
         assert!(
             !lock_present,
@@ -780,7 +780,7 @@ mod tests {
 
         env.as_contract(&contract_id, || {
             env.storage()
-                .instance()
+                .temporary()
                 .set(&RevocationKey::ReentrancyLock, &true);
         });
 
@@ -798,7 +798,9 @@ mod tests {
                 .instance()
                 .set(&RevocationKey::ReentrancyLock, &true);
             exit_guard(&env);
-            assert!(!env.storage().instance().has(&RevocationKey::ReentrancyLock));
+            // After exit_guard the lock must be gone.
+            assert!(!env.storage().temporary().has(&RevocationKey::ReentrancyLock));
+            // And enter_guard must now succeed.
             assert!(enter_guard(&env).is_ok());
         });
     }

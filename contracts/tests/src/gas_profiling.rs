@@ -44,7 +44,6 @@ mod tests {
 
         let mut profiles: std::vec::Vec<GasProfileResult> = std::vec::Vec::new();
 
-        // 1. Profile anchor_vc
         for count in 1..=3 {
             let vc_hash = BytesN::from_array(&env, &[count as u8; 32]);
             env.budget().reset_default();
@@ -57,7 +56,6 @@ mod tests {
             });
         }
 
-        // 2. Profile record_repayment
         for count in 1..=3 {
             env.budget().reset_default();
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
@@ -69,7 +67,6 @@ mod tests {
             });
         }
 
-        // 3. Profile update_tx_stats and compute_score
         credit.update_tx_stats(
             &feeder,
             &subject,
@@ -89,7 +86,6 @@ mod tests {
             memory_bytes: env.budget().memory_bytes_cost(),
         });
 
-        // 4. Profile get_score
         env.budget().reset_default();
         let _score = credit.get_score(&subject);
         profiles.push(GasProfileResult {
@@ -99,7 +95,6 @@ mod tests {
             memory_bytes: env.budget().memory_bytes_cost(),
         });
 
-        // 5. Profile batch_revoke across different vector sizes
         for size in [1, 5, 10, 25, 50] {
             let mut hashes = Vec::new(&env);
             for i in 0..size {
@@ -116,7 +111,6 @@ mod tests {
             });
         }
 
-        // Ensure all 5 core operations were profiled
         assert!(!profiles.is_empty());
         assert!(profiles.iter().any(|p| p.operation == "anchor_vc"));
         assert!(profiles.iter().any(|p| p.operation == "record_repayment"));
@@ -124,7 +118,6 @@ mod tests {
         assert!(profiles.iter().any(|p| p.operation == "get_score"));
         assert!(profiles.iter().any(|p| p.operation == "batch_revoke"));
 
-        // Output results table format
         std::println!("\n=================== GAS PROFILING HARNESS RESULTS ===================");
         std::println!(
             "| {:<18} | {:<10} | {:<16} | {:<12} |",
@@ -144,5 +137,36 @@ mod tests {
             );
         }
         std::println!("=====================================================================\n");
+    }
+
+    #[test]
+    fn profile_list_feeders_with_50_entries() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        credit.initialize(&admin);
+
+        for _ in 0..50u8 {
+            let feeder = Address::generate(&env);
+            credit.register_feeder(&admin, &feeder);
+        }
+
+        env.budget().reset_default();
+        let feeders = credit.list_feeders();
+        let cpu = env.budget().cpu_instruction_cost();
+
+        assert_eq!(feeders.len(), 50);
+
+        const MAINNET_CPU_LIMIT: u64 = 600_000_000;
+        assert!(
+            cpu < MAINNET_CPU_LIMIT,
+            "list_feeders with 50 entries exceeded CPU limit: {} > {}",
+            cpu,
+            MAINNET_CPU_LIMIT
+        );
     }
 }

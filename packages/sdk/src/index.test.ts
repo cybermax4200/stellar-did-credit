@@ -782,6 +782,49 @@ describe("StellarDIDCreditSDK", () => {
       });
     });
 
+    it("polls pending status until SUCCESS and then resolves with tx hash", async () => {
+      jest.useFakeTimers();
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "anchor-poll-success-hash",
+      });
+      mockGetTransaction
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "PENDING" })
+        .mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk.anchorDID(subjectKeypair as never, "QmExampleCid");
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(5000);
+      await jest.advanceTimersByTimeAsync(5000);
+
+      await expect(promise).resolves.toBe("anchor-poll-success-hash");
+      expect(mockGetTransaction).toHaveBeenCalledTimes(3);
+    });
+
+    it("throws SDKError with transaction hash and result XDR when confirmation fails", async () => {
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "anchor-failed-hash",
+      });
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        resultXdr: "AAAAFAILEDXDR",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
+      ).rejects.toMatchObject({
+        code: "TRANSACTION_FAILED",
+        transactionHash: "anchor-failed-hash",
+        resultXdr: "AAAAFAILEDXDR",
+      });
+    });
+
     it("uses three default retries with exponential backoff", async () => {
       jest.useFakeTimers();
       mockSendTransaction
@@ -833,6 +876,23 @@ describe("StellarDIDCreditSDK", () => {
       expect(error).toBeInstanceOf(SDKError);
       expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("uses the default 30s confirmation timeout", async () => {
+      jest.useFakeTimers();
+      mockGetTransaction.mockResolvedValue({ status: "PENDING" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const promise = sdk
+        .anchorDID(subjectKeypair as never, "QmExampleCid")
+        .catch((caught: unknown) => caught);
+
+      await Promise.resolve();
+      await jest.advanceTimersByTimeAsync(30_000);
+      const error = await promise;
+
+      expect(error).toBeInstanceOf(SDKError);
+      expect(error).toMatchObject({ code: "TRANSACTION_TIMEOUT" });
     });
 
     it("does not retry permanent submission errors", async () => {
@@ -961,6 +1021,72 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("verify_vc");
     });
 
+    it("returns false when verify_vc reports a credential as revoked", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 12));
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+      expect(mockLastContractCall?.args).toHaveLength(2);
+    });
+
+    it("returns false when the contract is paused", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #8)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 9));
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+    });
+
+    it("returns false for an unknown subject with no VC records", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        error: "unknown subject",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyVC(
+        "GUNKNOWN1234567890123456789012345678901234567890123456",
+        Buffer.alloc(32, 10),
+      );
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("verify_vc");
+    });
+
+    it("uses simAccount as read-only source account", async () => {
+      const { TransactionBuilder } = jest.requireMock("@stellar/stellar-sdk");
+      (TransactionBuilder as jest.Mock).mockClear();
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await sdk.verifyVC(subjectAddress, Buffer.alloc(32, 11));
+
+      expect(TransactionBuilder).toHaveBeenCalledWith(
+        expect.objectContaining({
+          accountId: mockConfig.simAccount,
+          sequence: "0",
+        }),
+        expect.objectContaining({
+          fee: "100",
+          networkPassphrase: mockConfig.networkPassphrase,
+        }),
+      );
+    });
+
     it("rejects non-32-byte credential hashes", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
@@ -1057,7 +1183,7 @@ describe("StellarDIDCreditSDK", () => {
       );
 
       await Promise.resolve();
-      await jest.advanceTimersByTimeAsync(1000);
+      await jest.advanceTimersByTimeAsync(5000);
 
       await expect(computePromise).resolves.toBe(612);
       expect(mockGetTransaction).toHaveBeenCalledTimes(2);
@@ -1100,7 +1226,7 @@ describe("StellarDIDCreditSDK", () => {
       });
       mockGetTransaction.mockResolvedValue({
         status: "FAILED",
-        errorResult: "tx_bad_auth",
+        resultXdr: "AAAAFAILXDR",
       });
       mockSimulateTransaction.mockResolvedValue({
         result: { retval: { value: null } },
@@ -1113,9 +1239,11 @@ describe("StellarDIDCreditSDK", () => {
           { publicKey: () => subjectAddress } as unknown as Keypair,
           subjectAddress,
         ),
-      ).rejects.toThrow(
-        'computeScore transaction failed for tx-hash-3: {"status":"FAILED","errorResult":"tx_bad_auth"}',
-      );
+      ).rejects.toMatchObject({
+        code: "TRANSACTION_FAILED",
+        transactionHash: "tx-hash-3",
+        resultXdr: "AAAAFAILXDR",
+      });
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
     });
 
