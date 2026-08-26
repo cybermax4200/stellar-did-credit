@@ -455,6 +455,40 @@ describe("Address validation and error handling", () => {
     expect(stats.avgCounterparties).toBe(0);
   });
 
+  it("mid-pagination transient error retries and optionally returns partial stats", async () => {
+    const { fetchHorizonStats } = await import("./index");
+    
+    const mockNext = jest.fn()
+      .mockRejectedValueOnce(Object.assign(new Error("Transient"), { code: "ETIMEDOUT" }))
+      .mockRejectedValueOnce(Object.assign(new Error("Transient"), { code: "ETIMEDOUT" }))
+      .mockRejectedValueOnce(Object.assign(new Error("Transient"), { code: "ETIMEDOUT" }));
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [{
+        type: "payment",
+        transaction_hash: "hash1",
+        created_at: new Date().toISOString(),
+        asset_type: "native",
+        amount: "10.0",
+        from: "GBAD5234567234567234567234567234567234567234567234567233",
+        to: "GOTHER"
+      }],
+      next: mockNext,
+    });
+
+    const consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+
+    // Run fetchHorizonStats with maxRetries=2, allowPartialStats=true
+    const stats = await fetchHorizonStats("https://horizon.example", "GBAD5234567234567234567234567234567234567234567234567233", 2, true);
+    
+    expect(stats.volume30d).toBe(BigInt(100_000_000));
+    expect(stats.txCount30d).toBe(1);
+    expect(stats.partial).toBe(true);
+    expect(mockNext).toHaveBeenCalledTimes(3); // 1 initial try + 2 retries
+    
+    consoleWarnSpy.mockRestore();
+  });
+
   it("getActiveVcCount returns 0 for unknown subject without throwing", async () => {
     const { getActiveVcCount } = await import("./index");
 
