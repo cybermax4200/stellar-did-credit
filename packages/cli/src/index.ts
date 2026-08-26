@@ -16,7 +16,7 @@ import {
   type VCRecord,
   type ScoringWeights,
 } from "@stellar-did-credit/sdk";
-import { loadConfig } from "./config";
+import { loadConfig, validateConfig, type NetworkType } from "./config";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -30,7 +30,12 @@ program
     "CLI for the Stellar DID Credit Protocol — anchor DIDs, check scores, " +
       "verify credentials, and compute credit scores on-chain.",
   )
-  .version("0.1.0");
+  .version("0.1.0")
+  .option(
+    "--network <network>",
+    "Stellar network to use (testnet, mainnet, futurenet)",
+    "testnet"
+  );
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -195,13 +200,16 @@ program
   .argument("<subject-secret>", "Stellar secret key of the DID subject (starts with S)")
   .argument("<did-doc-cid>", "IPFS CID of the DID document (e.g. Qm...)")
   .action(async (subjectSecret: string, didDocCid: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId']);
     const keypair = parseSecret(subjectSecret);
     const publicKey = keypair.publicKey();
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Anchoring DID for ${publicKey}...`);
+    console.log(`Anchoring DID for ${publicKey} on ${network}...`);
     console.log(`  DID Doc CID: ${didDocCid}`);
 
     try {
@@ -209,8 +217,9 @@ program
       console.log();
       console.log("Success!");
       console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
       console.log(
-        `  Explorer:    https://stellar.expert/explorer/testnet/tx/${txHash}`,
+        `  Explorer:    ${explorerBase}/tx/${txHash}`,
       );
     } catch (err) {
       console.error(
@@ -233,13 +242,16 @@ program
   .argument("<subject-address>", "Stellar G... address of the subject")
   .option("--json", "Output the full ScoreRecord as JSON")
   .action(async (subjectAddress: string, options: { json?: boolean }) => {
-    const config = loadConfig();
+    const globalOptions = program.opts();
+    const network = globalOptions.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credit score for ${upperAddr}...`);
+    console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
 
     try {
       const score = await sdk.getScore(upperAddr);
@@ -285,14 +297,17 @@ program
     "SHA-256 hash of the verifiable credential (64 hex characters)",
   )
   .action(async (subjectAddress: string, vcHashHex: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Verifying VC for ${upperAddr}...`);
+    console.log(`Verifying VC for ${upperAddr} on ${network}...`);
     console.log(`  VC Hash: ${vcHashHex}`);
 
     try {
@@ -332,14 +347,17 @@ program
       subjectAddress: string,
       options: { json?: boolean },
     ) => {
-      const config = loadConfig();
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId']);
       const keypair = parseSecret(payerSecret);
       const upperAddr = subjectAddress.toUpperCase();
       assertStellarAddress("subject-address", upperAddr);
 
       const sdk = new StellarDIDCreditSDK(config);
 
-      console.log(`Computing credit score for ${upperAddr}...`);
+      console.log(`Computing credit score for ${upperAddr} on ${network}...`);
       console.log(`  Payer: ${keypair.publicKey()}`);
 
       try {
@@ -374,13 +392,16 @@ program
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
   .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Checking verification status for ${upperAddr}...`);
+    console.log(`Checking verification status for ${upperAddr} on ${network}...`);
 
     try {
       const verified = await sdk.isVerified(upperAddr);
@@ -411,13 +432,16 @@ program
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
   .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching active VC count for ${upperAddr}...`);
+    console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
 
     try {
       const count = await sdk.getVCCount(upperAddr);
@@ -444,13 +468,16 @@ program
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
   .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching verifiable credentials for ${upperAddr}...`);
+    console.log(`Fetching verifiable credentials for ${upperAddr} on ${network}...`);
 
     try {
       const records = await sdk.getVCs(upperAddr);
@@ -479,14 +506,17 @@ program
     "SHA-256 hash of the verifiable credential (64 hex characters)",
   )
   .action(async (subjectAddress: string, vcHashHex: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credential type for ${upperAddr}...`);
+    console.log(`Fetching credential type for ${upperAddr} on ${network}...`);
     console.log(`  VC Hash: ${vcHashHex}`);
 
     try {
@@ -514,13 +544,15 @@ program
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
   .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching DID document for ${upperAddr}...`);
+    console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
 
     try {
       const cid = await sdk.getDIDDocument(upperAddr);
@@ -548,11 +580,14 @@ program
   .command("issuers")
   .description("List all currently registered trusted credential issuers.")
   .action(async () => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log("Fetching registered issuers...");
+    console.log(`Fetching registered issuers on ${network}...`);
 
     try {
       const issuers = await sdk.getRegisteredIssuers();
@@ -584,11 +619,14 @@ program
     "Fetch the current scoring weights configured on the credit-oracle contract.",
   )
   .action(async () => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log("Fetching scoring weights...");
+    console.log(`Fetching scoring weights on ${network}...`);
 
     try {
       const weights = await sdk.getWeights();
@@ -598,6 +636,67 @@ program
         "Failed:",
         err instanceof Error ? err.message : err,
       );
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: anchor-vc
+// ---------------------------------------------------------------------------
+
+/**
+ * Anchor a verifiable credential hash on-chain.
+ */
+program
+  .command("anchor-vc")
+  .description("Anchor a verifiable credential hash on-chain as a registered issuer.")
+  .argument("<issuer-secret>", "Stellar secret key of the registered issuer (starts with S)")
+  .argument("<subject-address>", "Stellar G... address of the credential subject")
+  .argument("<vc-hash>", "SHA-256 hash of the verifiable credential (64 hex characters)")
+  .option("--type <type>", "Optional credential type label (e.g. kyc, employment)")
+  .addHelpText(
+    "after",
+    `
+Example:
+  $ stellar-did anchor-vc S... G... 5c4146... --type kyc
+`
+  )
+  .action(async (issuerSecret: string, subjectAddress: string, vcHashHex: string, cmdOptions: { type?: string }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    
+    const keypair = parseSecret(issuerSecret);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+    const vcHash = parseVcHash(vcHashHex);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    console.log(`Anchoring VC for ${upperAddr} on ${network}...`);
+    console.log(`  Issuer:  ${keypair.publicKey()}`);
+    console.log(`  VC Hash: ${vcHashHex}`);
+    if (cmdOptions.type) {
+      console.log(`  Type:    ${cmdOptions.type}`);
+    }
+
+    try {
+      // @ts-ignore
+      const txHash = await sdk.issueVC(keypair, upperAddr, vcHash, cmdOptions.type);
+
+      console.log();
+      console.log("Success!");
+      console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+      console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("IssuerNotRegistered")) {
+         msg = "IssuerNotRegistered. Hint: Ensure this issuer is registered with the admin.";
+      } else if (msg.includes("DuplicateVC")) {
+         msg = "DuplicateVC. This VC hash has already been anchored.";
+      }
+      console.error("Failed:", msg);
       process.exit(1);
     }
   });

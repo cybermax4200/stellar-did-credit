@@ -14,6 +14,8 @@ import {
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
 
+export type NetworkType = 'testnet' | 'mainnet' | 'futurenet' | 'custom';
+
 export interface ScoreRecord {
   score: number;
   lastUpdated: number;
@@ -78,6 +80,7 @@ export interface ProtocolConfig {
   baseFee?: string;
   confirmationTimeoutMs?: number;
   pollIntervalMs?: number;
+  network?: NetworkType;
 }
 
 export type Unsubscribe = () => void;
@@ -94,20 +97,72 @@ export class SDKError extends Error {
   constructor(
     public readonly code: SDKErrorCode,
     message: string,
-    options?: { cause?: unknown },
+    options?: {
+      cause?: unknown;
+      transactionHash?: string;
+      resultXdr?: string;
+    },
   ) {
     super(message);
     if (options?.cause !== undefined) {
       this.cause = options.cause;
     }
+    this.transactionHash = options?.transactionHash;
+    this.resultXdr = options?.resultXdr;
     this.name = "SDKError";
   }
 
   declare readonly cause?: unknown;
+  declare readonly transactionHash?: string;
+  declare readonly resultXdr?: string;
 }
+
+/**
+ * Network configurations for Stellar networks.
+ */
+const NETWORK_CONFIGS: Record<Exclude<NetworkType, 'custom'>, Partial<ProtocolConfig>> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    // Note: SIM_ACCOUNT for mainnet must be set explicitly to a funded account
+    simAccount: "",
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022",
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
 
 /** A Stellar keypair, or a minimal object exposing a public key. */
 export type KeypairLike = Keypair | { publicKey: string };
+
+/**
+ * Create a ProtocolConfig with network-specific defaults.
+ * 
+ * @param network - Network type (testnet, mainnet, futurenet, custom)
+ * @param overrides - Configuration overrides
+ * @returns Complete ProtocolConfig with network defaults applied
+ */
+export function createNetworkConfig(
+  network: NetworkType,
+  overrides: Partial<ProtocolConfig> = {}
+): Partial<ProtocolConfig> {
+  if (network === 'custom') {
+    return overrides;
+  }
+  
+  const networkDefaults = NETWORK_CONFIGS[network];
+  return {
+    ...networkDefaults,
+    ...overrides,
+  };
+}
 
 export type GovernanceInteger = number | bigint;
 
@@ -372,10 +427,23 @@ export class StellarDIDCreditSDK {
   private server: SorobanRpc.Server;
   public readonly governance: GovernanceClient;
 
-  constructor(private config: ProtocolConfig) {
+  constructor(config: ProtocolConfig) {
+    // Apply network defaults if network is specified but URL fields are missing
+    if (config.network && config.network !== 'custom') {
+      const networkDefaults = NETWORK_CONFIGS[config.network];
+      this.config = {
+        ...networkDefaults,
+        ...config,
+      } as ProtocolConfig;
+    } else {
+      this.config = config;
+    }
+
     this.server = new SorobanRpc.Server(this.config.rpcUrl);
     this.governance = new GovernanceClient(this.config, this.server);
   }
+
+  private config: ProtocolConfig;
 
   /**
    * Anchor a DID document on-chain by storing its IPFS CID.
@@ -452,7 +520,7 @@ export class StellarDIDCreditSDK {
       txHash,
       "anchorDID",
       getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
+      getTransactionPollIntervalMs(this.config),
     );
 
     return txHash;
@@ -536,7 +604,7 @@ export class StellarDIDCreditSDK {
       txHash,
       "issueVC",
       getConfirmationTimeoutMs(this.config),
-      this.config.pollIntervalMs ?? 1000,
+      getTransactionPollIntervalMs(this.config),
     );
 
     return txHash;
@@ -649,6 +717,13 @@ export class StellarDIDCreditSDK {
       }
       throw error;
     }
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "computeScore",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
 
     try {
       const score = await this.getScore(subjectAddress);
@@ -866,7 +941,7 @@ export class StellarDIDCreditSDK {
         txHash,
         "revokeVC",
         getConfirmationTimeoutMs(this.config),
-        this.config.pollIntervalMs ?? 1000,
+        getTransactionPollIntervalMs(this.config),
       );
     } catch (error) {
       throw createRevokeError(
@@ -956,6 +1031,9 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (isVerifyVCNegativeSimulationError(sim.error)) {
+        return false;
+      }
       throw new Error(`Simulation failed: ${sim.error}`);
     }
 
@@ -968,7 +1046,12 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    return scValToNative(resultScVal) as boolean;
+    const native = scValToNative(resultScVal);
+    if (typeof native !== "boolean") {
+      throw new Error("verify_vc returned a non-boolean result");
+    }
+
+    return native;
   }
 
   /**
@@ -1681,9 +1764,15 @@ async function waitForTransactionConfirmation(
       case "SUCCESS":
         return;
       case "FAILED": {
-        const errorDetails = JSON.stringify(result);
-        throw new Error(
-          `${operationName} transaction failed for ${txHash}: ${errorDetails}`,
+        const resultXdr = extractResultXdr(result);
+        throw new SDKError(
+          "TRANSACTION_FAILED",
+          `${operationName} transaction failed for ${txHash}; resultXdr: ${resultXdr ?? "unknown"}`,
+          {
+            cause: result,
+            transactionHash: txHash,
+            resultXdr,
+          },
         );
       }
       case "NOT_FOUND":
@@ -1720,6 +1809,28 @@ function getConfirmationTimeoutMs(config: ProtocolConfig): number {
     config.confirmationTimeoutMs ??
     (config.timeoutSeconds ?? 30) * 1000
   );
+}
+
+function getTransactionPollIntervalMs(config: ProtocolConfig): number {
+  const configured = config.pollIntervalMs;
+  if (!Number.isFinite(configured) || configured === undefined) {
+    return 5000;
+  }
+  return Math.max(1, configured);
+}
+
+function extractResultXdr(value: unknown): string | undefined {
+  if (typeof value !== "object" || value === null) {
+    return undefined;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  const raw =
+    candidate["resultXdr"] ??
+    candidate["result_xdr"] ??
+    candidate["errorResultXdr"] ??
+    candidate["error_result_xdr"];
+  return raw === undefined || raw === null ? undefined : String(raw);
 }
 
 function normalizeMaxRetries(maxRetries: number): number {
@@ -1779,7 +1890,34 @@ function createRevokeError(message: string, details: unknown): SDKError {
     details instanceof SDKError &&
     details.code === "TRANSACTION_TIMEOUT"
   ) {
-    return new SDKError("TRANSACTION_TIMEOUT", message, { cause: details });
+    return new SDKError("TRANSACTION_TIMEOUT", message, {
+      cause: details,
+      transactionHash: details.transactionHash,
+      resultXdr: details.resultXdr,
+    });
+  }
+
+  if (
+    details instanceof SDKError &&
+    details.code === "TRANSACTION_FAILED"
+  ) {
+    if (containsIssuerMismatch(details.cause)) {
+      return new SDKError(
+        "NOT_REGISTERED_ISSUER",
+        "The issuer is not registered for this VC hash",
+        {
+          cause: details,
+          transactionHash: details.transactionHash,
+          resultXdr: details.resultXdr,
+        },
+      );
+    }
+
+    return new SDKError("TRANSACTION_FAILED", message, {
+      cause: details,
+      transactionHash: details.transactionHash,
+      resultXdr: details.resultXdr,
+    });
   }
 
   return new SDKError("TRANSACTION_FAILED", message, { cause: details });
@@ -1806,6 +1944,18 @@ function getErrorMessage(value: unknown): string {
   } catch {
     return String(value);
   }
+}
+
+function isVerifyVCNegativeSimulationError(error: unknown): boolean {
+  const text = getErrorMessage(error).toLowerCase();
+  return (
+    text.includes("contractpaused") ||
+    text.includes("contract paused") ||
+    /error\(contract,\s*#8\)/i.test(text) ||
+    text.includes("vcnotfound") ||
+    text.includes("unknown subject") ||
+    text.includes("not found")
+  );
 }
 
 function withTimeout<T>(

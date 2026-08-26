@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 //! Identity oracle contract for the Stellar DID Credit protocol.
 //!
 //! Manages trusted credential issuers, DID document anchoring, and
@@ -195,6 +195,9 @@ pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 
+/// Maximum allowed CID length in bytes.
+pub const MAX_CID_LENGTH: u32 = 128;
+
 fn generic_credential_type(_env: &Env) -> Symbol {
     symbol_short!("generic")
 }
@@ -220,18 +223,23 @@ fn store_credential_type(
         .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
-/// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
-/// `prefix` must be ≤ 32 bytes.
+/// Returns true if `s` starts with `prefix`.
+///
+/// Uses `copy_into_slice` — the only byte-level accessor on
+/// `soroban_sdk::String` in SDK v22 — to extract the relevant bytes into a
+/// fixed-size stack buffer before comparing.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
     let plen = prefix.len() as usize;
-    if (s.len() as usize) < plen {
+    let slen = s.len() as usize;
+    if slen < plen {
         return false;
     }
-    let mut sbuf = [0u8; 64];
-    let mut pbuf = [0u8; 32];
-    s.copy_into_slice(&mut sbuf[..s.len() as usize]);
-    prefix.copy_into_slice(&mut pbuf[..plen]);
-    sbuf[..plen] == pbuf[..plen]
+    // Stack buffers sized to the maximum CID length we ever accept.
+    let mut s_buf = [0u8; MAX_CID_LENGTH as usize];
+    let mut p_buf = [0u8; MAX_CID_LENGTH as usize];
+    s.copy_into_slice(&mut s_buf[..slen]);
+    prefix.copy_into_slice(&mut p_buf[..plen]);
+    s_buf[..plen] == p_buf[..plen]
 }
 
 #[contract]
@@ -634,7 +642,7 @@ impl IdentityOracle {
         subject.require_auth();
 
         let len = did_doc_cid.len();
-        if len < 7 {
+        if !(7..=MAX_CID_LENGTH).contains(&len) {
             return Err(IdentityOracleError::InvalidCID);
         }
 
@@ -1203,7 +1211,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
+    use soroban_sdk::testutils::Address as _;
 
     #[contract]
     pub struct MockRevocationRegistry;
@@ -2359,5 +2367,43 @@ mod tests {
         }
 
         assert_eq!(client.get_active_vc_count(&subject), 100);
+    }
+
+    #[test]
+    fn test_anchor_did_accepts_exactly_65_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 65 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        client.anchor_did(&subject, &cid);
+        
+        let stored = client.get_did_document(&subject);
+        assert_eq!(stored.unwrap(), cid);
+    }
+
+    #[test]
+    fn test_anchor_did_rejects_256_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 256 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        let result = client.try_anchor_did(&subject, &cid);
+        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
     }
 }

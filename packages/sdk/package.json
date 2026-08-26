@@ -2,7 +2,7 @@
   "name": "@stellar-did-credit/sdk",
   "version": "0.1.0",
   "description": "TypeScript SDK for the Stellar DID Credit Protocol",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
   "scripts": {
     "build": "tsc",
     "test": "jest",
@@ -49,5 +49,5 @@
       }
     }
   },
-  "types": "src/index.ts"
+  "types": "dist/index.d.ts"
 }
