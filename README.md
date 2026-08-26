@@ -572,6 +572,29 @@ Success!
   Explorer:    https://stellar.expert/explorer/testnet/tx/abc123def456...
 ```
 
+#### `anchor-vc` — Anchor a Verifiable Credential
+
+Anchors a verifiable credential hash on-chain. Must be executed by a registered trusted issuer.
+
+```bash
+stellar-did anchor-vc <issuer-secret> <subject-address> <vc-hash> [--type <type>]
+
+# Example
+stellar-did anchor-vc YOUR_STELLAR_SECRET_KEY GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 --type kyc
+```
+
+**Output:**
+```
+Anchoring VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX on testnet...
+  Issuer:  GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
+  VC Hash: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+  Type:    kyc
+
+Success!
+  Transaction: abc123def456...
+  Explorer:    https://stellar.expert/explorer/testnet/tx/abc123def456...
+```
+
 #### `get-score` — Fetch a credit score
 
 Reads the on-chain credit score for a subject address (read-only, no fees).

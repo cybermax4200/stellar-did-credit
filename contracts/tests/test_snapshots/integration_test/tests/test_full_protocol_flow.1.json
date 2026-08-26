@@ -1473,6 +1473,18 @@
                         "val": {
                           "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAITA4"
                         }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "BatchLimit"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 100
+                        }
                       }
                     ]
                   }

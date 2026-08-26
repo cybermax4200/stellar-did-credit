@@ -631,6 +631,67 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Command: anchor-vc
+// ---------------------------------------------------------------------------
+
+/**
+ * Anchor a verifiable credential hash on-chain.
+ */
+program
+  .command("anchor-vc")
+  .description("Anchor a verifiable credential hash on-chain as a registered issuer.")
+  .argument("<issuer-secret>", "Stellar secret key of the registered issuer (starts with S)")
+  .argument("<subject-address>", "Stellar G... address of the credential subject")
+  .argument("<vc-hash>", "SHA-256 hash of the verifiable credential (64 hex characters)")
+  .option("--type <type>", "Optional credential type label (e.g. kyc, employment)")
+  .addHelpText(
+    "after",
+    `
+Example:
+  $ stellar-did anchor-vc S... G... 5c4146... --type kyc
+`
+  )
+  .action(async (issuerSecret: string, subjectAddress: string, vcHashHex: string, cmdOptions: { type?: string }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    
+    const keypair = parseSecret(issuerSecret);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+    const vcHash = parseVcHash(vcHashHex);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    console.log(`Anchoring VC for ${upperAddr} on ${network}...`);
+    console.log(`  Issuer:  ${keypair.publicKey()}`);
+    console.log(`  VC Hash: ${vcHashHex}`);
+    if (cmdOptions.type) {
+      console.log(`  Type:    ${cmdOptions.type}`);
+    }
+
+    try {
+      // @ts-ignore
+      const txHash = await sdk.issueVC(keypair, upperAddr, vcHash, cmdOptions.type);
+
+      console.log();
+      console.log("Success!");
+      console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+      console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("IssuerNotRegistered")) {
+         msg = "IssuerNotRegistered. Hint: Ensure this issuer is registered with the admin.";
+      } else if (msg.includes("DuplicateVC")) {
+         msg = "DuplicateVC. This VC hash has already been anchored.";
+      }
+      console.error("Failed:", msg);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
