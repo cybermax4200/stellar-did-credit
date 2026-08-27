@@ -160,6 +160,15 @@ jobs:
       - name: Check Node.js dependencies for vulnerabilities
         run: pnpm audit --audit-level=high
 
+  check-no-panic:
+    name: No bare panic! in contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for bare panic! in contract source files
+        run: bash scripts/check-no-panic.sh
+
   smoke-test:
     name: Testnet smoke test
     runs-on: ubuntu-latest

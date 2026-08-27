@@ -170,7 +170,7 @@ impl RevocationRegistry {
         match pending {
             Some(p) => {
                 if p != new_admin {
-                    panic!("not authorized");
+                    return Err(RevocationRegistryError::NotAuthorized);
                 }
             }
             None => return Err(RevocationRegistryError::NoPendingAdmin),
@@ -568,7 +568,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
+    #[should_panic(expected = "Error(Contract, #2)")]
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();

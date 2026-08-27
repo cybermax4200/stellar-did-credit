@@ -4,6 +4,7 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, String, Symbol, TryFromVal, Val, Vec,
 };
+use soroban_sdk::panic_with_error;
 
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
@@ -36,6 +37,8 @@ pub enum CreditOracleError {
     InvalidIdentityOracle = 11,
     /// The contract is currently paused and cannot accept writes.
     ContractPaused = 12,
+    /// Timelock has not yet expired.
+    TimelockNotExpired = 13,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -1098,7 +1101,7 @@ impl CreditOracle {
             .expect("no pending weights");
 
         if env.ledger().sequence() < effective_ledger {
-            panic!("timelock not expired");
+            panic_with_error!(&env, CreditOracleError::TimelockNotExpired);
         }
 
         let weights: ScoringWeights = env
@@ -1909,7 +1912,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "timelock not expired")]
+    #[should_panic(expected = "Error(Contract, #13)")]
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
         env.mock_all_auths();
