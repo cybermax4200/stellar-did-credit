@@ -1460,6 +1460,64 @@ mod tests {
     use soroban_sdk::TryIntoVal;
 
     #[test]
+    fn test_scoring_spec_example_1_new_user_scores_300() {
+        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+
+        assert_eq!(score, 300);
+    }
+
+    #[test]
+    fn test_scoring_spec_example_2_moderate_scores_569() {
+        let score = compute_score_pure(
+            60,
+            3_000_000_000,
+            0,
+            8,
+            10,
+            3_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 569);
+    }
+
+    #[test]
+    fn test_scoring_spec_example_3_strong_scores_817() {
+        let score = compute_score_pure(
+            100,
+            8_000_000_000,
+            0,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 817);
+    }
+
+    #[test]
+    fn test_scoring_spec_perfect_scores_850() {
+        let score = compute_score_pure(
+            100,
+            10_000_000_000,
+            100,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 850);
+    }
+
+    #[test]
     fn test_default_weights_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
