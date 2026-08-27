@@ -13,3 +13,13 @@ allow = [
     "Unicode-3.0",
     "Apache-2.0 WITH LLVM-exception",
 ]
+
+# ---------------------------------------------------------------------------
+# Custom lints enforced via CI (not cargo-deny built-ins)
+# ---------------------------------------------------------------------------
+# bare_panic_check: A shell-based CI step that fails if bare panic!() exists
+# in contract source files (contracts/*/src/*.rs) outside #[test] blocks.
+# soroban_sdk::panic_with_error! is exempted.
+#
+# See: .github/workflows/ci.yml → check-no-panic job
+# See: CONTRIBUTING.md → "No panic! in contract logic"

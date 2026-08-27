@@ -134,7 +134,7 @@ All `initialize` functions in protocol contracts **must** follow this exact orde
 // Security pattern: check_already_initialized → admin.require_auth() → set_admin
 pub fn initialize(env: Env, admin: Address) {
     if env.storage().instance().has(&DataKey::Admin) {
-        panic!("already initialized");
+        panic_with_error!(env, MyContractError::AlreadyInitialized);
     }
     admin.require_auth();
     env.storage().instance().set(&DataKey::Admin, &admin);
@@ -147,6 +147,43 @@ Rationale:
 3. **Write state last** — storage is only touched after all checks pass
 
 Do not reorder these steps. Inconsistent ordering makes security audits harder and can introduce subtle vulnerabilities. New contract functions that set privileged state must follow the same pattern.
+
+## No `panic!()` in contract logic
+
+**Bare `panic!("...")` is prohibited in contract source files** (`contracts/*/src/*.rs`).
+Use structured contract errors instead:
+
+```rust
+// ❌ BAD — bare panic
+if some_condition {
+    panic!("not authorized");
+}
+
+// ✅ GOOD — return a typed error
+if some_condition {
+    return Err(MyContractError::NotAuthorized);
+}
+
+// ✅ GOOD — panic_with_error! (exempt from CI check)
+// Use when the function signature returns () and cannot return Result.
+if some_condition {
+    panic_with_error!(env, MyContractError::NotAuthorized);
+}
+```
+
+**Why:** Bare `panic!()` calls produce opaque error messages that are difficult to
+diagnose on-chain and cannot be matched by typed error handling in SDK consumers.
+Structured contract errors (via `#[contracterror]`) are self-documenting and
+parseable by the SDK's `parseContractErrorCode` helper.
+
+**Exemptions:**
+- `soroban_sdk::panic_with_error!` — structured panic, allowed
+- `#[test]` blocks — test code may use bare `panic!()`
+- Comments containing the word `panic` — documentation only
+
+**CI enforcement:** A CI job (`check-no-panic`) scans `contracts/*/src/*.rs` for
+bare `panic!()` outside `#[test]` blocks and fails the build if any are found.
+See `.github/workflows/ci.yml`.
 
 ## Commit format
 

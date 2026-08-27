@@ -104,6 +104,8 @@ pub enum IdentityOracleError {
     InvalidRevocationRegistry = 9,
     /// The subject has reached the maximum number of active VCs allowed.
     VCLimitReached = 10,
+    /// The provided issuer tier weight is invalid (must be 1..=MAX_ISSUER_TIER_BPS).
+    InvalidIssuerTier = 11,
 }
 
 /// Maximum number of active (non-revoked) VCs a subject can have anchored.
@@ -1023,7 +1025,7 @@ impl IdentityOracle {
             return Err(IdentityOracleError::NotAuthorized);
         }
         if weight_bps == 0 || weight_bps > MAX_ISSUER_TIER_BPS {
-            panic!("invalid issuer tier");
+            return Err(IdentityOracleError::InvalidIssuerTier);
         }
         env.storage()
             .instance()
