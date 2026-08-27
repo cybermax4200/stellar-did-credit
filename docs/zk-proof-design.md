@@ -327,6 +327,55 @@ impl ScoreRangeVerifier {
 5. Subject sends `{ proof, public_inputs, circuit_version }` to lender via API or QR.
 6. Lender simulates `verify_score_range` on Stellar RPC.
 
+### SDK Prover Module (`packages/sdk/src/zk/prover.ts`)
+
+The TypeScript SDK now includes a prover module that implements steps 2–5 of the workflow above. It is designed to run in both Node.js 18+ and browsers.
+
+**Key exports:**
+
+| Export | Description |
+| ------ | ----------- |
+| `collectWitness(sdk, subjectAddress)` | Gathers ScoreRecord, ScoringWeights, and computes intermediate scores from on-chain data |
+| `generateScoreRangeProof(witness, threshold, publicParams)` | Generates a Groth16 proof via lazy-loaded snarkjs |
+| `computeScoringComponents(witness)` | Replicates the on-chain scoring formula off-chain |
+| `computeScoreCommitment(...)` | Computes the SHA-256-based score commitment (placeholder for production Pedersen/Poseidon) |
+| `verifyProof(vk, publicSignals, proof)` | Off-chain proof verification helper for testing |
+
+**Usage example:**
+
+```typescript
+import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
+import { collectWitness, generateScoreRangeProof } from "@stellar-did-credit/sdk";
+
+const sdk = new StellarDIDCreditSDK(config);
+
+// Step 1: Gather witness data from on-chain
+const witness = await collectWitness(sdk, subjectAddress);
+
+// Step 2: Generate proof for threshold 650
+const { bundle } = await generateScoreRangeProof(
+  witness,
+  650,
+  {
+    verificationKeyUrl: "https://example.com/circuit/vkey.json",
+    circuitWasmUrl: "https://example.com/circuit/score_range.wasm",
+  },
+  { circuitVersion: 1 },
+);
+
+// Step 3: Send bundle to lender
+await sendToLender(bundle);
+```
+
+**Lazy loading:** The snarkjs WASM bundle (~10 MB) is imported on first proof generation. Subsequent calls reuse the cached module. This keeps the base SDK bundle small.
+
+**Bundle size impact:** Adding `snarkjs` as a dev dependency increases the build output by ~10 MB (WASM). The lazy import means this cost is only paid when proof generation is actually used.
+
+**Limitations (to be addressed in follow-ups):**
+- `avgCounterparties` is not yet populated from `TxStats` — the caller must provide it separately (see Open research question 11).
+- The commitment scheme uses SHA-256 as a placeholder; the production circuit will use Pedersen vector commitment or Poseidon hash.
+- Browser WASM optimization is out of scope for v1.
+
 ### Proof bundle serialization (JSON)
 
 ```json
@@ -384,7 +433,7 @@ impl ScoreRangeVerifier {
 | 2 | Circom/arkworks circuit + unit tests against scoring-spec vectors | Step 1 |
 | 3 | Groth16 ceremony + vk hash | Step 2 |
 | 4 | `score-range-verifier` Soroban contract + tests | Step 3, CAP-0059 |
-| 5 | TypeScript prover module in SDK | Step 2 |
+| 5 | TypeScript prover module in SDK ✅ | Step 2 |
 | 6 | End-to-end integration test (testnet) | Steps 4–5 |
 | 7 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
 
