@@ -17,6 +17,7 @@ import {
   type ScoringWeights,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
+import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -80,6 +81,25 @@ function parseVcHash(hex: string): Buffer {
     process.exit(1);
   }
   return Buffer.from(hex, "hex");
+}
+
+function parseBatchVcHash(hex: string): Buffer {
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error("vc_hash_hex must be a 64-character hex string (32 bytes)");
+  }
+  return Buffer.from(hex, "hex");
+}
+
+function validateBatchSubject(subject: string): string {
+  const upper = subject.toUpperCase();
+  if (!/^[G][A-Z2-7]{55}$/.test(upper)) {
+    throw new Error("subject must be a valid Stellar G... address");
+  }
+  return upper;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 /**
@@ -699,6 +719,84 @@ Example:
       console.error("Failed:", msg);
       process.exit(1);
     }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: batch-anchor-vc
+// ---------------------------------------------------------------------------
+
+program
+  .command("batch-anchor-vc")
+  .description("Anchor verifiable credentials from a CSV file, one at a time.")
+  .argument("<csv-file>", "CSV containing subject,vc_hash_hex,credential_type")
+  .requiredOption(
+    "--issuer-secret <secret>",
+    "Stellar secret key of the registered issuer (starts with S)",
+    process.env["ISSUER_SECRET"],
+  )
+  .option("--delay-ms <milliseconds>", "Delay between transactions", "200")
+  .option("--result-file <path>", "Output JSON result path", "batch-result.json")
+  .action(async (
+    csvFile: string,
+    cmdOptions: { issuerSecret: string; delayMs: string; resultFile: string },
+  ) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["identityOracleId"]);
+    const issuer = parseSecret(cmdOptions.issuerSecret);
+    const delayMs = Number(cmdOptions.delayMs);
+    if (!Number.isInteger(delayMs) || delayMs < 0) {
+      console.error("Error: delay-ms must be a non-negative integer.");
+      process.exit(1);
+    }
+
+    let entries;
+    try {
+      entries = readBatchCsv(csvFile);
+    } catch (err) {
+      console.error("Failed to read CSV:", err instanceof Error ? err.message : String(err));
+      process.exit(1);
+      return;
+    }
+
+    const sdk = new StellarDIDCreditSDK(config);
+    const results: BatchResult[] = [];
+    console.log(`Processing ${entries.length} VC${entries.length === 1 ? "" : "s"} on ${network}...`);
+
+    for (const [index, entry] of entries.entries()) {
+      const progress = `${index + 1}/${entries.length}`;
+      const resultBase = { subject: entry.subject, vc_hash: entry.vcHashHex };
+      try {
+        const upperSubject = validateBatchSubject(entry.subject);
+        const vcHash = parseBatchVcHash(entry.vcHashHex);
+
+        if (await sdk.verifyVC(upperSubject, vcHash)) {
+          results.push({ ...resultBase, status: "skipped" });
+          console.log(`[${progress}] skipped ${upperSubject} (already anchored)`);
+        } else {
+          const txHash = await sdk.issueVC(issuer, upperSubject, vcHash);
+          results.push({ ...resultBase, status: "success", txHash });
+          console.log(`[${progress}] success ${upperSubject} (${entry.credentialType})`);
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        results.push({ ...resultBase, status: "failed", error });
+        console.error(`[${progress}] failed ${entry.subject}: ${error}`);
+      }
+
+      writeBatchResults(cmdOptions.resultFile, results);
+      if (index < entries.length - 1 && delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+
+    const summary = results.reduce(
+      (counts, result) => ({ ...counts, [result.status]: counts[result.status] + 1 }),
+      { success: 0, failed: 0, skipped: 0 },
+    );
+    console.log(`Completed: ${summary.success} succeeded, ${summary.skipped} skipped, ${summary.failed} failed.`);
+    console.log(`Results written to ${cmdOptions.resultFile}`);
   });
 
 // ---------------------------------------------------------------------------
