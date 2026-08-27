@@ -334,11 +334,11 @@ If a governance contract is deployed in Phase 5, the governance address can also
 
 | Mechanism | Scope | Duration | Who extends/resets | Data lost on expiry |
 |-----------|-------|----------|--------------------|---------------------|
-| Instance storage TTL | Per contract | ~30 days (500K ledgers) | Admin only (via admin-gated calls) | **Everything** — contract archived |
-| Persistent storage TTL | Per storage key | Default Soroban value | Not explicitly extended in current code | Single key/value pair |
-| Compute cooldown | Per subject per contract | Configurable (default 1 ledger) | N/A — resets each time `compute_score` succeeds | N/A — not a data loss mechanism |
-| Weight timelock | Per weight proposal | ~24 hours (17,280 ledgers) | Admin can bypass via `update_weights` | `PendingWeights` if expired before `apply_weights` |
-| Score staleness | Per subject | Consumer-defined (seconds) | Fresh `compute_score` call | N/A — `ScoreRecord` still in storage |
+| Instance storage TTL | Per contract (identity-oracle, credit-oracle, revocation-registry) | ~30 days (500K ledgers) | Admin only (via admin-gated calls) | **Everything** — contract archived |
+| Persistent storage TTL | Per storage key (identity-oracle, credit-oracle, revocation-registry) | Default Soroban value | Not explicitly extended in current code | Single key/value pair |
+| Compute cooldown | Per subject in credit-oracle | Configurable (default 1 ledger) | N/A — resets each time `compute_score` succeeds | N/A — not a data loss mechanism |
+| Weight timelock | Per weight proposal in credit-oracle | ~24 hours (17,280 ledgers) | Admin can bypass via `update_weights` | `PendingWeights` if expired before `apply_weights` |
+| Score staleness | Per subject in credit-oracle | Consumer-defined (seconds) | Fresh `compute_score` call | N/A — `ScoreRecord` still in storage |
 
 ---
 
