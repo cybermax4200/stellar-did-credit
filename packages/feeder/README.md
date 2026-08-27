@@ -54,6 +54,43 @@ and fill in the values, or export them before running `npm start`.
 | `RETRY_BASE_DELAY_MS`   | `1000`     | Base delay for exponential backoff, in milliseconds.                           |
 | `EVENT_DRIVEN`          | `false`    | Enables event-driven mode. Subscribes to `VCAnch` and `Revoked` events to trigger immediate feed cycles. |
 | `EVENT_POLL_INTERVAL_MS`| `30000`    | How often to poll for events, in milliseconds. Used when `EVENT_DRIVEN=true`.  |
+| `FEEDER_ALLOW_PARTIAL_STATS` | `true` | Whether stats from an incomplete Horizon pagination pass are written on-chain. Set to `false` to suppress `update_tx_stats` for partial fetches. Any value other than `false` means `true`. |
+
+### Partial Horizon results
+
+A subject's 30-day history can span many Horizon pages. If a page request fails
+partway through, the feeder used to discard everything it had already read and
+restart from page 1 on the next cycle — so a consistently flaky Horizon could
+starve a subject indefinitely.
+
+The feeder now retries a failed page fetch up to `MAX_RETRIES` times with
+exponential backoff. If it still fails, pagination stops and the records
+gathered so far are kept, with the result tagged `partial: true`:
+
+```
+[feeder] Horizon pagination failed for G... after 3 retries; committing partial stats: 503 Service Unavailable
+[feeder] syncing G...
+  vc_count          = 2
+  volume_30d        = 415000000 stroops (41.5 XLM)
+  tx_count_30d      = 7
+  avg_counterparties = 1
+  partial           = true
+```
+
+The `partial` line is logged on every sync as a plain boolean, so log-based
+monitoring can alert on truncated fetches.
+
+Because partial stats understate real activity, they produce a conservative
+(lower) score. Two strategies are available:
+
+| `FEEDER_ALLOW_PARTIAL_STATS` | Behavior on a partial fetch                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `true` (default)             | `update_tx_stats` is submitted. Fresh but understated beats a full cycle discarded. |
+| `false`                      | `update_tx_stats` is skipped and the previous complete on-chain stats stand. The subject is re-fetched next cycle. |
+
+`set_vc_count` is unaffected either way — the VC count comes from the
+identity-oracle, not from Horizon. Non-transient errors (malformed responses,
+404s) are still raised rather than silently truncating the window.
 
 ### Optional contract integrations
 

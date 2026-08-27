@@ -1148,3 +1148,297 @@ describe("fetchHorizonStats — mixed operation types", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// Issue #518: a transient failure mid-pagination must not discard the subject
+// ---------------------------------------------------------------------------
+
+const PARTIAL_SUBJECT =
+  "GBAD5234567234567234567234567234567234567234567234567233";
+
+/** A transient Horizon failure (503) shaped like an SDK HTTP error. */
+function transientHorizonError(): any {
+  const err: any = new Error("503 Service Unavailable");
+  err.response = { status: 503 };
+  return err;
+}
+
+/** One page holding a single in-window 10 XLM payment on its own transaction. */
+function pageWithPayment(
+  subject: string,
+  txHash: string,
+  next: () => Promise<any>,
+): any {
+  return {
+    records: [
+      {
+        type: "payment",
+        transaction_hash: txHash,
+        created_at: new Date().toISOString(),
+        from: subject,
+        to: "GOTHER234567234567234567234567234567234567234567234567234",
+        asset_type: "native",
+        amount: "10.0000000",
+      },
+    ],
+    next,
+  };
+}
+
+describe("Horizon partial pagination handling (#518)", () => {
+  it("retries page.next() up to maxRetries, then commits the pages already read", async () => {
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const { fetchHorizonStats } = await import("./index");
+
+    // Page 1 succeeds; the jump to page 2 fails transiently every time.
+    const next = jest.fn().mockImplementation(() => {
+      throw transientHorizonError();
+    });
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 2, retryBaseDelayMs: 1 },
+    );
+
+    // Initial attempt + 2 retries.
+    expect(next).toHaveBeenCalledTimes(3);
+
+    // Page 1's data survives instead of being thrown away.
+    expect(stats.partial).toBe(true);
+    expect(stats.txCount30d).toBe(1);
+    expect(stats.volume30d).toBe(BigInt(100_000_000));
+    expect(stats.avgCounterparties).toBe(1);
+    expect(consoleWarn).toHaveBeenCalled();
+
+    consoleWarn.mockRestore();
+  });
+
+  it("returns a complete result when a retried page.next() eventually succeeds", async () => {
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const { fetchHorizonStats } = await import("./index");
+
+    // Page 2 fails once, then succeeds and yields a second payment.
+    const next = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        throw transientHorizonError();
+      })
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          pageWithPayment(
+            PARTIAL_SUBJECT,
+            "tx2",
+            jest.fn().mockResolvedValue({ records: [] }),
+          ),
+        ),
+      );
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 3, retryBaseDelayMs: 1 },
+    );
+
+    expect(next).toHaveBeenCalledTimes(2);
+    // Both pages were aggregated, so nothing is missing.
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(2);
+    expect(stats.volume30d).toBe(BigInt(200_000_000));
+
+    consoleWarn.mockRestore();
+  });
+
+  it("rethrows a non-transient mid-pagination error instead of silently truncating", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    const next = jest.fn().mockImplementation(() => {
+      throw new Error("malformed response body");
+    });
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    await expect(
+      fetchHorizonStats("https://horizon.example", PARTIAL_SUBJECT, {
+        maxRetries: 2,
+        retryBaseDelayMs: 1,
+      }),
+    ).rejects.toThrow("malformed response body");
+
+    // Permanent errors are not retried.
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports partial: false for a fully paginated fetch", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(
+        PARTIAL_SUBJECT,
+        "tx1",
+        jest.fn().mockResolvedValue({ records: [] }),
+      ),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 2, retryBaseDelayMs: 1 },
+    );
+
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("reports partial: false when the account has no history", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({ records: [] });
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+    );
+
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(0);
+  });
+});
+
+describe("FEEDER_ALLOW_PARTIAL_STATS gating (#518)", () => {
+  const SUBJECT = config.subjects[0]!;
+
+  /** Config tuned for fast retries; identity oracle is mocked as configured. */
+  const fastConfig: FeederConfig = {
+    ...config,
+    maxRetries: 1,
+    retryBaseDelayMs: 1,
+  };
+
+  /** Makes Horizon serve one page and then fail transiently forever. */
+  function serveOnePageThenFail(): void {
+    mockHorizonPaymentsCall.mockResolvedValue(
+      pageWithPayment(
+        SUBJECT,
+        "tx1",
+        jest.fn().mockImplementation(() => {
+          throw transientHorizonError();
+        }),
+      ),
+    );
+  }
+
+  function primeTransactionMocks(): void {
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({ status: "SUCCESS" });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+    jest.mocked(sdk.scValToNative).mockReturnValue(1);
+  }
+
+  it("submits partial stats and logs partial = true by default", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const feeder = new Feeder(fastConfig, {
+      publicKey: () => "GFEEDER",
+    } as unknown as Keypair);
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    serveOnePageThenFail();
+
+    await feeder.feedSubject(SUBJECT);
+
+    // The partial flag gets its own log line so monitoring can alert on it.
+    expect(
+      consoleLog.mock.calls.some((c) =>
+        String(c[0]).includes("partial           = true"),
+      ),
+    ).toBe(true);
+    // set_vc_count is skipped (identity oracle configured), so the single
+    // submission here is update_tx_stats: partial data was still committed.
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("suppresses update_tx_stats when allowPartialStats is false", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const feeder = new Feeder(
+      { ...fastConfig, allowPartialStats: false },
+      { publicKey: () => "GFEEDER" } as unknown as Keypair,
+    );
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    serveOnePageThenFail();
+
+    await feeder.feedSubject(SUBJECT);
+
+    // Nothing was written on-chain for this subject.
+    expect(mockServerInstance.sendTransaction).not.toHaveBeenCalled();
+    expect(
+      consoleWarn.mock.calls.some((c) =>
+        String(c[0]).includes("skipping update_tx_stats"),
+      ),
+    ).toBe(true);
+
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("still submits a complete fetch when allowPartialStats is false", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+
+    const feeder = new Feeder(
+      { ...fastConfig, allowPartialStats: false },
+      { publicKey: () => "GFEEDER" } as unknown as Keypair,
+    );
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    mockHorizonPaymentsCall.mockResolvedValue(
+      pageWithPayment(
+        SUBJECT,
+        "tx1",
+        jest.fn().mockResolvedValue({ records: [] }),
+      ),
+    );
+
+    await feeder.feedSubject(SUBJECT);
+
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      consoleLog.mock.calls.some((c) =>
+        String(c[0]).includes("partial           = false"),
+      ),
+    ).toBe(true);
+
+    consoleLog.mockRestore();
+  });
+});

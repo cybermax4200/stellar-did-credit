@@ -26,6 +26,10 @@
  *   POLL_INTERVAL_MS     — Feed cycle interval in ms (default: 3 600 000 = 1 hour)
  *   MAX_RETRIES          — Max retry attempts for transient RPC/Horizon failures (default: 3)
  *   RETRY_BASE_DELAY_MS  — Base backoff delay in ms (default: 1 000)
+ *   FEEDER_ALLOW_PARTIAL_STATS — When "false", tx stats gathered from an
+ *                            incomplete Horizon pagination pass are NOT written
+ *                            on-chain (default: true, i.e. partial data is
+ *                            submitted rather than discarded). See #518.
  *   REVOCATION_REGISTRY_ID — Revocation-registry contract address (optional; needed
  *                            for event-driven revocation sync)
  *   GOVERNANCE_ID        — Governance contract address (optional; reserved for future
@@ -114,6 +118,14 @@ export interface FeederConfig {
   maxRetries?: number;
   /** Base delay for exponential backoff, in milliseconds */
   retryBaseDelayMs?: number;
+  /**
+   * Whether `update_tx_stats` may be submitted from a partial Horizon fetch
+   * (issue #518). Defaults to `true`: committing understated-but-real data is
+   * better than discarding a whole cycle's work. Set to `false` (via
+   * `FEEDER_ALLOW_PARTIAL_STATS=false`) to suppress the on-chain write and
+   * wait for a complete pass on the next cycle.
+   */
+  allowPartialStats?: boolean;
   /** Whether to skip legacy set_vc_count calls when identity oracle is configured */
   skipLegacyVcCount?: boolean;
   /** Network type for configuration */
@@ -134,6 +146,14 @@ export interface TxStats {
   txCount30d: number;
   /** Average number of distinct counterparties per transaction. */
   avgCounterparties: number;
+  /**
+   * True when Horizon pagination ended early (issue #518), meaning these
+   * counters cover only the pages fetched before the failure and therefore
+   * understate the real 30-day activity. Always present on values returned by
+   * `fetchHorizonStats`; optional so existing callers that build a `TxStats`
+   * literal keep compiling.
+   */
+  partial?: boolean;
 }
 
 /**
@@ -183,6 +203,19 @@ interface ErrorWithMeta {
     data?: { extras?: { result_codes?: unknown } };
     headers?: { get(name: string): string | null } | Record<string, string>;
   };
+}
+
+/**
+ * Retry tuning for `fetchHorizonStats` pagination (issue #518).
+ *
+ * Exposed so callers — and tests — can shrink the backoff instead of waiting
+ * out the production defaults.
+ */
+export interface FetchHorizonStatsOptions {
+  /** Max retry attempts for a transient `page.next()` failure (default: 3). */
+  maxRetries?: number;
+  /** Base delay between page retries, in milliseconds (default: 1 000). */
+  retryBaseDelayMs?: number;
 }
 
 /** Minimal shape of a Horizon payments page consumed by fetchHorizonStats. */
@@ -331,6 +364,20 @@ function isPermanentError(error: unknown): boolean {
 // ---------------------------------------------------------------------------
 
 /**
+ * Zeroed stats for the "nothing to report" paths (invalid address, unknown
+ * account, empty history). `partial: false` is explicit so consumers can treat
+ * the flag as a plain boolean rather than tri-state (issue #518).
+ */
+function EMPTY_TX_STATS(): TxStats {
+  return {
+    volume30d: BigInt(0),
+    txCount30d: 0,
+    avgCounterparties: 0,
+    partial: false,
+  };
+}
+
+/**
  * Fetches 30-day payment statistics for a Stellar address via the Horizon API.
  *
  * Paginates backwards through the operation history (payments endpoint),
@@ -352,15 +399,36 @@ function isPermanentError(error: unknown): boolean {
  * we only ever add to volume and tx_count.
  *
  * Returns empty stats if the address is invalid or the account is not found.
+ *
+ * ### Partial results (issue #518)
+ *
+ * Failing to fetch page 4 of 10 used to throw away the records already read
+ * from pages 1-3, so the feeder restarted from scratch every cycle and a
+ * flaky Horizon could starve a subject indefinitely. A transient `page.next()`
+ * failure is now retried up to `options.maxRetries` times with exponential
+ * backoff; if it still fails, pagination stops and whatever was aggregated so
+ * far is returned with `partial: true` instead of being discarded.
+ *
+ * `partial` is advisory: the caller decides whether understated stats are
+ * worth writing on-chain (see `FeederConfig.allowPartialStats`). The *initial*
+ * page request is deliberately excluded — a failure there yields no data at
+ * all, so it still throws and lets the caller's own retry loop handle it.
  */
 export async function fetchHorizonStats(
   horizonUrl: string,
   address: string,
+  options: FetchHorizonStatsOptions = {},
 ): Promise<TxStats> {
+  const maxPageRetries = Number.isFinite(options.maxRetries as number)
+    ? Math.max(0, options.maxRetries as number)
+    : 3;
+  const pageRetryBaseDelayMs = Number.isFinite(options.retryBaseDelayMs as number)
+    ? Math.max(1, options.retryBaseDelayMs as number)
+    : 1_000;
   // Validate address before making API calls
   if (!isValidStellarAddress(address)) {
     console.log(`[feeder] Skipping invalid Stellar address: ${address}`);
-    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+    return EMPTY_TX_STATS();
   }
 
   const horizon = new Horizon.Server(horizonUrl);
@@ -403,6 +471,49 @@ export async function fetchHorizonStats(
     }
   }
 
+  /**
+   * Advances to the next page, retrying transient failures (issue #518).
+   *
+   * Returns `null` once the retry budget is exhausted, which the pagination
+   * loop treats as "stop here and keep what we have" rather than as a hard
+   * failure. Non-transient errors are rethrown unchanged: a malformed
+   * response or a 404 will not fix itself, and silently truncating on those
+   * would hide real bugs behind an understated score.
+   */
+  async function fetchNextPage(
+    current: HorizonPaymentPage,
+  ): Promise<HorizonPaymentPage | null> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        // callWithHorizonRateLimit already absorbs 429s with Retry-After; this
+        // outer loop covers the transient errors it rethrows (timeouts,
+        // 500/503, connection resets, and 429s past its own budget).
+        return await callWithHorizonRateLimit(() => current.next());
+      } catch (err) {
+        if (!isTransientError(err)) throw err;
+        if (attempt >= maxPageRetries) {
+          console.warn(
+            `[feeder] Horizon pagination failed for ${address} after` +
+              ` ${maxPageRetries} retries; committing partial stats:`,
+            err instanceof Error ? err.message : err,
+          );
+          return null;
+        }
+        const delayMs = pageRetryBaseDelayMs * 2 ** attempt;
+        console.warn(
+          `[feeder] retry ${attempt + 1}/${maxPageRetries} for` +
+            ` horizon_next_page(${address}) in ${delayMs}ms:`,
+          err instanceof Error ? err.message : err,
+        );
+        await sleep(delayMs);
+      }
+    }
+  }
+
+  // Set when pagination stops early, so the caller can tell an understated
+  // 30-day window apart from a genuinely quiet account.
+  let partial = false;
+
   let page: HorizonPaymentPage;
   try {
     page = await callWithHorizonRateLimit(() =>
@@ -411,7 +522,7 @@ export async function fetchHorizonStats(
   } catch (err) {
     if (isAccountNotFoundError(err)) {
       console.log(`[feeder] Account not found for ${address}, skipping`);
-      return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+      return EMPTY_TX_STATS();
     }
     if (isTransientError(err)) {
       throw err;
@@ -420,12 +531,12 @@ export async function fetchHorizonStats(
       `[feeder] Error fetching Horizon stats for ${address}:`,
       err instanceof Error ? err.message : err,
     );
-    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+    return EMPTY_TX_STATS();
   }
 
   // Handle case where Horizon returns zero records
   if (!page.records || page.records.length === 0) {
-    return { volume30d: BigInt(0), txCount30d: 0, avgCounterparties: 0 };
+    return EMPTY_TX_STATS();
   }
 
   outer: while (page.records.length > 0) {
@@ -500,7 +611,14 @@ export async function fetchHorizonStats(
       }
     }
 
-    page = await callWithHorizonRateLimit(() => page.next());
+    const nextPage = await fetchNextPage(page);
+    if (nextPage === null) {
+      // Retry budget spent. Keep the pages already aggregated instead of
+      // throwing them away, and flag the result as incomplete (issue #518).
+      partial = true;
+      break;
+    }
+    page = nextPage;
   }
 
   const txCount30d = txHashes.size;
@@ -512,7 +630,7 @@ export async function fetchHorizonStats(
   const avgCounterparties =
     txCount30d > 0 ? Math.round(totalCounterparties / txCount30d) : 0;
 
-  return { volume30d: volumeStroops, txCount30d, avgCounterparties };
+  return { volume30d: volumeStroops, txCount30d, avgCounterparties, partial };
 }
 
 /** Extract the sequence number string from a Soroban RPC account response. */
@@ -765,6 +883,8 @@ export class Feeder {
   async feedSubject(subjectAddress: string, signal?: AbortSignal): Promise<void> {
     const maxRetries = this.config.maxRetries ?? 3;
     const retryBaseDelayMs = this.config.retryBaseDelayMs ?? 1_000;
+    // Issue #518: partial stats are submitted unless explicitly opted out.
+    const allowPartialStats = this.config.allowPartialStats !== false;
 
     // Step 1: read active VC count from identity-oracle
     const vcCount = await withExponentialBackoff(
@@ -783,7 +903,11 @@ export class Feeder {
       `fetch_horizon_stats(${subjectAddress})`,
       maxRetries,
       retryBaseDelayMs,
-      () => fetchHorizonStats(this.config.horizonUrl, subjectAddress),
+      () =>
+        fetchHorizonStats(this.config.horizonUrl, subjectAddress, {
+          maxRetries,
+          retryBaseDelayMs,
+        }),
     );
     if (signal?.aborted) {
       console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
@@ -812,6 +936,15 @@ export class Feeder {
     );
     console.log(`  tx_count_30d      = ${stats.txCount30d}`);
     console.log(`  avg_counterparties = ${stats.avgCounterparties}`);
+    // Issue #518: always logged as a boolean so log scrapers can alert on it.
+    console.log(`  partial           = ${stats.partial === true}`);
+    if (stats.partial) {
+      console.warn(
+        `[feeder] ${subjectAddress} — Horizon pagination was incomplete;` +
+          ` volume_30d and tx_count_30d understate real activity` +
+          ` (partial=true, allowPartialStats=${allowPartialStats})`,
+      );
+    }
 
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
@@ -867,6 +1000,25 @@ export class Feeder {
     }
 
     // Step 4: submit update_tx_stats
+    //
+    // Issue #518: partial stats understate the 30-day window, which would push
+    // an artificially low score on-chain. Operators who prefer a stale-but-
+    // complete score over a fresh-but-truncated one set
+    // FEEDER_ALLOW_PARTIAL_STATS=false to suppress this write. vc_count above
+    // is unaffected — it comes from the identity-oracle, not from Horizon.
+    //
+    // syncState is deliberately left untouched on this path so the next cycle
+    // re-fetches the subject instead of treating the truncated numbers as the
+    // last known good state.
+    if (stats.partial && !allowPartialStats) {
+      console.warn(
+        `[feeder] ${subjectAddress} — skipping update_tx_stats:` +
+          ` partial=true and FEEDER_ALLOW_PARTIAL_STATS=false.` +
+          ` Stats will be re-fetched next cycle.`,
+      );
+      return;
+    }
+
     const statsTxHash = await withExponentialBackoff(
       `update_tx_stats(${subjectAddress})`,
       maxRetries,
@@ -1341,6 +1493,10 @@ if (require.main === module) {
     process.env["RETRY_BASE_DELAY_MS"] ?? "1000",
     10,
   );
+  // Issue #518: opt-out flag. Anything other than the exact string "false"
+  // keeps the default of committing partial stats, so a typo cannot silently
+  // stop a feeder from writing.
+  const allowPartialStats = process.env["FEEDER_ALLOW_PARTIAL_STATS"] !== "false";
 
   // Optional contract integrations. The feeder must not fail when these are
   // absent — they only enable additional behaviour (event-driven revocation
@@ -1414,6 +1570,7 @@ if (require.main === module) {
   console.log(`  horizon    : ${horizonUrl}`);
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
+  console.log(`  partialStats: ${allowPartialStats ? "submitted" : "suppressed"}`);
   const eventDriven = process.env["EVENT_DRIVEN"] === "true";
   const eventPollIntervalMsStr = process.env["EVENT_POLL_INTERVAL_MS"];
   const eventPollIntervalMs = eventPollIntervalMsStr
@@ -1451,6 +1608,7 @@ if (require.main === module) {
     pollIntervalMs,
     maxRetries,
     retryBaseDelayMs,
+    allowPartialStats,
     network,
     eventDriven,
     eventPollIntervalMs,
