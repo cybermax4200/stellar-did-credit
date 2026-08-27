@@ -147,6 +147,34 @@ If deployment or initialization produces the wrong state:
 - [ ] Issuer registration, VC anchoring, and score computation work end-to-end on testnet
 - [ ] Cross-contract calls (if Phase 3 is deployed) are tested under load
 - [ ] Rollback or emergency pause procedures are documented
+- [ ] The `smoke-test` CI job (see below) is passing on `main` against the recorded testnet addresses
+
+#### Automated testnet smoke test (CI)
+
+Every push to `main` runs a `smoke-test` job in `.github/workflows/ci.yml` that
+guards against a stale `deployments.testnet.json`. The job:
+
+1. Reads the `identity-oracle`, `credit-oracle`, and `revocation-registry`
+   addresses from `deployments.testnet.json`.
+2. Skips automatically if every address is still the `CXXXXXXX...`
+   placeholder (i.e. nothing has been deployed yet).
+3. Otherwise invokes a cheap, read-only, argument-free view function on each
+   deployed contract via `stellar contract invoke --network testnet`
+   (`get_revocation_registry`, `get_scoring_weights`, and `get_batch_limit`
+   respectively) to confirm it is actually live on testnet.
+4. Reports a PASS/FAIL/SKIP line per contract.
+
+Because the Stellar testnet RPC can be rate-limited or briefly unavailable,
+each invocation has a timeout (`INVOKE_TIMEOUT_SECS`, default 30s) and the job
+itself is marked `continue-on-error: true` so a transient testnet outage never
+blocks the main CI pipeline. A red `smoke-test` run should still be treated as
+a signal to double-check `deployments.testnet.json` before relying on it â€”
+see `scripts/smoke-test-testnet.sh` for the underlying logic, which can also
+be run locally:
+
+```bash
+NETWORK=testnet bash scripts/smoke-test-testnet.sh deployments.testnet.json
+```
 
 ---
 
