@@ -70,7 +70,12 @@ Soroban provides two storage tiers, each with independent TTL (time-to-live) sem
 - When a persistent key's TTL expires, only that specific key's data is lost.
 - Persistent keys are **not** extended automatically — the contract must explicitly call `extend_ttl` on each persistent key when it is read or written, or the entries may expire independently.
 
-> **Current state:** None of the three contracts explicitly extend TTL on persistent storage keys after initial writes. This is a known limitation (tracked in cross-contract VC count roadmap items). In practice, persistent entries created by admin actions (feeder/lender/issuer registrations) are likely to be touched again before TTL expiry. Entries created by non-admin actions (VC anchors, scores) may expire if the subject is inactive for an extended period.
+> **Current state (measured, see [§4.4](#44-measured-ttl-behaviour-test-harness)):** Most persistent writes *do* now call `extend_ttl(PERS_TTL_THRESHOLD, PERS_TTL_EXTEND)`, giving those entries a 518,400-ledger (~30 day) lifetime. Two gaps remain, both confirmed by the TTL harness:
+>
+> - `credit-oracle`'s `update_tx_stats` writes `TxStats` **without** `extend_ttl`, so that entry lives only `min_persistent_entry_ttl` — 4,096 ledgers, roughly 5.7 hours.
+> - `credit-oracle` never calls `instance().extend_ttl` at all, so its **instance** entry expires on the same 4,096-ledger default and archives the whole contract first.
+>
+> An entry that never has `extend_ttl` called on it does not get 30 days. It gets the network default, which is two orders of magnitude shorter.
 
 ### 2.3 TTL refresh mechanism
 
@@ -170,9 +175,9 @@ When an individual persistent storage key expires:
 
 - That specific datum is lost (e.g., a single subject's `ScoreRecord` or `TxStats`).
 - The contract continues to function for all other keys.
-- The next read of the key returns the default value (e.g., `None` for `get_score`, `0` for `get_active_vc_count` on an uninitialized subject).
+- The next read of the key **panics** — it does *not* return the type's default. `.get(&key).unwrap_or(default)` offers no protection, because the host rejects the access before `unwrap_or` runs. On the real network the invocation is rejected before execution starts. Measured in [§4.4](#44-measured-ttl-behaviour-test-harness).
 
-This is less catastrophic but still problematic: a subject's score silently reverts to 300 if their `ScoreRecord` persistent entry expires, even if the inputs are still valid.
+This is less catastrophic than a full archive, but it is a hard failure rather than a silent degradation: every call path that touches the expired key becomes uncallable for that subject until the entry is restored, and writing fresh data over it does not repair it.
 
 ### 4.3 Score staleness (independent of TTL)
 
@@ -185,14 +190,73 @@ now.saturating_sub(r.last_updated) > max_age_seconds
 This compares the current ledger timestamp against `ScoreRecord.last_updated`. A score can be:
 
 - **Stale but stored:** TTL is fine, the data exists, but it was computed long ago. Consumer should prompt `compute_score`.
-- **Fresh but expired:** The `ScoreRecord` persistent key TTL has expired, so `get_score` returns `None`. `is_stale` would also return `true` (no record exists), but the underlying issue is storage TTL, not score freshness.
+- **Fresh but expired:** The `ScoreRecord` persistent key TTL has expired. `get_score` does **not** return `None` — the call panics on the archived entry. `None` therefore only ever means "never computed", and cannot be used to detect archival.
 
 | State | `get_score` returns | `is_stale` returns | Likely cause |
 |-------|--------------------|--------------------|--------------|
 | Normal | `Some(record)` | `false` | Everything healthy |
 | Stale | `Some(record)` | `true` | Score not recomputed recently |
-| Expired persistent key | `None` | `true` | Persistent TTL not extended |
+| Expired persistent key | Panics (not `None`) | Panics | Persistent TTL not extended |
 | Archived contract | Error | Error | Instance TTL expired |
+
+### 4.4 Measured TTL behaviour (test harness)
+
+`contracts/tests/src/ttl_expiry_tests.rs` simulates expiry by jumping the ledger
+with `env.ledger().set_sequence_number()`. Everything below is measured against
+`soroban-sdk` 22.0.11, not inferred.
+
+**Finding 1 — testutils *does* enforce TTL.** Archival is simulated, so the
+tests run normally; none are `#[ignore]`d.
+
+**Finding 2 — expiry panics, it does not degrade.** Accessing an archived entry
+raises:
+
+```text
+HostError: Error(Storage, InternalError)
+[testing-only] Accessed contract data key that has been archived. Important:
+this error may only appear in tests; in the real network contracts aren't
+called at all if any archived entry is accessed.
+```
+
+This matters more than it first looks. `.get(&key).unwrap_or(default)` does
+**not** shield a caller from archival — the host rejects the access before
+`unwrap_or` is ever evaluated. Three consequences follow directly:
+
+| You might expect | What actually happens |
+| ---------------- | --------------------- |
+| `get_score` returns `None` for an archived score | The call panics. `None` only ever means "never computed". |
+| `update_tx_stats` returns `FeederNotRegistered` once the registration expires | The call panics. Expiry is a liveness failure, not a permission change. |
+| `compute_score` falls back to zeroed inputs when `TxStats` expires | The call panics before the fallback is reached. |
+
+**Finding 3 — writes do not repair.** Writing over an archived key panics too,
+so a feeder cannot heal an expired entry by pushing fresh data at it. Recovery
+requires restoring the entry, which no contract function currently exposes.
+
+**Finding 4 — measured environment.** `Env::default()` reports
+`min_persistent_entry_ttl = 4096`, `min_temp_entry_ttl = 16`, and
+`max_entry_ttl = 6_312_000`, starting at ledger 0.
+
+**Finding 5 — measured lifetimes.**
+
+| Entry | Calls `extend_ttl`? | Lifetime (ledgers) | ~Wall clock |
+| ----- | ------------------- | ------------------ | ----------- |
+| identity-oracle `VCAnchors` | yes | 518,400 | ~30 days |
+| identity-oracle instance | yes (500,000) | 500,000 | ~29 days |
+| credit-oracle `TrustedFeeder` | yes | 518,400 | ~30 days |
+| credit-oracle `Score` | yes | 518,400 | ~30 days |
+| credit-oracle `TxStats` | **no** | 4,096 | **~5.7 hours** |
+| credit-oracle instance | **no** | 4,096 | **~5.7 hours** |
+
+The last two rows are the live defects. Because the credit-oracle *instance*
+expires first, it is the binding constraint: the contract archives before any
+of its persistent entries do. Every harness test that targets a persistent key
+therefore pins the instance open first, so the jump can only archive the key
+actually under test.
+
+Each defect is covered by a pair of tests — one pinning today's expiry, one
+proving the entry survives once its TTL *is* extended. The survival test passes
+today only because the test extends the TTL by hand; a contributor fixing the
+contract deletes that manual block and the test must keep passing unchanged.
 
 ---
 
@@ -335,7 +399,7 @@ If a governance contract is deployed in Phase 5, the governance address can also
 | Mechanism | Scope | Duration | Who extends/resets | Data lost on expiry |
 |-----------|-------|----------|--------------------|---------------------|
 | Instance storage TTL | Per contract | ~30 days (500K ledgers) | Admin only (via admin-gated calls) | **Everything** — contract archived |
-| Persistent storage TTL | Per storage key | Default Soroban value | Not explicitly extended in current code | Single key/value pair |
+| Persistent storage TTL | Per storage key | 518,400 ledgers (~30 days) where `extend_ttl` is called; 4,096 (~5.7 h) where it is not | Each write that calls `extend_ttl` — see [§4.4](#44-measured-ttl-behaviour-test-harness) | Single key/value pair; access then **panics** rather than defaulting |
 | Compute cooldown | Per subject per contract | Configurable (default 1 ledger) | N/A — resets each time `compute_score` succeeds | N/A — not a data loss mechanism |
 | Weight timelock | Per weight proposal | ~24 hours (17,280 ledgers) | Admin can bypass via `update_weights` | `PendingWeights` if expired before `apply_weights` |
 | Score staleness | Per subject | Consumer-defined (seconds) | Fresh `compute_score` call | N/A — `ScoreRecord` still in storage |
@@ -348,6 +412,7 @@ If a governance contract is deployed in Phase 5, the governance address can also
 - [Scoring Specification](scoring-spec.md) — defines score staleness, compute cooldown edge cases, and recommended `max_age_seconds` values
 - [Upgrade Guide](upgrade-guide.md) — how contract upgrades preserve storage state (TTL is **not** reset on upgrade)
 - [Event Indexing Guide](event-indexing.md) — how feeders subscribe to events that may signal when TTL maintenance is needed
+- `contracts/tests/src/ttl_expiry_tests.rs` — the TTL expiry harness backing [§4.4](#44-measured-ttl-behaviour-test-harness); run it with `cargo test -p integration-tests ttl_expiry`
 - [Soroban documentation — storage](https://developers.stellar.org/docs/smart-contracts/concepts/data-storage)
 - [Soroban documentation — TTL and archival](https://developers.stellar.org/docs/smart-contracts/concepts/lifecycle)
 
