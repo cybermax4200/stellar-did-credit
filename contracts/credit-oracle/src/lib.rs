@@ -36,6 +36,10 @@ pub enum CreditOracleError {
     InvalidIdentityOracle = 11,
     /// The contract is currently paused and cannot accept writes.
     ContractPaused = 12,
+    /// Recency decay parameters are invalid: `min_recency_bps` exceeds
+    /// `BPS_DENOMINATOR` (10_000), which would make the floor larger than a
+    /// full-weight, brand-new credential.
+    InvalidRecencyConfig = 13,
 }
 
 /// Aggregate protocol-level counters stored in instance storage.
@@ -98,6 +102,84 @@ pub enum DataKey {
     DisputeIndex(Address),
     /// Whether the contract is currently paused for writes.
     Paused,
+    /// Issue #530: whether VC recency decay is applied inside `compute_score`.
+    /// Absent or `false` reproduces the pre-#530 scoring behavior exactly.
+    RecencyDecayEnabled,
+    /// Issue #530: basis points of recency multiplier lost per day of VC age.
+    DecayBpsPerDay,
+    /// Issue #530: lower bound (bps) the recency multiplier may decay to.
+    MinRecencyBps,
+}
+
+/// Basis-point denominator: 10_000 bps == 1.00x multiplier.
+pub const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Seconds in one day. `VCRecord.anchored_at` is a ledger timestamp in Unix
+/// seconds, so credential age must be divided by this to obtain whole days.
+pub const SECONDS_PER_DAY: u64 = 86_400;
+
+/// Default decay rate from docs/vc-weighting-design.md: 5 bps/day (0.05%).
+pub const DEFAULT_DECAY_BPS_PER_DAY: u32 = 5;
+
+/// Default recency floor from docs/vc-weighting-design.md: 5_000 bps (50%).
+pub const DEFAULT_MIN_RECENCY_BPS: u32 = 5_000;
+
+/// Recency decay configuration for the VC component of the score (issue #530).
+///
+/// Returned by `get_recency_decay` and written by `set_recency_decay`. When
+/// `enabled` is `false` the other two fields are ignored and `compute_score`
+/// behaves exactly as it did before recency decay existed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecencyDecayConfig {
+    /// Whether `compute_score` applies the recency multiplier.
+    pub enabled: bool,
+    /// Basis points of multiplier lost per whole day of credential age.
+    pub decay_bps_per_day: u32,
+    /// Floor (bps) below which the multiplier never falls, e.g. 5_000 = 50%.
+    pub min_recency_bps: u32,
+}
+
+/// Recency multiplier in basis points for a credential anchored at `anchored_at`.
+///
+/// Implements the model documented in docs/vc-weighting-design.md:
+///
+/// ```text
+/// recency_multiplier = max(min_recency_bps, 10_000 - age_days * decay_bps_per_day)
+/// ```
+///
+/// `anchored_at` and `now` are ledger timestamps in **Unix seconds**; the age is
+/// converted to whole days by integer division by `SECONDS_PER_DAY`, so a
+/// credential keeps full weight for its first 24 hours.
+///
+/// Saturating arithmetic throughout: a credential anchored in the future (clock
+/// skew, or a replayed ledger) yields age 0 rather than underflowing, and an
+/// arbitrarily large `decay_bps_per_day` clamps to the floor instead of
+/// panicking under `overflow-checks`. `min_recency_bps` is also clamped to
+/// `BPS_DENOMINATOR` so a mis-set floor can never *increase* a VC contribution.
+///
+/// The result is monotonically non-decreasing in `anchored_at`: a younger
+/// credential always yields a multiplier greater than or equal to an older one.
+pub fn recency_multiplier_bps(
+    anchored_at: u64,
+    now: u64,
+    decay_bps_per_day: u32,
+    min_recency_bps: u32,
+) -> u32 {
+    let age_days = now.saturating_sub(anchored_at) / SECONDS_PER_DAY;
+    let decay = age_days.saturating_mul(decay_bps_per_day as u64);
+    let multiplier = (BPS_DENOMINATOR as u64).saturating_sub(decay);
+    let floor = (min_recency_bps as u64).min(BPS_DENOMINATOR as u64);
+    multiplier.max(floor) as u32
+}
+
+/// Scale `points` by a basis-point multiplier, rounding down.
+///
+/// Widened to `u64` before multiplying: `points` is already type-weighted and
+/// `recency_bps` can be up to 10_000, so the product overflows `u32` for any
+/// non-trivial input and would panic under `overflow-checks`.
+pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
+    ((points as u64).saturating_mul(recency_bps as u64) / BPS_DENOMINATOR as u64) as u32
 }
 
 /// Pure scoring function that computes a credit score from input parameters.
@@ -296,6 +378,32 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+/// Read the recency decay configuration from instance storage (issue #530).
+///
+/// Every key is optional: a contract deployed before #530 (or one whose admin
+/// never called `set_recency_decay`) reads back `enabled: false` plus the
+/// documented defaults, which keeps `compute_score` backward compatible with
+/// no storage migration.
+fn load_recency_config(env: &Env) -> RecencyDecayConfig {
+    RecencyDecayConfig {
+        enabled: env
+            .storage()
+            .instance()
+            .get(&DataKey::RecencyDecayEnabled)
+            .unwrap_or(false),
+        decay_bps_per_day: env
+            .storage()
+            .instance()
+            .get(&DataKey::DecayBpsPerDay)
+            .unwrap_or(DEFAULT_DECAY_BPS_PER_DAY),
+        min_recency_bps: env
+            .storage()
+            .instance()
+            .get(&DataKey::MinRecencyBps)
+            .unwrap_or(DEFAULT_MIN_RECENCY_BPS),
+    }
 }
 
 fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
@@ -756,6 +864,74 @@ impl CreditOracle {
             .unwrap_or(100u32)
     }
 
+    /// Configure VC recency decay for the score's VC component (issue #530).
+    ///
+    /// When `enabled`, `compute_score` multiplies each credential's weighted
+    /// points by
+    ///   `max(min_recency_bps, 10_000 - age_days * decay_bps_per_day) / 10_000`
+    /// where `age_days` derives from `VCRecord.anchored_at`. Decay therefore
+    /// only applies on the cross-contract path, which requires
+    /// `set_identity_oracle` to have been called - `anchored_at` is only
+    /// available from `get_vc_details`.
+    ///
+    /// Decay is **opt-in**: the feature ships disabled, so existing deployments
+    /// score identically until an admin turns it on. Disabling it again
+    /// restores the previous behavior on the next `compute_score`.
+    ///
+    /// Suggested values from docs/vc-weighting-design.md: `decay_bps_per_day =
+    /// 5` (0.05%/day) and `min_recency_bps = 5_000` (50% floor).
+    ///
+    /// Auth: admin only.
+    ///
+    /// Errors with `InvalidRecencyConfig` when `min_recency_bps` exceeds
+    /// `BPS_DENOMINATOR`, which would otherwise define a floor above full
+    /// weight. `decay_bps_per_day` needs no bound: the floor already caps how
+    /// far any rate can push the multiplier down.
+    pub fn set_recency_decay(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+        decay_bps_per_day: u32,
+        min_recency_bps: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        if min_recency_bps > BPS_DENOMINATOR {
+            return Err(CreditOracleError::InvalidRecencyConfig);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecencyDecayEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::DecayBpsPerDay, &decay_bps_per_day);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinRecencyBps, &min_recency_bps);
+
+        env.events().publish(
+            (symbol_short!("RecDecay"),),
+            (enabled, decay_bps_per_day, min_recency_bps),
+        );
+        Ok(())
+    }
+
+    /// Return the current recency decay configuration (issue #530).
+    ///
+    /// Defaults to `enabled: false` with the documented suggested parameters
+    /// when the admin has never called `set_recency_decay`.
+    pub fn get_recency_decay(env: Env) -> RecencyDecayConfig {
+        load_recency_config(&env)
+    }
+
     /// Anchor a verifiable credential for a user with an optional type tag.
     ///
     /// The `vc_type` can later be looked up by `compute_score` to apply
@@ -861,6 +1037,17 @@ impl CreditOracle {
         let mut vc_points: u32 = 0;
         let mut vc_count: u32 = 0;
 
+        // Issue #530: recency decay is opt-in. `None` here means the multiplier
+        // is never computed, so the per-VC arithmetic below is identical to the
+        // pre-#530 code path.
+        let recency_config = load_recency_config(&env);
+        let recency = if recency_config.enabled {
+            Some(recency_config)
+        } else {
+            None
+        };
+        let now = env.ledger().timestamp();
+
         // Check if identity-oracle is configured
         if let Some(identity_oracle_id) = env
             .storage()
@@ -902,7 +1089,21 @@ impl CreditOracle {
                     .instance()
                     .get(&DataKey::VcWeight(vc_type.clone()))
                     .unwrap_or(100u32);
-                vc_points = vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+                let mut points = 20u32.saturating_mul(weight) / 100;
+                // Issue #530: decay this credential by its age. `anchored_at` is
+                // only reachable on this cross-contract path, which is why decay
+                // requires a configured identity-oracle. Computed per VC inside
+                // the loop, alongside the existing per-VC type-weight lookup.
+                if let Some(ref cfg) = recency {
+                    let recency_bps = recency_multiplier_bps(
+                        record.anchored_at,
+                        now,
+                        cfg.decay_bps_per_day,
+                        cfg.min_recency_bps,
+                    );
+                    points = apply_recency_bps(points, recency_bps);
+                }
+                vc_points = vc_points.saturating_add(points);
             }
         } else {
             // Compute weighted VC points from stored VC list
@@ -2748,4 +2949,222 @@ mod tests {
         }
     }
 
+    // -----------------------------------------------------------------
+    // Issue #530: VC recency decay
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_recency_multiplier_full_weight_within_first_day() {
+        // age_days uses integer division, so a VC keeps full weight for 24h.
+        assert_eq!(recency_multiplier_bps(0, 0, 5, 5_000), 10_000);
+        assert_eq!(
+            recency_multiplier_bps(0, SECONDS_PER_DAY - 1, 5, 5_000),
+            10_000
+        );
+        // Exactly one day old: the first decay step applies.
+        assert_eq!(recency_multiplier_bps(0, SECONDS_PER_DAY, 5, 5_000), 9_995);
+    }
+
+    #[test]
+    fn test_recency_multiplier_decays_linearly_per_day() {
+        // 100 days x 5 bps = 500 bps lost.
+        assert_eq!(
+            recency_multiplier_bps(0, 100 * SECONDS_PER_DAY, 5, 5_000),
+            9_500
+        );
+        // 365 days x 5 bps = 1_825 bps lost.
+        assert_eq!(
+            recency_multiplier_bps(0, 365 * SECONDS_PER_DAY, 5, 5_000),
+            8_175
+        );
+    }
+
+    #[test]
+    fn test_recency_multiplier_clamps_to_floor() {
+        // 5_000 days x 5 bps = 25_000 bps, far past zero: the floor holds.
+        let now = 5_000 * SECONDS_PER_DAY;
+        assert_eq!(recency_multiplier_bps(0, now, 5, 5_000), 5_000);
+        // A zero floor decays all the way down without underflowing.
+        assert_eq!(recency_multiplier_bps(0, now, 5, 0), 0);
+    }
+
+    #[test]
+    fn test_recency_multiplier_saturates_on_extreme_inputs() {
+        // Anchored "in the future" (clock skew): age saturates to 0, not underflow.
+        assert_eq!(
+            recency_multiplier_bps(1_000 * SECONDS_PER_DAY, 0, 5, 5_000),
+            10_000
+        );
+        // Absurd age and decay rate saturate to the floor instead of panicking.
+        assert_eq!(recency_multiplier_bps(0, u64::MAX, u32::MAX, 5_000), 5_000);
+        // A floor above 10_000 is clamped: decay can never *raise* a VC's value.
+        assert_eq!(recency_multiplier_bps(0, 0, 5, u32::MAX), 10_000);
+    }
+
+    #[test]
+    fn test_apply_recency_bps_scales_points() {
+        assert_eq!(apply_recency_bps(20, 10_000), 20);
+        assert_eq!(apply_recency_bps(20, 5_000), 10);
+        assert_eq!(apply_recency_bps(20, 9_500), 19);
+        assert_eq!(apply_recency_bps(20, 0), 0);
+        // Widening to u64 keeps the largest input from overflowing.
+        assert_eq!(apply_recency_bps(u32::MAX, 10_000), u32::MAX);
+    }
+
+    #[test]
+    fn test_get_recency_decay_defaults_to_disabled() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let cfg = client.get_recency_decay();
+        assert!(!cfg.enabled, "decay must be opt-in");
+        assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
+        assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
+    }
+
+    #[test]
+    fn test_set_recency_decay_stores_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_recency_decay(&admin, &true, &10, &2_500);
+
+        let cfg = client.get_recency_decay();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.decay_bps_per_day, 10);
+        assert_eq!(cfg.min_recency_bps, 2_500);
+    }
+
+    #[test]
+    fn test_set_recency_decay_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    fn test_set_recency_decay_rejects_floor_above_full_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
+
+        // The rejected call must not have mutated stored config.
+        assert!(!client.get_recency_decay().enabled);
+    }
+
+    #[test]
+    fn test_recency_decay_ignored_without_identity_oracle() {
+        // The local VcList path has no `anchored_at`, so enabling decay must
+        // leave the score untouched (backward compatibility).
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let user = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        env.ledger().set_timestamp(1_700_000_000);
+        for i in 0..3u8 {
+            client.anchor_vc(&feeder, &user, &BytesN::from_array(&env, &[i; 32]), &None);
+        }
+
+        let before = client.compute_score(&user);
+
+        client.set_recency_decay(&admin, &true, &5, &5_000);
+        // Age the ledger by 5 years and recompute.
+        env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let after = client.compute_score(&user);
+
+        assert_eq!(
+            before, after,
+            "decay must be a no-op when anchored_at is unavailable"
+        );
+    }
+
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// Issue #530 acceptance criterion: monotonically younger credentials
+        /// produce a higher or equal score under the same decay configuration.
+        #[test]
+        fn proptest_younger_credentials_score_at_least_as_high(
+            younger_age_days in 0u64..3_650,
+            extra_age_days in 0u64..3_650,
+            decay_bps_per_day in 0u32..100,
+            min_recency_bps in 0u32..=10_000,
+            vc_count in 1u32..=5,
+            type_weight in 0u32..=300,
+        ) {
+            let now = 10_000u64 * SECONDS_PER_DAY;
+            let younger_anchor = now - younger_age_days * SECONDS_PER_DAY;
+            let older_anchor = now - (younger_age_days + extra_age_days) * SECONDS_PER_DAY;
+            prop_assert!(older_anchor <= younger_anchor);
+
+            // Mirrors the per-VC arithmetic in `compute_score`.
+            let base_points = 20u32.saturating_mul(type_weight) / 100;
+            let vc_points_at = |anchored_at: u64| -> u32 {
+                let bps = recency_multiplier_bps(
+                    anchored_at,
+                    now,
+                    decay_bps_per_day,
+                    min_recency_bps,
+                );
+                apply_recency_bps(base_points, bps)
+                    .saturating_mul(vc_count)
+                    .min(100)
+            };
+            let score_at = |anchored_at: u64| -> u32 {
+                compute_score_pure(
+                    vc_points_at(anchored_at),
+                    3_000_000_000,
+                    7,
+                    8,
+                    10,
+                    3_000_000_000,
+                    40,
+                    30,
+                    30,
+                )
+            };
+
+            // The multiplier is monotonic in `anchored_at` ...
+            prop_assert!(
+                recency_multiplier_bps(younger_anchor, now, decay_bps_per_day, min_recency_bps)
+                    >= recency_multiplier_bps(older_anchor, now, decay_bps_per_day, min_recency_bps)
+            );
+            // ... and so is the resulting score.
+            prop_assert!(score_at(younger_anchor) >= score_at(older_anchor));
+        }
+    }
 }
