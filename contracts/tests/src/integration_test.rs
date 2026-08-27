@@ -445,6 +445,51 @@ mod tests {
     }
 
     #[test]
+    fn test_get_active_vc_count_uses_cache_with_registry_configured() {
+        // Acceptance criteria for #481:
+        // configure revocation registry, anchor 3 VCs, revoke 1 via registry,
+        // assert get_active_vc_count returns 2.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let hash_a = BytesN::from_array(&env, &[0u8; 32]);
+        let hash_b = BytesN::from_array(&env, &[1u8; 32]);
+        let hash_c = BytesN::from_array(&env, &[2u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &hash_a);
+        identity.anchor_vc(&issuer, &subject, &hash_b);
+        identity.anchor_vc(&issuer, &subject, &hash_c);
+
+        assert_eq!(identity.get_active_vc_count(&subject), 3);
+
+        // Revoke exactly one of the VCs via the revocation registry. This flows
+        // through mark_vc_revoked, which must decrement the ActiveVCCount cache.
+        revocation.revoke(&issuer, &subject, &hash_a);
+
+        assert_eq!(identity.get_active_vc_count(&subject), 2);
+
+        // The cache must remain authoritative even when the registry stays linked.
+        revocation.revoke(&issuer, &subject, &hash_b);
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
+    }
+
+    #[test]
     fn test_revoke_unknown_vc_rolls_back_registry_state() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1957,11 +2002,19 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert!(identity.verify_vc(&subject, &vc_hash));
 
-        // Now set the registry and confirm the revocation IS detected
+        // Now set the registry and confirm the revocation IS detected.
+        //
+        // `is_verified` / `verify_vc` perform a live cross-contract check against
+        // the registry, so they reflect the revocation immediately. However,
+        // `get_active_vc_count` is served from the cached `ActiveVCCount`, which is
+        // only decremented through `mark_vc_revoked`. Because the registry was never
+        // linked as the identity-oracle (revocation.set_identity_oracle was not
+        // called), `revocation.revoke` did not invoke `mark_vc_revoked`, so the cache
+        // is unchanged. The cached count is authoritative (issue #481).
         identity.set_revocation_registry(&revocation_id);
 
         assert!(!identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 0);
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert!(!identity.verify_vc(&subject, &vc_hash));
     }
 

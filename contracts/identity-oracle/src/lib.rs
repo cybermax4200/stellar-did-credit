@@ -975,11 +975,7 @@ impl IdentityOracle {
     }
 
     pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
-        if env.storage().instance().has(&DataKey::RevocationRegistryId) {
-            compute_active_vc_count(&env, &subject)
-        } else {
-            load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
-        }
+        load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
     }
 
     /// Returns active (non-revoked) VC anchor records for `subject`.
@@ -1696,6 +1692,66 @@ mod tests {
         assert!(
             max_cost < MAINNET_CPU_LIMIT,
             "expected cached get_active_vc_count to stay under the mainnet CPU limit"
+        );
+    }
+
+    #[test]
+    fn test_get_active_vc_count_cached_cost_stays_flat_with_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let registry_id = env.register_contract(None, MockRevocationRegistry);
+        client.set_revocation_registry(&registry_id);
+
+        let mut costs = Vec::new(&env);
+        for vc_total in [5u32, 10u32, 20u32] {
+            let subject = Address::generate(&env);
+            for i in 0..vc_total {
+                let mut hash_arr = [0u8; 32];
+                hash_arr[0] = i as u8;
+                let vc_hash = BytesN::from_array(&env, &hash_arr);
+                client.anchor_vc(&issuer, &subject, &vc_hash);
+            }
+
+            let count = client.get_active_vc_count(&subject);
+            assert_eq!(count, vc_total);
+
+            costs.push_back(env.cost_estimate().budget().cpu_instruction_cost());
+        }
+
+        let cost_5 = costs.get(0).unwrap();
+        let cost_10 = costs.get(1).unwrap();
+        let cost_20 = costs.get(2).unwrap();
+
+        std::println!(
+            "get_active_vc_count cached (registry configured) cpu instructions: 5 VCs = {}, 10 VCs = {}, 20 VCs = {}",
+            cost_5,
+            cost_10,
+            cost_20
+        );
+
+        let max_cost = core::cmp::max(core::cmp::max(cost_5, cost_10), cost_20);
+        let min_cost = core::cmp::min(core::cmp::min(cost_5, cost_10), cost_20);
+        assert!(
+            max_cost - min_cost <= 25_000,
+            "expected get_active_vc_count with registry configured to cost O(1) (flat), got 5={} 10={} 20={}",
+            cost_5,
+            cost_10,
+            cost_20
+        );
+
+        const MAINNET_CPU_LIMIT: u64 = 600_000_000;
+        assert!(
+            max_cost < MAINNET_CPU_LIMIT,
+            "expected get_active_vc_count with registry configured to stay under the mainnet CPU limit"
         );
     }
 
