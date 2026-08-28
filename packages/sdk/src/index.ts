@@ -354,6 +354,7 @@ export class GovernanceClient {
 
   /**
    * Create a scoring-weight proposal and return its on-chain ID.
+    * Proposal IDs are 1-based: the first proposal has ID 1 and ID 0 is unused.
    *
    * This starts the governance voting window. If the proposal passes, callers
    * must still wait for its governance execution delay, call `execute`, wait
@@ -485,6 +486,8 @@ export class GovernanceClient {
 
   /**
    * Fetch proposals by scanning the contract's monotonically increasing IDs.
+    * Proposal IDs start at 1; pass `1` or `1n` as `fromId` to include the first
+    * proposal.
    *
    * The governance contract exposes `get_proposal`, but no list endpoint, so
    * this helper performs up to `limit` read-only RPC simulations starting at

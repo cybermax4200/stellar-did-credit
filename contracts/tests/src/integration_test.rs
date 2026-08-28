@@ -2243,4 +2243,85 @@ mod tests {
             "Score should increase when an active VC is present"
         );
     }
+
+    /// Issue #530: recency decay must lower the score of stale credentials,
+    /// clamp at the configured floor, and be fully reversible.
+    #[test]
+    fn test_recency_decay_affects_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        // Decay needs `anchored_at`, which only the cross-contract path exposes.
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmRecency"));
+
+        // Five generic VCs anchored at T0 => 5 x 20 = 100 undecayed VC points.
+        let t0 = 1_700_000_000u64;
+        let day = 86_400u64;
+        env.ledger().set_timestamp(t0);
+        for i in 0..5u8 {
+            identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[i; 32]));
+        }
+
+        let weights = credit.get_scoring_weights();
+        let expected = |vc_points: u32| -> u32 {
+            credit_oracle::compute_score_pure(
+                vc_points,
+                0,
+                0,
+                0,
+                0,
+                0,
+                weights.vc_weight,
+                weights.tx_weight,
+                weights.repayment_weight,
+            )
+        };
+
+        // Decay defaults to disabled: full weight, pre-#530 behavior.
+        let baseline = credit.compute_score(&subject);
+        assert_eq!(baseline, expected(100));
+
+        // Enable the documented defaults: 5 bps/day with a 50% floor.
+        credit.set_recency_decay(&admin, &true, &5, &5_000);
+
+        // 100 days old => 10_000 - 500 = 9_500 bps => 19 points per VC.
+        env.ledger().set_timestamp(t0 + 100 * day);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let aged_100d = credit.compute_score(&subject);
+        assert_eq!(aged_100d, expected(95));
+        assert!(
+            aged_100d < baseline,
+            "a 100-day-old credential must score below a fresh one"
+        );
+
+        // 5 years old => 9_125 bps of decay clamps to the 5_000 bps floor.
+        env.ledger().set_timestamp(t0 + 1_825 * day);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let aged_5y = credit.compute_score(&subject);
+        assert_eq!(aged_5y, expected(50));
+        assert!(aged_5y < aged_100d, "decay must be monotonic in age");
+
+        // Turning decay off restores the pre-#530 score exactly.
+        credit.set_recency_decay(&admin, &false, &5, &5_000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        assert_eq!(credit.compute_score(&subject), baseline);
+    }
 }

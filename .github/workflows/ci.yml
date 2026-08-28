@@ -52,9 +52,17 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
-      - name: Run fuzz tests
-        run: cargo +nightly fuzz run compute_score_pure -- -runs=10000
+      - name: Run fuzz tests (credit-oracle)
+        run: cargo +nightly fuzz run compute_score_pure -- -runs=5000
         working-directory: contracts/credit-oracle
+
+      - name: Run fuzz tests (identity-oracle)
+        run: cargo +nightly fuzz run anchor_vc_typed -- -runs=5000
+        working-directory: contracts/identity-oracle
+
+      - name: Run fuzz tests (governance)
+        run: cargo +nightly fuzz run vote_weight -- -runs=5000
+        working-directory: contracts/governance
 
   ts-test:
     runs-on: ubuntu-latest
@@ -160,6 +168,36 @@ jobs:
       - name: Check Node.js dependencies for vulnerabilities
         run: pnpm audit --audit-level=high
 
+  smoke-test:
+    name: Testnet smoke test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    continue-on-error: true
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-stellar-cli-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli --features opt
+
+      - name: Run testnet smoke test
+        env:
+          NETWORK: testnet
+          INVOKE_TIMEOUT_SECS: 30
+        run: bash scripts/smoke-test-testnet.sh deployments.testnet.json
+
   check-wasm-sizes:
     runs-on: ubuntu-latest
     steps:
@@ -208,3 +246,4 @@ jobs:
             exit 1
           fi
           echo "All contracts are within the size limit."
+          

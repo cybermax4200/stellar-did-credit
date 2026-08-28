@@ -141,6 +141,9 @@ credit-oracle; it does not activate them. Wait approximately 24 hours, or
 until the credit-oracle pending record's `effective_ledger`, before calling
 `applyWeights`.
 
+Proposal IDs are 1-based. The first proposal has ID `1`; ID `0` is unused.
+Start `listProposals` with `1n` when scanning from the beginning.
+
 `GovernanceProposal` mirrors the Rust contract struct. Its `id`, vote tallies,
 and `quorumRequired` fields are `bigint`, preserving Soroban `u64` and `i128`
 values without JavaScript precision loss.
