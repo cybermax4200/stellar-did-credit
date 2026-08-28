@@ -1,42 +1,12 @@
 #![no_std]
+pub use credit_oracle_types::{CreditOracleError, PendingWeightsRecord, ScoringWeights};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
+    Symbol, TryFromVal, Val, Vec,
+};
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Env, Symbol};
-
-/// Error types for the credit-oracle contract.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum CreditOracleError {
-    /// Contract is already initialized.
-    AlreadyInitialized = 1,
-    /// Caller is not authorized to perform this action.
-    NotAuthorized = 2,
-    /// Feeder is not registered.
-    FeederNotRegistered = 3,
-    /// Lender is not registered.
-    LenderNotRegistered = 4,
-    /// Proposed weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
-    InvalidWeights = 5,
-    /// No pending admin proposal exists.
-    NoPendingAdmin = 6,
-    /// Compute score called too soon — cooldown has not elapsed.
-    ComputeCooldownActive = 7,
-    /// A dispute is already pending for this subject and input key.
-    DisputeAlreadyPending = 8,
-    /// No dispute was found for the given subject and input key.
-    DisputeNotFound = 9,
-    /// The provided input key is not a valid score input name.
-    InvalidInputKey = 10,
-    /// The provided identity oracle contract is invalid or did not respond.
-    InvalidIdentityOracle = 11,
-    /// The contract is currently paused and cannot accept writes.
-    ContractPaused = 12,
-    /// Recency decay parameters are invalid: `min_recency_bps` exceeds
-    /// `BPS_DENOMINATOR` (10_000), which would make the floor larger than a
-    /// full-weight, brand-new credential.
-    InvalidRecencyConfig = 13,
-    /// Weight application timelock has not yet expired.
-    TimelockNotExpired = 14,
-}
+pub const MIN_SCORE: u32 = 300;
+pub const MAX_SCORE: u32 = 850;
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -241,21 +211,126 @@ fn validate_identity_oracle_ref(env: &Env, identity_oracle_id: &Address) -> bool
 /// Credit score record with metadata
 #[contracttype]
 #[derive(Clone)]
-#[contracttype]
 pub struct ScoreRecord {
+    /// Credit score value
     pub score: u32,
+    /// Timestamp of last update (Unix seconds)
+    pub last_updated: u64,
+    /// Number of verified credentials
     pub vc_count: u32,
+    /// Repayment rate in basis points (0-10000)
+    pub repayment_rate: u32,
+    /// Transaction volume in last 30 days
+    pub tx_volume_30d: i128,
+    /// Previous credit score, if one exists
+    pub previous_score: Option<u32>,
+    /// Ledger sequence number when this score was last computed.
+    /// Consumers can compare this against the current ledger sequence
+    /// to determine freshness without relying solely on wall-clock time.
     pub computed_at_ledger: u32,
+    /// Whether the stored score is considered stale based on
+    /// `STALE_LEDGER_AGE`. Computed at read time in `get_score` by
+    /// comparing `computed_at_ledger` against the current ledger
+    /// sequence. Always `false` for a freshly computed score.
     pub stale: bool,
 }
 
-#[derive(Clone)]
+/// Transaction statistics for a user
 #[contracttype]
-pub enum DataKey {
-    Admin,
-    IdentityOracle,
-    Score(Address),
+#[derive(Clone)]
+pub struct TxStats {
+    /// Total transaction volume in last 30 days
+    pub volume_30d: i128,
+    /// Transaction count in last 30 days
+    pub tx_count_30d: u32,
+    /// Average number of counterparties
+    pub avg_counterparties: u32,
 }
+
+/// Internal repayment counters for a subject
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentRecord {
+    pub on_time_count: u32,
+    pub total_count: u32,
+    /// Cumulative amount repaid across all recorded repayments.
+    pub total_repaid: i128,
+}
+
+/// Legacy repayment counters stored by V1 of the contract.
+///
+/// Preserved as a distinct type so the `migrate` function can deserialise
+/// pre-upgrade storage entries and convert them to [`RepaymentRecord`].
+#[contracttype]
+#[derive(Clone)]
+pub struct RepaymentRecordV1 {
+    /// Number of repayments made on time.
+    pub on_time_count: u32,
+    /// Total number of repayments recorded.
+    pub total_count: u32,
+}
+/// A verifiable credential entry stored per-user with an optional type tag.
+#[contracttype]
+#[derive(Clone)]
+pub struct VcEntry {
+    /// VC hash (e.g., SHA-256 of the off-chain VC document).
+    pub vc_id: BytesN<32>,
+    /// Optional credential type label (e.g., "kyc", "employment").
+    /// `None` defaults to weight 100.
+    pub vc_type: Option<Symbol>,
+}
+
+/// An on-chain anchor record for a verifiable credential in the identity oracle.
+#[contracttype]
+#[derive(Clone)]
+pub struct IdentityVCRecord {
+    /// SHA-256 hash of the off-chain verifiable credential JSON.
+    pub vc_hash: BytesN<32>,
+    /// Address of the issuer who anchored this credential.
+    pub issuer: Address,
+    /// Ledger timestamp (Unix seconds) when this credential was anchored.
+    pub anchored_at: u64,
+    /// Whether this credential has been revoked by the issuer.
+    pub revoked: bool,
+}
+
+/// Status of an on-chain score input dispute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DisputeStatus {
+    /// Dispute filed; awaiting admin review.
+    Pending,
+    /// Admin accepted the dispute; feeder re-sync requested.
+    Resolved,
+    /// Admin rejected the dispute; input deemed correct.
+    Rejected,
+}
+
+/// A subject's on-chain record disputing a specific score input.
+///
+/// Filed via `flag_score_input`; resolved by the admin via `resolve_dispute`.
+/// The `input_key` is one of `tx_stats`, `repayment`, or `vc_count`.
+#[contracttype]
+#[derive(Clone)]
+pub struct DisputeRecord {
+    /// The subject who filed the dispute.
+    pub subject: Address,
+    /// Which input is disputed: `tx_stats`, `repayment`, or `vc_count`.
+    pub input_key: Symbol,
+    /// Free-text reason provided by the subject.
+    pub reason: String,
+    /// Ledger sequence number when the dispute was filed.
+    pub filed_at_ledger: u32,
+    /// Current resolution status.
+    pub status: DisputeStatus,
+}
+
+const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
+const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
+/// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+/// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
+const PERS_TTL_EXTEND: u32 = 518_400;
 
 #[contract]
 pub struct CreditOracle;
@@ -329,14 +404,238 @@ fn increment_repayments_recorded(env: &Env) {
 }
 
 #[contractimpl]
-impl CreditOracleContract {
-    pub fn initialize(env: Env, admin: Address, identity_oracle: Address) -> Result<(), CreditOracleError> {
+impl CreditOracle {
+    /// Initialize the contract with admin and default scoring weights
+    pub fn initialize(env: Env, admin: Address) -> Result<(), CreditOracleError> {
         if env.storage().instance().has(&DataKey::Admin) {
             return Err(CreditOracleError::AlreadyInitialized);
         }
+        admin.require_auth();
+
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::IdentityOracle, &identity_oracle);
+
+        let default_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        env.storage()
+            .instance()
+            .set(&DataKey::Config, &default_weights);
+        env.storage().instance().set(
+            &DataKey::ComputeCooldownLedgers,
+            &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
+        );
+        // New deployments start at storage layout V2 — no migration needed.
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
+        env.events()
+            .publish((symbol_short!("Init"),), admin.clone());
         Ok(())
+    }
+
+    /// Register a trusted feeder address
+    pub fn register_feeder(
+        env: Env,
+        admin: Address,
+        feeder: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
+        if !env.storage().persistent().has(&feeder_key) {
+            let mut feeders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            feeders.push_back(feeder.clone());
+            let index_key = DataKey::FeedersIndex;
+            env.storage()
+                .persistent()
+                .set(&index_key, &feeders);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        env.storage().persistent().set(&feeder_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&feeder_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.events().publish((symbol_short!("FdrReg"),), feeder);
+        Ok(())
+    }
+
+    /// Deregister a trusted feeder address
+    pub fn deregister_feeder(
+        env: Env,
+        admin: Address,
+        feeder: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedFeeder(feeder.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FeedersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for i in 0..ever_registered.len() {
+            let addr: Address = ever_registered.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage().persistent().set(&DataKey::FeedersIndex, &compacted);
+
+        env.events().publish((symbol_short!("FdrDeReg"),), feeder);
+        Ok(())
+    }
+
+    /// Register a trusted lender address
+    pub fn register_lender(
+        env: Env,
+        admin: Address,
+        lender: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
+        if !env.storage().persistent().has(&lender_key) {
+            let mut lenders: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LendersIndex)
+                .unwrap_or(Vec::new(&env));
+            lenders.push_back(lender.clone());
+            let index_key = DataKey::LendersIndex;
+            env.storage()
+                .persistent()
+                .set(&index_key, &lenders);
+            env.storage()
+                .persistent()
+                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        env.storage().persistent().set(&lender_key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&lender_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.events().publish((symbol_short!("LndReg"),), lender);
+        Ok(())
+    }
+
+    /// Deregister a trusted lender address
+    pub fn deregister_lender(
+        env: Env,
+        admin: Address,
+        lender: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .persistent()
+            .remove(&DataKey::TrustedLender(lender.clone()));
+
+        let ever_registered: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::LendersIndex)
+            .unwrap_or(Vec::new(&env));
+
+        let mut compacted = Vec::new(&env);
+        for i in 0..ever_registered.len() {
+            let addr: Address = ever_registered.get(i).unwrap();
+            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
+                compacted.push_back(addr);
+            }
+        }
+        env.storage().persistent().set(&DataKey::LendersIndex, &compacted);
+
+        env.events().publish((symbol_short!("LndDeReg"),), lender);
+        Ok(())
+    }
+
+    /// Update transaction statistics for a user
+    /// Pause all writes on the contract.
+    ///
+    /// Auth: admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    ///
+    /// Auth: admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Returns true if the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
     }
 
     pub fn update_tx_stats(
@@ -904,14 +1203,48 @@ impl CreditOracleContract {
         Ok(())
     }
 
+    /// Get credit score for a user; returns None if score has not been computed yet.
+    ///
+    /// The returned `ScoreRecord` includes a `stale` flag computed
+    /// at read time by comparing `computed_at_ledger` against the
+    /// current ledger sequence. A score is considered stale when the
+    /// ledger delta exceeds `STALE_LEDGER_AGE` (~30 days).
+    ///
+    /// When an identity-oracle is configured, the record is additionally
+    /// marked stale if the subject's identity state changed *after* the score
+    /// was computed (`computed_at_ledger` is older than the identity-oracle's
+    /// `get_last_state_change_ledger`), so a cached score never outlives the
+    /// on-chain identity data it was derived from.
     pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
+        let current_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
             .map(|mut record| {
-                let current_ledger = env.ledger().sequence();
                 record.stale =
                     current_ledger.saturating_sub(record.computed_at_ledger) > STALE_LEDGER_AGE;
+                if !record.stale {
+                    if let Some(identity_oracle_id) = env
+                        .storage()
+                        .instance()
+                        .get::<_, Address>(&DataKey::IdentityOracleId)
+                    {
+                        let last_state_change: Option<u32> = env
+                            .try_invoke_contract::<Option<u32>, soroban_sdk::InvokeError>(
+                                &identity_oracle_id,
+                                &Symbol::new(&env, "get_last_state_change_ledger"),
+                                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+                            )
+                            .ok()
+                            .and_then(|res| res.ok())
+                            .flatten();
+                        if let Some(change_ledger) = last_state_change {
+                            if record.computed_at_ledger < change_ledger {
+                                record.stale = true;
+                            }
+                        }
+                    }
+                }
                 record
             })
     }
@@ -951,13 +1284,18 @@ impl CreditOracleContract {
     }
 
     /// Apply pending weights after timelock expires
+    ///
+    /// Returns a typed error instead of panicking so callers (governance
+    /// tooling, scripts, cross-contract relays) can distinguish calling too
+    /// early (`TimelockNotExpired`) from nothing being queued
+    /// (`NoPendingWeights`).
     pub fn apply_weights(env: Env) -> Result<(), CreditOracleError> {
         ensure_not_paused(&env)?;
         let effective_ledger: u32 = env
             .storage()
             .instance()
             .get(&DataKey::PendingWeightsEffectiveLedger)
-            .expect("no pending weights");
+            .ok_or(CreditOracleError::NoPendingWeights)?;
 
         if env.ledger().sequence() < effective_ledger {
             return Err(CreditOracleError::TimelockNotExpired);
@@ -967,7 +1305,7 @@ impl CreditOracleContract {
             .storage()
             .instance()
             .get(&DataKey::PendingWeights)
-            .expect("no pending weights");
+            .ok_or(CreditOracleError::NoPendingWeights)?;
 
         env.storage().instance().set(&DataKey::Config, &weights);
 
@@ -984,6 +1322,7 @@ impl CreditOracleContract {
                 weights.repayment_weight,
             ),
         );
+
         Ok(())
     }
 
@@ -1833,7 +2172,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "timelock not expired")]
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1847,7 +2185,21 @@ mod tests {
             tx_weight: 30,
             repayment_weight: 20,
         });
-        client.apply_weights();
+        let result = client.try_apply_weights();
+        assert_eq!(result, Err(Ok(CreditOracleError::TimelockNotExpired)));
+    }
+
+    #[test]
+    fn test_apply_weights_with_no_pending_weights_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let result = client.try_apply_weights();
+        assert_eq!(result, Err(Ok(CreditOracleError::NoPendingWeights)));
     }
 
     #[test]
@@ -2561,18 +2913,31 @@ mod tests {
         // Clear any existing events from setup
         env.events().all().len(); // Just to consume them
         
-        if let Some(identity_oracle_id) = env.storage().instance().get::<_, Address>(&DataKey::IdentityOracle) {
-            let client = IdentityOracleClient::new(&env, &identity_oracle_id);
-            let last_state_change = client.get_last_state_change_ledger(&subject);
-            
-            if record.computed_at_ledger < last_state_change {
-                record.stale = true;
+        // Call set_vc_count - should emit deprecation warning
+        client.set_vc_count(&feeder, &subject, &5);
+
+        // Check for VcCntDep event
+        let events = env.events().all();
+        let mut found_deprecation_event = false;
+        for i in 0..events.len() {
+            let (event_contract_id, topics, data) = events.get(i).unwrap();
+            if event_contract_id == contract_id && topics.len() == 1 {
+                let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if topic == symbol_short!("VcCntDep") {
+                    let (event_subject, event_count): (Address, u32) =
+                        data.try_into_val(&env).unwrap();
+                    assert_eq!(event_subject, subject);
+                    assert_eq!(event_count, 5);
+                    found_deprecation_event = true;
+                    break;
+                }
             }
         }
-
-        Some(record)
+        assert!(
+            found_deprecation_event,
+            "VcCntDep event should be emitted when identity oracle is configured"
+        );
     }
-}
 
     // -----------------------------------------------------------------
     // Issue #530: VC recency decay

@@ -81,7 +81,7 @@ Any non-zero `voting_period_ledgers` or `execution_delay_ledgers` adds on top of
 
 ### 2.3 Known Test Inconsistency (Issue #8)
 
-The unit tests `test_execution_timelock_delays_after_voting_ends` inside `contracts/governance/src/lib.rs` and `test_governance_execution_timelock_integration` inside `contracts/tests/src/integration_test.rs` call `execute()` and then immediately read `get_scoring_weights()` to assert the new values, **without** waiting the additional 17,280 ledgers or calling `apply_weights()`. These assertions are inconsistent with the real contract behavior described in ADR-003 and implemented in both `governance.execute` (which calls `propose_weights`, not `apply_weights`) and `credit-oracle.apply_weights` (which panics `timelock not expired` before `effective_ledger`).
+The unit tests `test_execution_timelock_delays_after_voting_ends` inside `contracts/governance/src/lib.rs` and `test_governance_execution_timelock_integration` inside `contracts/tests/src/integration_test.rs` call `execute()` and then immediately read `get_scoring_weights()` to assert the new values, **without** waiting the additional 17,280 ledgers or calling `apply_weights()`. These assertions are inconsistent with the real contract behavior described in ADR-003 and implemented in both `governance.execute` (which calls `propose_weights`, not `apply_weights`) and `credit-oracle.apply_weights` (which rejects with `TimelockNotExpired` before `effective_ledger`).
 
 The accurate working test is `test_governance_proposal_creation_voting_and_execution` in the governance contract's own tests, which correctly:
 
@@ -369,7 +369,12 @@ pub fn apply_weights(env: Env) -> Result<(), GovernanceError>
 **Auth:** none — permissionless. Any caller can finalize the credit-oracle's pending weights after its timelock expires. There is no `proposal_id` argument: there can be at most one set of pending weights in the credit-oracle at any given time, because `credit-oracle.propose_weights` overwrites `PendingWeights` and `PendingWeightsEffectiveLedger` each call.
 
 **Errors:**
-- `NotAuthorized` (misleading error name) if `CreditOracle` storage key is missing. Returned as `Gov` side only when governance was never initialized with a credit-oracle address. The actual credit-oracle `apply_weights` panics with the string `"timelock not expired"` before the effective ledger and panics with `"no pending weights"` if nothing was proposed.
+- `TimelockNotExpired` if the credit-oracle's 17,280-ledger timelock has not yet elapsed. The relay maps the credit-oracle's typed `CreditOracleError::TimelockNotExpired` to its own `GovernanceError::TimelockNotExpired`.
+- `NoPendingWeights` if nothing was proposed (`PendingWeightsEffectiveLedger` is unset in the credit-oracle), or if the credit-oracle invocation failed for an unexpected reason.
+- `ContractPaused` if the credit-oracle is paused and refuses the write.
+- `NotAuthorized` if the `CreditOracle` storage key is missing — returned only when governance was never initialized with a credit-oracle address.
+
+Previously these situations surfaced as raw panics inside the credit-oracle (`panic!("timelock not expired")`, `.expect("no pending weights")`), which governance tooling could not distinguish or handle. `apply_weights` now propagates typed errors only.
 
 **Worked example — step 2 of 2, weights finally go active:**
 

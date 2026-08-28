@@ -175,7 +175,11 @@ proptest! {
 
 // ---------------------------------------------------------------------------
 // Property 6 — Integer truncation stability: a ±1 perturbation to any single
-//              input must not change the score by more than 1.
+//              input must not change the score by more than one truncation
+//              step. The formula floors `composite * 550 / 100`, so a ±1
+//              change in a component can move the composite by 1, and one
+//              composite step moves the score by at most 6 (since
+//              550/100 = 5.5). Hence the bound is 6, not 1.
 // ---------------------------------------------------------------------------
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(1_000))]
@@ -208,7 +212,7 @@ proptest! {
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(
-                diff <= 1,
+                diff <= 6,
                 "±1 in vc_points changed score by {} (base={}, perturbed={})",
                 diff, base, perturbed
             );
@@ -224,7 +228,7 @@ proptest! {
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(
-                diff <= 1,
+                diff <= 6,
                 "±1 in volume_30d changed score by {} (base={}, perturbed={})",
                 diff, base, perturbed
             );

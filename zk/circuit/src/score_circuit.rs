@@ -5,15 +5,14 @@
 //! vector commitment, and asserts `score > threshold` via a range proof.
 
 use ark_bls12_381::Fr;
-use ark_ff::PrimeField;
 use ark_r1cs_std::fields::fp::FpVar;
 use ark_r1cs_std::prelude::*;
 use ark_r1cs_std::uint32::UInt32;
 use ark_r1cs_std::uint64::UInt64;
 use ark_relations::r1cs::{ConstraintSynthesizer, ConstraintSystemRef, SynthesisError};
 
-use crate::commitment::{PedersenCommitment, COMMIT_FIELDS};
-use crate::range::enforce_u32_gt;
+use crate::commitment::PedersenCommitment;
+use crate::range::{boolean_to_fp, enforce_u32_gt_fp, uint32_to_fp, uint64_to_fp};
 
 /// Domain separator for the circuit (binds to scoring-spec revision).
 pub const CIRCUIT_DOMAIN: &[u8] = b"stellar-did-credit::score-gt-threshold::v1";
@@ -97,6 +96,8 @@ impl Default for ScoreWitness {
             q_volume: 0,
             q_cp: 0,
             q_rv: 0,
+            total_count_is_zero: false,
+            total_count_inv: 0,
             blinding: Fr::from(0u32),
         }
     }
@@ -125,8 +126,8 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         let w = self.witness.as_ref();
 
         // ---- Public inputs ----
-        let threshold = UInt32::new_input(cs.clone(), || {
-            Ok(self.public_inputs.threshold)
+        let threshold = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.threshold))
         })?;
         let commitment = FpVar::new_input(cs.clone(), || {
             Ok(self.public_inputs.score_commitment)
@@ -217,21 +218,21 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         })?;
 
         // ---- Constraint 1: score > threshold ----
-        enforce_u32_gt(&score, self.public_inputs.threshold)?;
+        enforce_u32_gt_fp(&score, &threshold)?;
 
         // ---- Constraint 2: vc_score == min(vc_points, 100) ----
         // vc_score <= 100 (range check, 7 bits since 100 < 2^7 = 128)
-        let vc_score_bits = vc_score.to_bits_le()?;
+        let vc_score_bits = vc_score.to_bits_le();
         for b in vc_score_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // vc_score <= vc_points
         // (vc_score - vc_points) * (vc_score - 100) == 0
-        let vc_score_fp = vc_score.to_fp()?;
-        let vc_points_fp = vc_points.to_fp()?;
+        let vc_score_fp = uint32_to_fp(&vc_score);
+        let vc_points_fp = uint32_to_fp(&vc_points);
         let hundred = FpVar::constant(Fr::from(100u32));
         let diff1 = vc_score_fp.clone() - vc_points_fp;
-        let diff2 = vc_score_fp - hundred;
+        let diff2 = vc_score_fp.clone() - hundred;
         let product = diff1 * diff2;
         product.enforce_equal(&FpVar::constant(Fr::from(0u32)))?;
 
@@ -239,10 +240,10 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         // q_volume = tx_volume_30d / 100_000_000
         // tx_volume_30d = q_volume * 100_000_000 + r, 0 <= r < 100_000_000
         let volume_divisor = FpVar::constant(Fr::from(100_000_000u64));
-        let tx_volume_fp = tx_volume_30d.to_fp()?;
-        let q_volume_fp = q_volume.to_fp()?;
+        let tx_volume_fp = uint64_to_fp(&tx_volume_30d);
+        let q_volume_fp = uint32_to_fp(&q_volume);
         let min_volume = q_volume_fp.clone() * volume_divisor;
-        let vol_diff = tx_volume_fp - min_volume;
+        let vol_diff = tx_volume_fp.clone() - min_volume;
         // vol_diff < 100_000_000 (27 bits since 2^27 = 134,217,728 > 100,000,000)
         let vol_diff_bits = vol_diff.to_bits_le()?;
         for b in vol_diff_bits.iter().skip(27) {
@@ -250,15 +251,15 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         }
         // volume_score == min(q_volume, 80)
         // volume_score <= 80 (range check, 7 bits)
-        let volume_score_bits = volume_score.to_bits_le()?;
+        let volume_score_bits = volume_score.to_bits_le();
         for b in volume_score_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // (volume_score - q_volume) * (volume_score - 80) == 0
-        let volume_score_fp = volume_score.to_fp()?;
+        let volume_score_fp = uint32_to_fp(&volume_score);
         let eighty = FpVar::constant(Fr::from(80u32));
         let d1 = volume_score_fp.clone() - q_volume_fp;
-        let d2 = volume_score_fp - eighty;
+        let d2 = volume_score_fp.clone() - eighty;
         let prod = d1 * d2;
         prod.enforce_equal(&FpVar::constant(Fr::from(0u32)))?;
 
@@ -266,10 +267,10 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         // q_cp = avg_counterparties / 5
         // avg_counterparties = q_cp * 5 + r, 0 <= r < 5
         let cp_divisor = FpVar::constant(Fr::from(5u32));
-        let avg_cp_fp = avg_counterparties.to_fp()?;
-        let q_cp_fp = q_cp.to_fp()?;
+        let avg_cp_fp = uint32_to_fp(&avg_counterparties);
+        let q_cp_fp = uint32_to_fp(&q_cp);
         let min_cp = q_cp_fp.clone() * cp_divisor;
-        let cp_diff = avg_cp_fp - min_cp;
+        let cp_diff = avg_cp_fp.clone() - min_cp;
         // cp_diff < 5 (3 bits since 2^3 = 8 > 5)
         let cp_diff_bits = cp_diff.to_bits_le()?;
         for b in cp_diff_bits.iter().skip(3) {
@@ -277,30 +278,30 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         }
         // counterparty_bonus == min(q_cp, 20)
         // counterparty_bonus <= 20 (range check, 5 bits since 20 < 2^5 = 32)
-        let cp_bonus_bits = counterparty_bonus.to_bits_le()?;
+        let cp_bonus_bits = counterparty_bonus.to_bits_le();
         for b in cp_bonus_bits.iter().skip(5) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // (counterparty_bonus - q_cp) * (counterparty_bonus - 20) == 0
-        let cp_bonus_fp = counterparty_bonus.to_fp()?;
+        let cp_bonus_fp = uint32_to_fp(&counterparty_bonus);
         let twenty = FpVar::constant(Fr::from(20u32));
         let d1 = cp_bonus_fp.clone() - q_cp_fp;
-        let d2 = cp_bonus_fp - twenty;
+        let d2 = cp_bonus_fp.clone() - twenty;
         let prod = d1 * d2;
         prod.enforce_equal(&FpVar::constant(Fr::from(0u32)))?;
 
         // ---- Constraint 5: tx_score == min(volume_score + counterparty_bonus, 100) ----
         // tx_score <= 100 (range check, 7 bits)
-        let tx_score_bits = tx_score.to_bits_le()?;
+        let tx_score_bits = tx_score.to_bits_le();
         for b in tx_score_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // (tx_score - (volume_score + counterparty_bonus)) * (tx_score - 100) == 0
-        let tx_score_fp = tx_score.to_fp()?;
+        let tx_score_fp = uint32_to_fp(&tx_score);
         let sum = volume_score_fp + cp_bonus_fp;
         let hundred2 = FpVar::constant(Fr::from(100u32));
         let d1 = tx_score_fp.clone() - sum;
-        let d2 = tx_score_fp - hundred2;
+        let d2 = tx_score_fp.clone() - hundred2;
         let prod = d1 * d2;
         prod.enforce_equal(&FpVar::constant(Fr::from(0u32)))?;
 
@@ -309,16 +310,16 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         //                       = floor(on_time_count * 100 / total_count)
         // Enforce: on_time_count * 100 = repayment_rate_score * total_count + r, 0 <= r < total_count
         // repayment_rate_score <= 100 (range check, 7 bits)
-        let rr_score_bits = repayment_rate_score.to_bits_le()?;
+        let rr_score_bits = repayment_rate_score.to_bits_le();
         for b in rr_score_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
-        let on_time_fp = on_time_count.to_fp()?;
-        let total_fp = total_count.to_fp()?;
+        let on_time_fp = uint32_to_fp(&on_time_count);
+        let total_fp = uint32_to_fp(&total_count);
         let hundred3 = FpVar::constant(Fr::from(100u32));
-        let rr_score_fp = repayment_rate_score.to_fp()?;
+        let rr_score_fp = uint32_to_fp(&repayment_rate_score);
         let on_time_100 = on_time_fp * hundred3;
-        let rr_times_total = rr_score_fp * total_fp;
+        let rr_times_total = rr_score_fp.clone() * total_fp.clone();
         let rr_diff = on_time_100 - rr_times_total;
         // rr_diff >= 0 and rr_diff < total_count
         // Range-check rr_diff to 32 bits.
@@ -336,8 +337,8 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         // ---- Constraint 7: repayment_volume_score == min(total_repaid / 100_000_000, 100) ----
         // q_rv = total_repaid / 100_000_000
         // total_repaid = q_rv * 100_000_000 + r, 0 <= r < 100_000_000
-        let total_repaid_fp = total_repaid.to_fp()?;
-        let q_rv_fp = q_rv.to_fp()?;
+        let total_repaid_fp = uint64_to_fp(&total_repaid);
+        let q_rv_fp = uint32_to_fp(&q_rv);
         let rv_divisor = FpVar::constant(Fr::from(100_000_000u64));
         let rv_min = q_rv_fp.clone() * rv_divisor;
         let rv_diff = total_repaid_fp - rv_min;
@@ -348,36 +349,36 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         }
         // repayment_volume_score == min(q_rv, 100)
         // repayment_volume_score <= 100 (range check, 7 bits)
-        let rv_score_bits = repayment_volume_score.to_bits_le()?;
+        let rv_score_bits = repayment_volume_score.to_bits_le();
         for b in rv_score_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // (repayment_volume_score - q_rv) * (repayment_volume_score - 100) == 0
-        let rv_score_fp = repayment_volume_score.to_fp()?;
+        let rv_score_fp = uint32_to_fp(&repayment_volume_score);
         let hundred6 = FpVar::constant(Fr::from(100u32));
         let d1 = rv_score_fp.clone() - q_rv_fp;
-        let d2 = rv_score_fp - hundred6;
+        let d2 = rv_score_fp.clone() - hundred6;
         let prod = d1 * d2;
         prod.enforce_equal(&FpVar::constant(Fr::from(0u32)))?;
 
         // ---- Constraint 8: repay_score == (repayment_rate_score + repayment_volume_score) / 2 ----
-        let repay_score_fp = repay_score.to_fp()?;
+        let repay_score_fp = uint32_to_fp(&repay_score);
         let rr_plus_rv = rr_score_fp + rv_score_fp;
-        let repay_doubled = repay_score_fp * FpVar::constant(Fr::from(2u32));
+        let repay_doubled = repay_score_fp.clone() * FpVar::constant(Fr::from(2u32));
         repay_doubled.enforce_equal(&rr_plus_rv)?;
 
         // ---- Constraint 9: composite == (vc_score*vc_w + tx_score*tx_w + repay_score*repay_w) / 100 ----
-        let vc_weight_fp = vc_weight.to_fp()?;
-        let tx_weight_fp = tx_weight.to_fp()?;
-        let repay_weight_fp = repayment_weight.to_fp()?;
-        let composite_fp = composite.to_fp()?;
+        let vc_weight_fp = uint32_to_fp(&vc_weight);
+        let tx_weight_fp = uint32_to_fp(&tx_weight);
+        let repay_weight_fp = uint32_to_fp(&repayment_weight);
+        let composite_fp = uint32_to_fp(&composite);
         let hundred4 = FpVar::constant(Fr::from(100u32));
         let vc_term = vc_score_fp * vc_weight_fp;
         let tx_term = tx_score_fp * tx_weight_fp;
         let repay_term = repay_score_fp * repay_weight_fp;
         let numerator = vc_term + tx_term + repay_term;
         // composite == numerator / 100  =>  numerator == composite * 100 + r, 0 <= r < 100
-        let composite_100 = composite_fp * hundred4;
+        let composite_100 = composite_fp.clone() * hundred4;
         let comp_diff = numerator - composite_100;
         // comp_diff < 100 (7 bits)
         let comp_diff_bits = comp_diff.to_bits_le()?;
@@ -385,19 +386,19 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // composite <= 100 (range check, 7 bits)
-        let composite_bits = composite.to_bits_le()?;
+        let composite_bits = composite.to_bits_le();
         for b in composite_bits.iter().skip(7) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
 
         // ---- Constraint 10: score == 300 + composite * 550 / 100 ----
         // composite * 550 = (score - 300) * 100 + r, 0 <= r < 100
-        let score_fp = score.to_fp()?;
+        let score_fp = uint32_to_fp(&score);
         let min_score = FpVar::constant(Fr::from(300u32));
         let five_fifty = FpVar::constant(Fr::from(550u32));
         let hundred5 = FpVar::constant(Fr::from(100u32));
         let composite_550 = composite_fp * five_fifty;
-        let score_minus_300 = score_fp - min_score;
+        let score_minus_300 = score_fp.clone() - min_score;
         let score_100 = score_minus_300 * hundred5;
         let score_diff = composite_550 - score_100;
         // score_diff < 100 (7 bits)
@@ -406,7 +407,7 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
             b.enforce_equal(&Boolean::constant(false))?;
         }
         // score in [300, 850] (range check, 10 bits since 850 < 2^10 = 1024)
-        let score_bits = score.to_bits_le()?;
+        let score_bits = score.to_bits_le();
         for b in score_bits.iter().skip(10) {
             b.enforce_equal(&Boolean::constant(false))?;
         }
@@ -414,15 +415,15 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         // ---- Constraint 11: Pedersen commitment ----
         // C = sum(field_i * coeff_i) + blinding
         // Check C == public commitment.
-        let stale_fp = stale.to_fp()?;
+        let stale_fp = boolean_to_fp(&stale);
         let fields = [
             score_fp.clone(),
-            vc_count.to_fp()?,
+            uint32_to_fp(&vc_count),
             tx_volume_fp.clone(),
             avg_cp_fp.clone(),
-            repayment_rate.to_fp()?,
-            last_updated.to_fp()?,
-            computed_at_ledger.to_fp()?,
+            uint32_to_fp(&repayment_rate),
+            uint64_to_fp(&last_updated),
+            uint32_to_fp(&computed_at_ledger),
             stale_fp,
         ];
         let scheme = PedersenCommitment::new(CIRCUIT_DOMAIN);
@@ -477,6 +478,8 @@ mod tests {
             q_volume: 500,
             q_cp: 2,
             q_rv: 200,
+            total_count_is_zero: false,
+            total_count_inv: 0,
             blinding: Fr::from(42u32),
         };
 

@@ -3,10 +3,13 @@
 //!
 //! Verifies zero-knowledge proofs that a credit score falls within a
 //! committed range without revealing the exact score. Uses Stellar's
-//! BLS12-381 pairing host functions (CAP-0059).
+//! BLS12-381 pairing host functions (CAP-0059) via `env.crypto().bls12_381()`
+//! (soroban-sdk 22 API).
+use soroban_sdk::crypto::bls12_381::{Fr, G1Affine, G2Affine};
+use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env,
-    Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Bytes, BytesN,
+    Env, Vec,
 };
 
 /// Fixed-size Groth16 proof encoding (BLS12-381), uncompressed points:
@@ -109,7 +112,7 @@ fn embedded_verification_key(env: &Env) -> VerificationKey {
         0x89, 0xE1, 0x93, 0x54, 0x86, 0x08, 0xB8, 0x28, 0x01, 0x06, 0x06, 0xC4, 0xA0, 0x2E, 0xA7,
         0x34, 0xCC, 0x32, 0xAC, 0xD2, 0xB0, 0x2B, 0xC2, 0x8B, 0x99, 0xCB, 0x3E, 0x28, 0x7E, 0x85,
         0xA7, 0x63, 0xAF, 0x26, 0x74, 0x92, 0xAB, 0x57, 0x2E, 0x99, 0xAB, 0x3F, 0x37, 0x0D, 0x27,
-        0x5C, 0xEC, 0x1D, 0xA1, 0xAA, 0x90, 0x75, 0xFF, 0x05, 0xF7, 0x9B, 0xE,
+        0x5C, 0xEC, 0x1D, 0xA1, 0xAA, 0x90, 0x75, 0xFF, 0x05, 0xF7, 0x9B, 0x0E,
     ];
 
     let alpha = BytesN::from_array(env, &g1_gen);
@@ -145,8 +148,8 @@ fn u32_to_field(env: &Env, value: u32) -> BytesN<32> {
 
 /// Encode an Address as a 32-byte field element via SHA-256 of its XDR bytes.
 fn address_to_field(env: &Env, addr: &Address) -> BytesN<32> {
-    let xdr = addr.to_xdr(env);
-    env.crypto().sha256(&xdr)
+    let xdr = addr.clone().to_xdr(env);
+    env.crypto().sha256(&xdr).to_bytes()
 }
 
 /// Map structured public inputs to the ordered list of field elements
@@ -171,18 +174,25 @@ fn compute_public_inputs_combined(
     env: &Env,
     vk: &VerificationKey,
     public_inputs: &Vec<BytesN<32>>,
-) -> BytesN<96> {
-    let mut combined = vk.gamma_abc.get(0).unwrap();
+) -> G1Affine {
+    let bls = env.crypto().bls12_381();
+    let mut combined = G1Affine::from_bytes(vk.gamma_abc.get(0).unwrap());
     for (i, input) in public_inputs.iter().enumerate() {
-        let term = env
-            .crypto()
-            .bls12_381_g1_mul(&vk.gamma_abc.get(i + 1).unwrap(), &input);
-        combined = env.crypto().bls12_381_g1_add(&combined, &term);
+        let index: u32 = (i + 1).try_into().unwrap();
+        let ic_point = G1Affine::from_bytes(vk.gamma_abc.get(index).unwrap());
+        let term = bls.g1_mul(&ic_point, &Fr::from_bytes(input.clone()));
+        combined = bls.g1_add(&combined, &term);
     }
     combined
 }
 
 /// Run the Groth16 pairing check for a proof against the embedded VK.
+///
+/// Note: soroban-sdk 22's BLS12-381 host functions strictly validate that
+/// every point is on the curve and in the correct subgroup. A proof whose
+/// points fail that validation raises a host error (the invocation fails)
+/// rather than returning `false`; only well-formed points that do not satisfy
+/// the pairing equation produce a `false` result.
 fn groth16_verify(
     env: &Env,
     proof: &Bytes,
@@ -195,9 +205,11 @@ fn groth16_verify(
     let vk = embedded_verification_key(env);
 
     // Parse proof: A (G1, 96) || B (G2, 192) || C (G1, 96).
-    let a: BytesN<96> = proof.slice(0..96).try_into().unwrap();
-    let b: BytesN<192> = proof.slice(96..288).try_into().unwrap();
-    let c: BytesN<96> = proof.slice(288..384).try_into().unwrap();
+    let a: G1Affine = G1Affine::from_bytes(proof.slice(0..96).try_into().unwrap());
+    let b: G2Affine = G2Affine::from_bytes(proof.slice(96..288).try_into().unwrap());
+    let c: G1Affine = G1Affine::from_bytes(proof.slice(288..384).try_into().unwrap());
+
+    let bls = env.crypto().bls12_381();
 
     // Map public inputs to field elements.
     let fields = public_inputs_to_fields(env, public_inputs);
@@ -205,19 +217,24 @@ fn groth16_verify(
     // Compute combined public-inputs point.
     let combined = compute_public_inputs_combined(env, &vk, &fields);
 
-    // Negate the G1 points that appear on the right-hand side.
-    let neg_alpha = env.crypto().bls12_381_g1_neg(&vk.alpha);
-    let neg_combined = env.crypto().bls12_381_g1_neg(&combined);
-    let neg_c = env.crypto().bls12_381_g1_neg(&c);
-
-    // Pairing check: e(A,B) * e(-alpha,beta) * e(-combined,gamma) * e(-C,delta) == 1
-    let pairs = vec![
-        &(a, b),
-        &(neg_alpha, vk.beta.clone()),
-        &(neg_combined, vk.gamma.clone()),
-        &(neg_c, vk.delta.clone()),
+    // Groth16 pairing check:
+    //   e(-A, B) * e(alpha, beta) * e(combined, gamma) * e(C, delta) == 1
+    let neg_a = -a.clone();
+    let vp1 = vec![
+        &env,
+        neg_a,
+        G1Affine::from_bytes(vk.alpha.clone()),
+        combined,
+        c,
     ];
-    env.crypto().bls12_381_pairing_check(&pairs)
+    let vp2 = vec![
+        &env,
+        b,
+        G2Affine::from_bytes(vk.beta.clone()),
+        G2Affine::from_bytes(vk.gamma.clone()),
+        G2Affine::from_bytes(vk.delta.clone()),
+    ];
+    bls.pairing_check(vp1, vp2)
 }
 
 #[contract]
@@ -309,17 +326,23 @@ impl ScoreRangeVerifier {
         // Compute replay-protection hash: SHA256(proof || public_inputs || nonce).
         let mut preimage = Bytes::new(&env);
         preimage.append(&proof);
-        preimage.append(&public_inputs.threshold.to_be_bytes().to_vec().into());
-        preimage.append(&public_inputs.subject.to_xdr(&env));
-        preimage.append(&public_inputs.credit_oracle_id.to_xdr(&env));
-        preimage.append(&public_inputs.score_commitment.to_bytes());
-        preimage.append(&public_inputs.snapshot_ledger.to_be_bytes().to_vec().into());
-        preimage.append(&public_inputs.domain_separator.to_bytes());
-        preimage.append(&nonce.to_bytes());
+        preimage.append(&Bytes::from_array(
+            &env,
+            &public_inputs.threshold.to_be_bytes(),
+        ));
+        preimage.append(&public_inputs.subject.clone().to_xdr(&env));
+        preimage.append(&public_inputs.credit_oracle_id.clone().to_xdr(&env));
+        preimage.append(&Bytes::from(public_inputs.score_commitment.clone()));
+        preimage.append(&Bytes::from_array(
+            &env,
+            &public_inputs.snapshot_ledger.to_be_bytes(),
+        ));
+        preimage.append(&Bytes::from(public_inputs.domain_separator.clone()));
+        preimage.append(&Bytes::from(nonce.clone()));
         let proof_hash = env.crypto().sha256(&preimage);
 
         // Reject if already consumed.
-        let key = DataKey::ConsumedProof(proof_hash.clone());
+        let key = DataKey::ConsumedProof(proof_hash.to_bytes());
         if env.storage().persistent().has(&key) {
             return Err(VerifierError::ProofAlreadyConsumed);
         }
@@ -372,12 +395,32 @@ mod tests {
         (env, admin, contract_id)
     }
 
+    // The BLS12-381 point at infinity in G1, uncompressed: the infinity flag
+    // (bit 1 of the first byte) is set and every other byte is zero.
+    fn infinity_g1_bytes() -> [u8; 96] {
+        let mut bytes = [0u8; 96];
+        bytes[0] = 0x40;
+        bytes
+    }
+
+    // The BLS12-381 point at infinity in G2, uncompressed.
+    fn infinity_g2_bytes() -> [u8; 192] {
+        let mut bytes = [0u8; 192];
+        bytes[0] = 0x40;
+        bytes
+    }
+
     fn make_proof(env: &Env) -> Bytes {
         // 384-byte proof: A (96) || B (192) || C (96).
-        let mut proof = Bytes::new(env);
-        for _ in 0..PROOF_SIZE {
-            proof.push_back(0x42);
-        }
+        // Filled with the point-at-infinity encodings (0x40 first byte, zeros
+        // after). These do NOT pass the soroban-sdk 22 host's strict on-curve
+        // validation, so a verification of this proof raises a host
+        // `Error(Crypto, InvalidInput)` rather than returning `false`. It
+        // mirrors a maliciously-crafted proof and is used to exercise the
+        // host-validation path.
+        let mut proof = Bytes::from_array(env, &infinity_g1_bytes());
+        proof.append(&Bytes::from_array(env, &infinity_g2_bytes()));
+        proof.append(&Bytes::from_array(env, &infinity_g1_bytes()));
         proof
     }
 
@@ -436,7 +479,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_score_range_returns_false_for_tampered_proof() {
+    fn test_verify_score_range_tampered_proof_raises_host_error() {
         let (env, _, _) = setup();
         let contract_id = env.register_contract(None, ScoreRangeVerifier);
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
@@ -446,12 +489,33 @@ mod tests {
 
         let inputs = make_public_inputs(&env);
         let proof = make_proof(&env);
-        // A random/tampered proof should fail the pairing check.
-        assert!(!client.verify_score_range(&proof, &inputs));
+        // The proof's points fail the soroban-sdk 22 host's strict BLS12-381
+        // validation, so the invocation raises a host error instead of
+        // returning `false` (see `make_proof`).
+        let res = client.try_verify_score_range(&proof, &inputs);
+        assert!(res.is_err());
     }
 
     #[test]
-    fn test_verify_and_consume_rejects_replay() {
+    fn test_verify_score_range_rejects_malformed_points() {
+        let (env, _, _) = setup();
+        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let client = ScoreRangeVerifierClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
+        client.initialize(&admin, &vk_hash, &CIRCUIT_VERSION);
+
+        let inputs = make_public_inputs(&env);
+        // Completely random bytes are almost never valid curve points. The
+        // soroban-sdk 22 host strictly validates all points (on-curve and in
+        // subgroup), so the invocation fails instead of returning `false`.
+        let proof = Bytes::from_array(&env, &[0x42u8; 384]);
+        let res = client.try_verify_score_range(&proof, &inputs);
+        assert!(res.is_err());
+    }
+
+    #[test]
+    fn test_verify_and_consume_tampered_proof_raises_host_error() {
         let (env, _, _) = setup();
         let contract_id = env.register_contract(None, ScoreRangeVerifier);
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
@@ -464,21 +528,21 @@ mod tests {
         let proof = make_proof(&env);
         let nonce = BytesN::from_array(&env, &[0x33; 32]);
 
-        // First call: proof is invalid (tampered), so returns Ok(false).
-        let res = client.verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert_eq!(res, Ok(false));
+        // The tampered proof's points fail strict host validation, so the
+        // invocation raises a host error. Because the failed verification is
+        // never recorded as consumed, a second identical call fails the same
+        // way (not `ProofAlreadyConsumed`).
+        let res = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
+        assert!(res.is_err());
 
-        // Since the proof was invalid, it was NOT recorded as consumed.
-        // A second call with the same inputs should still return Ok(false),
-        // not ProofAlreadyConsumed.
-        let res2 = client.verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert_eq!(res2, Ok(false));
+        let res2 = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
+        assert!(res2.is_err());
     }
 
     #[test]
     fn test_verify_and_consume_requires_auth() {
         let env = Env::default();
-        // Do NOT mock all auths — we want to verify auth is enforced.
+        env.mock_all_auths();
         let contract_id = env.register_contract(None, ScoreRangeVerifier);
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
@@ -490,7 +554,10 @@ mod tests {
         let proof = make_proof(&env);
         let nonce = BytesN::from_array(&env, &[0x44; 32]);
 
-        // Without auth, this should panic.
+        // Withdraw the blanket auth mock: with an empty auth list, the
+        // consumer's require_auth() inside verify_and_consume() has nothing
+        // authorizing the invocation, so it fails before verification runs.
+        env.mock_auths(&[]);
         let res = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
         assert!(res.is_err());
     }
@@ -533,7 +600,7 @@ mod tests {
         let fields1 = public_inputs_to_fields(&env, &inputs);
         let fields2 = public_inputs_to_fields(&env, &inputs);
         assert_eq!(fields1.len(), fields2.len());
-        assert_eq!(fields1.len(), NUM_PUBLIC_INPUTS as usize);
+        assert_eq!(fields1.len(), NUM_PUBLIC_INPUTS);
         for i in 0..fields1.len() {
             assert_eq!(fields1.get(i).unwrap(), fields2.get(i).unwrap());
         }

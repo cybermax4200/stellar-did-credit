@@ -3,7 +3,7 @@
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
 //! update the credit-oracle's scoring weights through a community vote.
-use credit_oracle_types::{CreditOracleClient, ScoringWeights};
+use credit_oracle_types::{CreditOracleClient, CreditOracleError, ScoringWeights};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
@@ -40,6 +40,10 @@ pub enum GovernanceError {
     InsufficientVoteWeight = 13,
     /// Proposal has already been cancelled and cannot be executed or cancelled again.
     ProposalAlreadyCancelled = 14,
+    /// The credit-oracle has no pending weights to apply.
+    NoPendingWeights = 15,
+    /// The credit-oracle is paused and cannot apply weights.
+    ContractPaused = 16,
 }
 
 /// Storage keys for the governance contract.
@@ -527,6 +531,10 @@ impl Governance {
     /// This function should be called after `execute` has successfully queued
     /// new weights and the credit-oracle's timelock (17,280 ledgers / ~24 hours)
     /// has elapsed. Anyone can call this function.
+    ///
+    /// Errors from the credit-oracle's `apply_weights` are propagated with the
+    /// equivalent governance error so callers can distinguish calling too early
+    /// (`TimelockNotExpired`) from nothing being queued (`NoPendingWeights`).
     pub fn apply_weights(env: Env) -> Result<(), GovernanceError> {
         let credit_oracle_addr: Address = env
             .storage()
@@ -534,12 +542,17 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .ok_or(GovernanceError::NotAuthorized)?;
 
-        CreditOracleClient::apply_weights(&env, &credit_oracle_addr);
-
-        env.events()
-            .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
-
-        Ok(())
+        match CreditOracleClient::apply_weights(&env, &credit_oracle_addr) {
+            Ok(()) => {
+                env.events()
+                    .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
+                Ok(())
+            }
+            Err(CreditOracleError::TimelockNotExpired) => Err(GovernanceError::TimelockNotExpired),
+            Err(CreditOracleError::NoPendingWeights) => Err(GovernanceError::NoPendingWeights),
+            Err(CreditOracleError::ContractPaused) => Err(GovernanceError::ContractPaused),
+            Err(_) => Err(GovernanceError::NotAuthorized),
+        }
     }
 
     /// Accept the admin role of the credit-oracle on behalf of this contract.
@@ -1324,6 +1337,71 @@ mod tests {
         assert_eq!(pending_record.weights.vc_weight, 50);
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_apply_weights_relay_propagates_timelock_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // Execute queues weights and starts the credit-oracle timelock.
+        gov_client.execute(&proposal_id);
+
+        // Calling before the credit-oracle timelock elapses must surface the
+        // typed error instead of a panic.
+        let res = gov_client.try_apply_weights();
+        assert_eq!(res, Err(Ok(GovernanceError::TimelockNotExpired)));
+    }
+
+    #[test]
+    fn test_apply_weights_relay_propagates_no_pending_weights_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        // No proposal has been executed, so the credit-oracle has no pending
+        // weights to apply.
+        let res = gov_client.try_apply_weights();
+        assert_eq!(res, Err(Ok(GovernanceError::NoPendingWeights)));
     }
 
     #[test]

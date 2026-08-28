@@ -9,7 +9,7 @@
 //! The commitment is a Pedersen vector commitment over the additive group of
 //! the BLS12-381 scalar field `Fr`:
 //!
-//! ```
+//! ```text
 //! C = sum_i field_i * coeff_i + blinding
 //! ```
 //!
@@ -37,13 +37,13 @@ impl PedersenCommitment {
     /// Derive deterministic coefficients from a domain separator.
     pub fn new(domain_separator: &[u8]) -> Self {
         let mut coefficients = [Fr::from(0u32); COMMIT_FIELDS];
-        for i in 0..COMMIT_FIELDS {
+        for (i, coefficient) in coefficients.iter_mut().enumerate() {
             let mut hasher = Sha256::new();
             hasher.update(domain_separator);
             hasher.update(b"::pedersen_coeff::");
             hasher.update((i as u32).to_le_bytes());
             let digest = hasher.finalize();
-            coefficients[i] = Fr::from_le_bytes_mod_order(&digest);
+            *coefficient = Fr::from_le_bytes_mod_order(&digest);
         }
         Self { coefficients }
     }

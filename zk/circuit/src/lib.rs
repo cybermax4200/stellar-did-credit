@@ -23,9 +23,9 @@ pub use score::{compute_score_pure, MAX_SCORE, MIN_SCORE};
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_groth16::{Groth16, Proof, ProvingKey, VerifyingKey};
-use ark_relations::r1cs::ConstraintSynthesizer;
+use ark_relations::r1cs::SynthesisError;
 use ark_snark::SNARK;
-use ark_std::rand::RngCore;
+use ark_std::rand::{CryptoRng, RngCore};
 
 /// A Groth16 proof over BLS12-381.
 pub type ScoreProof = Proof<Bls12_381>;
@@ -40,12 +40,12 @@ pub type ScoreProof = Proof<Bls12_381>;
 ///
 /// # Returns
 /// A Groth16 proof.
-pub fn generate_proof<R: RngCore>(
+pub fn generate_proof<R: RngCore + CryptoRng>(
     witness: ScoreWitness,
     public_inputs: ScorePublicInputs,
     pk: &ProvingKey<Bls12_381>,
     rng: &mut R,
-) -> Result<ScoreProof, ark_groth16::Error> {
+) -> Result<ScoreProof, SynthesisError> {
     let circuit = ScoreCircuit::new(Some(witness), public_inputs);
     Groth16::<Bls12_381>::prove(pk, circuit, rng)
 }
@@ -63,7 +63,7 @@ pub fn verify_proof(
     proof: &ScoreProof,
     public_inputs: &ScorePublicInputs,
     vk: &VerifyingKey<Bls12_381>,
-) -> Result<bool, ark_groth16::Error> {
+) -> Result<bool, SynthesisError> {
     // Build the public input vector in the same order the circuit declares them:
     //   [threshold, commitment]
     let public_inputs_vec = vec![
@@ -78,9 +78,9 @@ pub fn verify_proof(
 ///
 /// **Note:** This is for development/testing only. Production deployments must
 /// use a trusted setup ceremony (see `docs/zk-proof-design.md` Step 3).
-pub fn generate_test_keys<R: RngCore>(
+pub fn generate_test_keys<R: RngCore + CryptoRng>(
     rng: &mut R,
-) -> Result<(ProvingKey<Bls12_381>, VerifyingKey<Bls12_381>), ark_groth16::Error> {
+) -> Result<(ProvingKey<Bls12_381>, VerifyingKey<Bls12_381>), SynthesisError> {
     let circuit = ScoreCircuit::new(
         None,
         ScorePublicInputs {
@@ -95,7 +95,8 @@ pub fn generate_test_keys<R: RngCore>(
 mod tests {
     use super::*;
     use crate::commitment::PedersenCommitment;
-    use ark_std::test_rng;
+    use ark_std::rand::rngs::StdRng;
+    use ark_std::rand::SeedableRng;
 
     fn make_witness() -> ScoreWitness {
         ScoreWitness {
@@ -125,6 +126,8 @@ mod tests {
             q_volume: 500,
             q_cp: 2,
             q_rv: 200,
+            total_count_is_zero: false,
+            total_count_inv: 0,
             blinding: Fr::from(42u32),
         }
     }
@@ -148,9 +151,13 @@ mod tests {
         }
     }
 
+    fn big_rng() -> StdRng {
+        StdRng::from_seed([0u8; 32])
+    }
+
     #[test]
     fn generate_and_verify_proof() {
-        let mut rng = test_rng();
+        let mut rng = big_rng();
         let (pk, vk) = generate_test_keys(&mut rng).unwrap();
 
         let w = make_witness();
@@ -163,7 +170,7 @@ mod tests {
 
     #[test]
     fn verify_rejects_wrong_threshold() {
-        let mut rng = test_rng();
+        let mut rng = big_rng();
         let (pk, vk) = generate_test_keys(&mut rng).unwrap();
 
         let w = make_witness();
