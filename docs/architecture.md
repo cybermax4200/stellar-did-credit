@@ -2,6 +2,8 @@
 
 stellar-did-credit is a three-contract protocol on Stellar/Soroban that lets any wallet address build a verifiable, portable credit identity. An off-chain TypeScript SDK wraps the contracts for application developers. The contracts are fully independent — each can be upgraded or replaced without breaking the others — and communicate only through explicit cross-contract calls or off-chain coordination via the feeder role.
 
+> **Security Note:** For an overview of protocol security assumptions, trust boundaries, defenses, and known gaps, please see our [Security Model](security-model.md).
+
 ---
 
 ## System diagram
