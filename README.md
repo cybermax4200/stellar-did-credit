@@ -801,6 +801,8 @@ This is a financial protocol. If you find a vulnerability in the smart contracts
 
 Report it privately via [GitHub Security Advisories](https://github.com/cybermax4200/stellar-did-credit/security/advisories/new). We acknowledge all reports within 72 hours. See [SECURITY.md](SECURITY.md) for the full disclosure policy, scope, and response SLA.
 
+For an overview of protocol security assumptions, trust boundaries, defenses, and known gaps, please see our [Security Model](docs/security-model.md).
+
 ---
 
 ## Contributing

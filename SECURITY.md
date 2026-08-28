@@ -1,5 +1,7 @@
 # Security Policy
 
+For an overview of protocol security assumptions, trust boundaries, defenses, and known gaps, please see our [Security Model](docs/security-model.md).
+
 ## Reporting a Vulnerability
 
 **Do not open a public GitHub issue for security vulnerabilities.**
