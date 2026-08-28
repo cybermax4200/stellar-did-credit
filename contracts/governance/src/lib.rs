@@ -1243,6 +1243,11 @@ mod tests {
     /// Verifies the full execution timelock flow:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
+    ///
+    /// Per the double-timelock model in docs/governance.md §2.2, `execute()`
+    /// only queues weights (via `propose_weights`), so the active weights must
+    /// remain unchanged and a `PendingWeights` record must be visible until
+    /// `apply_weights()` runs after the credit-oracle's 17,280-ledger timelock.
     #[test]
     fn test_execution_timelock_delays_after_voting_ends() {
         let env = Env::default();

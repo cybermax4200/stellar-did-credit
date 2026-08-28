@@ -1,19 +1,32 @@
-use soroban_sdk::{Env, Address};
+#[cfg(test)]
+mod tests {
+    use soroban_sdk::{
+        contract, contractimpl, symbol_short,
+        testutils::{Address as _, Events, Ledger as _},
+        Address, BytesN, Env, String, Symbol, TryIntoVal,
+    };
+    use credit_oracle::{
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
+        RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
+    };
+    use governance::{Governance, GovernanceClient, GovernanceError};
+    use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
+    use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
 
-#[test]
-fn test_score_freshness_enforcement() {
-    let env = Env::default();
-    env.mock_all_auths();
+    #[test]
+    fn test_score_freshness_enforcement() {
+        let env = Env::default();
+        env.mock_all_auths();
 
-    let admin = Address::generate(&env);
-    let subject = Address::generate(&env);
-    let issuer = Address::generate(&env);
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
 
         // Initialize identity-oracle and verify Init event
         identity.initialize(&admin);
@@ -1154,6 +1167,16 @@ fn test_score_freshness_enforcement() {
     /// Integration test for governance execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
+    ///
+    /// This follows the double-timelock model from docs/governance.md §2.2:
+    /// `execute()` only queues weights in the credit-oracle via
+    /// `propose_weights()` (starting the fixed 17,280-ledger timelock); the
+    /// weights do NOT become active until `apply_weights()` is called after
+    /// that timelock expires. This test therefore:
+    ///   1. execute() → active weights unchanged (still default)
+    ///   2. advance 17,282 ledgers and bump instance TTL on both contracts
+    ///   3. apply_weights()
+    ///   4. verify active weights now equal the proposal's values.
     #[test]
     fn test_governance_execution_timelock_integration() {
         let env = Env::default();
@@ -2364,3 +2387,4 @@ fn test_score_freshness_enforcement() {
             .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), baseline);
     }
+}
