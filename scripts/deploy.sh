@@ -11,7 +11,9 @@ DEPLOYMENTS_FILE=${DEPLOYMENTS_FILE:-}
 RESUME=false
 FUND=false
 FRIENDBOT_URL=${FRIENDBOT_URL:-https://friendbot.stellar.org}
-CONFIGURE=false
+
+# Admin key for wiring configurations. Defaults to deployer key if not explicitly set.
+ADMIN=${ADMIN:-$SOURCE}
 
 # ---------------------------------------------------------------------------
 # Argument parsing
@@ -35,12 +37,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --help|-h)
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--configure]" >&2
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
       exit 0
       ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund] [--configure]" >&2 (fix(identity-oracle): document and validate RevocationRegistryId initialization asymmetry)
+      echo "Usage: $0 [--resume] [--network <testnet|mainnet>] [--fund]" >&2
       exit 1
       ;;
   esac
@@ -141,12 +143,6 @@ fund_deployer() {
 
 # ---------------------------------------------------------------------------
 # Resume support
-#
-# When --resume is passed and a deployment file already exists, we read the
-# previously recorded contract addresses. Any contract whose address is already
-# present and non-empty is skipped; only missing ones are deployed. This makes
-# an interrupted deployment safely restartable without redeploying contracts
-# that already landed on-chain.
 # ---------------------------------------------------------------------------
 read_deployment_value() {
   local key="$1"
@@ -254,91 +250,48 @@ echo "Building contracts..."
 stellar contract build
 
 # ---------------------------------------------------------------------------
-# Deploy each contract (skip if a valid address is already recorded)
+# Deploy Pipeline
 # ---------------------------------------------------------------------------
+echo "Starting deployment pipeline..."
 
-# identity-oracle
-if [ -n "$IDENTITY_ID" ]; then
-  echo "Skipping identity-oracle (already deployed: $IDENTITY_ID)"
-else
-  echo "Deploying identity-oracle..."
-  IDENTITY_ID=$(stellar contract deploy \
-    --wasm target/wasm32-unknown-unknown/release/identity_oracle.wasm \
-    --source $SOURCE \
-    --network $NETWORK)
-  echo "identity-oracle: $IDENTITY_ID"
-fi
-
-# credit-oracle
+# 1. credit-oracle
 if [ -n "$CREDIT_ID" ]; then
   echo "Skipping credit-oracle (already deployed: $CREDIT_ID)"
 else
   echo "Deploying credit-oracle..."
   CREDIT_ID=$(stellar contract deploy \
     --wasm target/wasm32-unknown-unknown/release/credit_oracle.wasm \
-    --source $SOURCE \
-    --network $NETWORK)
+    --source "$SOURCE" \
+    --network "$NETWORK")
   echo "credit-oracle: $CREDIT_ID"
 fi
 
-# revocation-registry
+# 2. identity-oracle
+if [ -n "$IDENTITY_ID" ]; then
+  echo "Skipping identity-oracle (already deployed: $IDENTITY_ID)"
+else
+  echo "Deploying identity-oracle..."
+  IDENTITY_ID=$(stellar contract deploy \
+    --wasm target/wasm32-unknown-unknown/release/identity_oracle.wasm \
+    --source "$SOURCE" \
+    --network "$NETWORK")
+  echo "identity-oracle: $IDENTITY_ID"
+fi
+
+# 3. revocation-registry
 if [ -n "$REVOCATION_ID" ]; then
   echo "Skipping revocation-registry (already deployed: $REVOCATION_ID)"
 else
   echo "Deploying revocation-registry..."
   REVOCATION_ID=$(stellar contract deploy \
     --wasm target/wasm32-unknown-unknown/release/revocation_registry.wasm \
-    --source $SOURCE \
-    --network $NETWORK)
+    --source "$SOURCE" \
+    --network "$NETWORK")
   echo "revocation-registry: $REVOCATION_ID"
 fi
 
-# ---------------------------------------------------------------------------
-# ---------------------------------------------------------------------------
-# Post-deploy configuration (--configure mode)
-#
-# Runs initialization and cross-contract linking after all contracts
-# are deployed.  Requires ADMIN, IDENTITY_ID, CREDIT_ID and
-# REVOCATION_ID environment variables.
-#
-# Optional:
-#   SET_IDENTITY_ORACLE=true  - Also link identity-oracle to credit-oracle
-# ---------------------------------------------------------------------------
-if $CONFIGURE; then
-  if [ -z "${ADMIN:-}" ] || [ -z "${IDENTITY_ID:-}" ] || [ -z "${CREDIT_ID:-}" ] || [ -z "${REVOCATION_ID:-}" ]; then
-    echo "Error: --configure mode requires ADMIN, IDENTITY_ID, CREDIT_ID, and REVOCATION_ID" >&2
-    exit 1
-  fi
-
-  echo "Initializing identity-oracle..."
-  stellar contract invoke --id "$IDENTITY_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
-
-  echo "Initializing credit-oracle..."
-  stellar contract invoke --id "$CREDIT_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
-
-  echo "Initializing revocation-registry..."
-  stellar contract invoke --id "$REVOCATION_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
-
-  echo "Linking revocation-registry to identity-oracle..."
-  stellar contract invoke --id "$IDENTITY_ID" --source "$SOURCE" --network "$NETWORK" -- set_revocation_registry --registry_id "$REVOCATION_ID"
-
-  if [ "${SET_IDENTITY_ORACLE:-false}" = "true" ]; then
-    echo "Linking identity-oracle to credit-oracle..."
-    stellar contract invoke --id "$CREDIT_ID" --source "$SOURCE" --network "$NETWORK" -- set_identity_oracle --identity_oracle_id "$IDENTITY_ID"
-  fi
-
-  echo "Configuration complete."
-  exit 0
-fi
-
-# Atomic JSON output
-#
-# deployments.<network>.json is written exactly once, only after every contract
-# address has been collected successfully. Writing the file at the very end
-# (never incrementally) means an interrupted deployment can never leave behind
-# a partially written or malformed JSON file.
-# ---------------------------------------------------------------------------
-echo "Saving to $DEPLOYMENTS_FILE..."
+# Atomic JSON output is written *before* wiring to guarantee IDs are saved if a later step fails.
+echo "Saving intermediate deployment state to $DEPLOYMENTS_FILE..."
 cat > "$DEPLOYMENTS_FILE" <<EOF
 {
   "network": "$NETWORK",
@@ -351,5 +304,52 @@ cat > "$DEPLOYMENTS_FILE" <<EOF
 }
 EOF
 
-echo "Done." 
+# ---------------------------------------------------------------------------
+# Contract Initialization & Wiring
+# ---------------------------------------------------------------------------
+echo "Initializing contracts with admin: $ADMIN ..."
+stellar contract invoke --id "$CREDIT_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
+stellar contract invoke --id "$IDENTITY_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
+stellar contract invoke --id "$REVOCATION_ID" --source "$SOURCE" --network "$NETWORK" -- initialize --admin "$ADMIN" 2>/dev/null || true
 
+echo "4. Wiring revocation-registry to identity-oracle..."
+CURRENT_REGISTRY=$(stellar contract invoke --id "$IDENTITY_ID" --network "$NETWORK" -- get_revocation_registry 2>/dev/null || echo "None")
+
+if [[ "$CURRENT_REGISTRY" == *"$REVOCATION_ID"* ]]; then
+  echo " -> Skipped: revocation-registry already set."
+else
+  echo " -> Calling set_revocation_registry..."
+  if ! stellar contract invoke --id "$IDENTITY_ID" --network "$NETWORK" --source "$ADMIN" -- set_revocation_registry --registry_id "$REVOCATION_ID"; then
+    echo "ERROR: Failed to execute set_revocation_registry on identity-oracle." >&2
+    echo "Please verify admin key permissions or run scripts/verify-deployment.sh for diagnostics." >&2
+    exit 1
+  fi
+  echo " -> Success."
+fi
+
+echo "5. Wiring identity-oracle to credit-oracle..."
+CURRENT_ID_ORACLE=$(stellar contract invoke --id "$CREDIT_ID" --network "$NETWORK" -- get_identity_oracle 2>/dev/null || echo "None")
+
+if [[ "$CURRENT_ID_ORACLE" == *"$IDENTITY_ID"* ]]; then
+  echo " -> Skipped: identity-oracle already set."
+else
+  echo " -> Calling set_identity_oracle..."
+  if ! stellar contract invoke --id "$CREDIT_ID" --network "$NETWORK" --source "$ADMIN" -- set_identity_oracle --identity_oracle_id "$IDENTITY_ID"; then
+    echo "ERROR: Failed to execute set_identity_oracle on credit-oracle." >&2
+    echo "Please verify admin key permissions or run scripts/verify-deployment.sh for diagnostics." >&2
+    exit 1
+  fi
+  echo " -> Success."
+fi
+
+echo "6. Running final deployment verification..."
+if [ -x "./scripts/verify-deployment.sh" ]; then
+  if ! ./scripts/verify-deployment.sh; then
+    echo "ERROR: Final wiring verification failed." >&2
+    exit 1
+  fi
+else
+  echo "Warning: ./scripts/verify-deployment.sh not found or not executable. Skipping verification."
+fi
+
+echo "Deployment and wiring completed successfully!"

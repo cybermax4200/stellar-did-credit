@@ -50,6 +50,7 @@ pub enum DataKey {
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
     /// Monotonically increasing counter used to assign proposal IDs.
+    /// IDs start at 1; ID 0 is intentionally unused.
     NextProposalId,
     /// Default quorum (minimum total votes) required for proposal execution.
     QuorumRequired,
@@ -78,6 +79,8 @@ pub enum DataKey {
 /// proposals are being created/voted on.
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
+const FIRST_PROPOSAL_ID: u64 = 1;
 
 // Persistent voter entries must survive long voting periods.
 const PERS_TTL_THRESHOLD: u32 = 120_960;
@@ -160,7 +163,7 @@ impl Governance {
             .set(&DataKey::CreditOracle, &credit_oracle);
         env.storage()
             .instance()
-            .set(&DataKey::NextProposalId, &1u64);
+            .set(&DataKey::NextProposalId, &FIRST_PROPOSAL_ID);
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
@@ -235,7 +238,8 @@ impl Governance {
     /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
     /// ledgers from the current sequence. After voting ends, execution is further
     /// delayed by `execution_delay_ledgers` ledgers to give the community a reaction
-    /// window. Returns the new proposal ID.
+    /// window. Returns the new proposal ID. The first proposal has ID 1 and each
+    /// subsequent proposal increments the ID by 1.
     ///
     /// Auth: `proposer` must sign the transaction.
     pub fn create_proposal(
@@ -254,7 +258,7 @@ impl Governance {
             .storage()
             .instance()
             .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
+            .unwrap_or(FIRST_PROPOSAL_ID);
         let expiry_ledger = env.ledger().sequence() + voting_period_ledgers;
         let quorum_required: i128 = env
             .storage()
@@ -785,7 +789,7 @@ impl Governance {
             .storage()
             .instance()
             .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
+            .unwrap_or(FIRST_PROPOSAL_ID);
 
         if from_id >= next_proposal_id {
             return result;
@@ -1524,6 +1528,8 @@ mod tests {
         // Create two proposals
         let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
         let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        assert_eq!(proposal_id_1, 1);
+        assert_eq!(proposal_id_2, 2);
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);

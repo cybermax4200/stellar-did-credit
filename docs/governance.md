@@ -544,7 +544,21 @@ number of read-only simulations performed by the client.
 
 ### 5.5 Proposal ID and Creation Order
 
-IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. Proposals can be enumerated on-chain using `list_proposals(from_id, limit, include_inactive)`. Off-chain indexers can also track `PropCreat` events.
+Proposal IDs are intentionally **1-based**. `NextProposalId` is initialized to
+`1`, so the first call to `create_proposal` returns ID `1`; each subsequent call
+increments the ID by `1`. ID `0` is unused and should not be queried or used as
+the starting point for off-chain iteration.
+
+The counter is stored in instance storage (not persistent), but the actual
+proposals are stored in persistent storage keyed by ID. Proposals can be
+enumerated on-chain using `list_proposals(from_id, limit, include_inactive)`;
+callers that want all proposals should start with `from_id = 1`. Off-chain
+indexers can also track `PropCreat` events, whose proposal ID is the canonical
+identifier.
+
+This convention is part of the deployed contract interface. Changing the first
+ID to `0` would require coordinating a migration for existing deployments and
+updating every indexer, SDK, and integration that consumes proposal IDs.
 
 ### 5.6 No Proposal Expiry Cleanup
 

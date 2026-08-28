@@ -61,13 +61,13 @@ interface ScoreRecord {
 }
 ```
 
-### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
+### `computeScore(payerKeypair: KeypairLike, subjectAddress: string): Promise<number>`
 
-Computes and persists a subject's credit score on-chain. This method submits a transaction to call `compute_score`, waits for confirmation, and then fetches the updated score.
+Computes and persists a subject's credit score on-chain, then returns the numeric score (300–850). This method submits a transaction to call `compute_score`, waits for confirmation, and then fetches the updated score.
 
 **Important: Cooldown Interaction**
 The `compute_score` contract method is protected by a configurable cooldown period (`ComputeCooldownLedgers`) to prevent spam and reduce computational load.
-- If you call `computeScore` while the cooldown is active, the contract will reject the transaction.
+- If you call `computeScore` while the cooldown is active, the method throws `SDKError` with code `COOLDOWN_ACTIVE`.
 - **Fresh Deployments**: Depending on the contract's configuration, the cooldown might apply immediately upon initialization. If your first `computeScore` call fails right after a fresh deployment, you may need to wait for the initial cooldown period (e.g., 1 ledger) to pass.
 
 #### Recommended Cooldown Settings
@@ -98,7 +98,7 @@ confirmation polling. Invalid hashes throw `SDKError` with code
 | Method | Status | Description |
 |--------|--------|-------------|
 | `getScore` | ✅ Implemented | Read persisted score record from credit-oracle |
-| `computeScore` | ✅ Implemented | Compute and persist subject credit score on-chain |
+| `computeScore` | ✅ Implemented | Compute subject credit score, returns `number` |
 | `anchorDID` | ✅ Implemented | Anchor a DID document IPFS CID on-chain |
 | `issueVC` | ✅ Implemented | Anchor a verifiable credential for a subject |
 | `revokeVC` | ✅ Implemented | Revoke a verifiable credential by hash |
@@ -141,6 +141,9 @@ credit-oracle; it does not activate them. Wait approximately 24 hours, or
 until the credit-oracle pending record's `effective_ledger`, before calling
 `applyWeights`.
 
+Proposal IDs are 1-based. The first proposal has ID `1`; ID `0` is unused.
+Start `listProposals` with `1n` when scanning from the beginning.
+
 `GovernanceProposal` mirrors the Rust contract struct. Its `id`, vote tallies,
 and `quorumRequired` fields are `bigint`, preserving Soroban `u64` and `i128`
 values without JavaScript precision loss.
@@ -173,14 +176,14 @@ try {
 
 ### Error types and handling
 
-| Error Type | Cause | Message Pattern | Recommended Action |
-|-----------|-------|-----------------|-------------------|
-| `SimulationError` | Contract call failed | `Simulation failed: ...` | Validate subject address format; check contract state |
-| `SimulationError` | Missing return value | `No return value in simulation result` | Verify RPC endpoint is compatible; check contract deployment |
-| `NetworkError` | RPC endpoint unreachable | `Failed to connect to RPC` | Retry with backoff; fallback to alternate RPC endpoint |
-| `NetworkError` | Request timeout | `Request timeout` | Increase timeout; check network connectivity |
-| Generic `Error` | Invalid subject address | `Invalid Stellar address` | Verify address starts with 'G' and is 56 chars |
-| Generic `Error` | Parsing failures | `Failed to parse response` | Log full response; file an issue if RPC format changed |
+| Error Type | Code | Cause | Recommended Action |
+|-----------|------|-------|-------------------|
+| `SDKError` | `COOLDOWN_ACTIVE` | Cooldown period is active | Wait for cooldown ledgers to pass before retrying |
+| `SDKError` | `TRANSACTION_FAILED` | Contract call or submission failed | Validate inputs; check contract state |
+| `SDKError` | `TRANSACTION_TIMEOUT` | Confirmation timed out | Increase `timeoutSeconds`; check network connectivity |
+| `SDKError` | `INVALID_VC_HASH` | VC hash is not exactly 32 bytes | Ensure `vcHash.length === 32` |
+| `SDKError` | `NOT_REGISTERED_ISSUER` | Issuer not registered | Register the issuer via governance |
+| `ScoreNotComputedError` | — | No score exists for address | Call `computeScore` first |
 
 ### Common error scenarios
 

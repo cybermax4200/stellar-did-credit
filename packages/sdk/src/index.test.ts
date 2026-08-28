@@ -3,6 +3,12 @@ import {
   GovernanceClient,
   SDKError,
   ScoreNotComputedError,
+  ContractError,
+  IdentityOracleError,
+  CreditOracleError,
+  RevocationRegistryError,
+  GovernanceError,
+  parseContractErrorCode,
   MIN_SCORE,
   MAX_SCORE,
   ScoreRecord,
@@ -530,9 +536,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getDIDDocument(subjectAddress)).rejects.toThrow(
-        "Simulation failed: contract error",
-      );
+      await expect(sdk.getDIDDocument(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "contract error",
+      });
     });
   });
 
@@ -595,8 +604,10 @@ describe("StellarDIDCreditSDK", () => {
       await expect(
         sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
       ).rejects.toMatchObject({
-        name: "SDKError",
-        code: "NOT_REGISTERED_ISSUER",
+        name: "RevocationRegistryError",
+        code: 0,
+        contractName: "revocation-registry",
+        message: "IssuerMismatch",
       });
       expect(mockSendTransaction).not.toHaveBeenCalled();
     });
@@ -656,9 +667,11 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.revokeVC(issuerKeypair as never, Buffer.alloc(32, 4)),
-      ).rejects.toThrow(
-        "revokeVC simulation failed; no revocation state was changed: Error(Contract, #4)",
-      );
+      ).rejects.toMatchObject({
+        name: "RevocationRegistryError",
+        code: 4,
+        contractName: "revocation-registry",
+      });
       expect(mockSendTransaction).not.toHaveBeenCalled();
     });
 
@@ -748,7 +761,12 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.anchorDID(subjectKeypair as never, "QmExampleCid"),
-      ).rejects.toThrow("Simulation failed: anchor_did rejected");
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "anchor_did rejected",
+      });
       expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
       expect(mockSendTransaction).not.toHaveBeenCalled();
     });
@@ -918,7 +936,12 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
-      ).rejects.toThrow("Simulation failed: anchor_vc rejected");
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "anchor_vc rejected",
+      });
       expect(mockGetAccount).toHaveBeenCalledWith(issuerKeypair.publicKey());
       expect(mockSendTransaction).not.toHaveBeenCalled();
     });
@@ -1103,12 +1126,17 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.verifyVC(subjectAddress, Buffer.alloc(32)),
-      ).rejects.toThrow("Simulation failed: verify error");
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "verify error",
+      });
     });
   });
 
   describe("computeScore", () => {
-    it("returns an updated ScoreRecord after successful compute + confirmation", async () => {
+    it("returns the computed score number after successful compute + confirmation", async () => {
       mockGetAccount.mockResolvedValue({ sequenceNumber: () => "10" });
       mockSendTransaction.mockResolvedValue({
         status: "PENDING",
@@ -1121,7 +1149,7 @@ describe("StellarDIDCreditSDK", () => {
           result: {
             retval: {
               value: {
-                score: 558,
+                score: 612,
                 last_updated: 1_710_000_000,
                 vc_count: 2,
                 repayment_rate: 8500,
@@ -1140,14 +1168,8 @@ describe("StellarDIDCreditSDK", () => {
         subjectAddress,
       );
 
-      expect(result).toMatchObject({
-        score: 558,
-        lastUpdated: 1_710_000_000,
-        vcCount: 2,
-        repaymentRate: 8500,
-        txVolume30d: 2_000_000n,
-        stale: false,
-      });
+      expect(result).toBe(612);
+      expect(typeof result).toBe("number");
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
       expect(mockGetTransaction).toHaveBeenCalledWith("tx-compute-hash");
       expect(mockLastContractCall?.method).toBe("get_score");
@@ -1191,14 +1213,7 @@ describe("StellarDIDCreditSDK", () => {
       await Promise.resolve();
       await jest.advanceTimersByTimeAsync(5000);
 
-      await expect(computePromise).resolves.toMatchObject({
-        score: 612,
-        lastUpdated: 1_700_000_000,
-        vcCount: 3,
-        repaymentRate: 8000,
-        txVolume30d: 1_000_000n,
-        stale: false,
-      });
+      await expect(computePromise).resolves.toBe(612);
       expect(mockGetTransaction).toHaveBeenCalledTimes(2);
       expect(mockLastContractCall?.method).toBe("get_score");
     });
@@ -1260,6 +1275,53 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockGetTransaction).toHaveBeenCalledTimes(1);
     });
 
+    it("throws SDKError with COOLDOWN_ACTIVE when cooldown is active on simulation", async () => {
+      mockGetAccount.mockResolvedValue({ sequenceNumber: () => "123" });
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #7): ComputeCooldownActive",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.computeScore(
+          { publicKey: () => subjectAddress } as unknown as Keypair,
+          subjectAddress,
+        ),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "COOLDOWN_ACTIVE",
+        message: expect.stringContaining("Cooldown period is active"),
+      });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("throws SDKError with COOLDOWN_ACTIVE when cooldown error in submission", async () => {
+      mockGetAccount.mockResolvedValue({ sequenceNumber: () => "123" });
+      mockSendTransaction.mockResolvedValue({
+        status: "PENDING",
+        hash: "tx-cooldown-hash",
+      });
+      mockGetTransaction.mockResolvedValue({
+        status: "FAILED",
+        errorResult: "Error(Contract, #7): ComputeCooldownActive",
+      });
+      mockSimulateTransaction.mockResolvedValue({ result: { retval: { value: null } } });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.computeScore(
+          { publicKey: () => subjectAddress } as unknown as Keypair,
+          subjectAddress,
+        ),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "COOLDOWN_ACTIVE",
+        message: expect.stringContaining("Cooldown period is active"),
+      });
+    });
+
     it("throws when computeScore simulation returns an explicit error", async () => {
       mockGetAccount.mockResolvedValue({ sequenceNumber: () => "123" });
       mockSimulateTransaction.mockResolvedValue({ error: "compute_score rejected" });
@@ -1271,7 +1333,14 @@ describe("StellarDIDCreditSDK", () => {
           { publicKey: () => subjectAddress } as unknown as Keypair,
           subjectAddress,
         ),
-      ).rejects.toThrow("Simulation failed: compute_score rejected");
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "TRANSACTION_FAILED",
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "compute_score rejected",
+      });
       expect(mockSendTransaction).not.toHaveBeenCalled();
     });
 
@@ -1312,7 +1381,7 @@ describe("StellarDIDCreditSDK", () => {
 
       await jest.advanceTimersByTimeAsync(1000);
 
-      await expect(promise).resolves.toMatchObject({ score: 640 });
+      await expect(promise).resolves.toBe(640);
       expect(mockSendTransaction).toHaveBeenCalledTimes(2);
       expect(mockGetTransaction).toHaveBeenCalledWith("retried-compute-hash");
     });
@@ -1353,9 +1422,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getVCCount(subjectAddress)).rejects.toThrow(
-        "Simulation failed: rpc error",
-      );
+      await expect(sdk.getVCCount(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1416,9 +1488,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getVCs(subjectAddress)).rejects.toThrow(
-        "Simulation failed: rpc error",
-      );
+      await expect(sdk.getVCs(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1467,7 +1542,12 @@ describe("StellarDIDCreditSDK", () => {
 
       await expect(
         sdk.getCredentialType(subjectAddress, Buffer.alloc(32)),
-      ).rejects.toThrow("Simulation failed: rpc error");
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1506,9 +1586,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.isVerified(subjectAddress)).rejects.toThrow(
-        "Simulation failed: rpc error",
-      );
+      await expect(sdk.isVerified(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1542,9 +1625,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getWeights()).rejects.toThrow(
-        "Simulation failed: rpc error",
-      );
+      await expect(sdk.getWeights()).rejects.toMatchObject({
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1582,9 +1668,12 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
-        "Simulation failed: rpc error",
-      );
+      await expect(sdk.getRegisteredIssuers()).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
     });
   });
 
@@ -1650,9 +1739,12 @@ describe("StellarDIDCreditSDK", () => {
         error: "some other error",
       });
 
-      await expect(sdk.getScore(subjectAddress)).rejects.toThrow(
-        "Simulation failed: some other error",
-      );
+      await expect(sdk.getScore(subjectAddress)).rejects.toMatchObject({
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "some other error",
+      });
     });
 
     it("exports ScoreNotComputedError class", () => {
@@ -1961,5 +2053,103 @@ describe("listProposals", () => {
       cancelled: false,
       quorumRequired: 100n,
     });
+  });
+});
+
+describe("ContractError hierarchy", () => {
+  it("exports ContractError base class with code and contractName", () => {
+    const error = new ContractError(5, "test-contract", "something failed");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error.name).toBe("ContractError");
+    expect(error.code).toBe(5);
+    expect(error.contractName).toBe("test-contract");
+    expect(error.message).toBe("something failed");
+  });
+
+  it("exports IdentityOracleError with code and contractName", () => {
+    const error = new IdentityOracleError(2, "NotAuthorized (code 2)");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).toBeInstanceOf(IdentityOracleError);
+    expect(error.name).toBe("IdentityOracleError");
+    expect(error.code).toBe(2);
+    expect(error.contractName).toBe("identity-oracle");
+  });
+
+  it("exports CreditOracleError with code and contractName", () => {
+    const error = new CreditOracleError(7, "ComputeCooldownActive (code 7)");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).toBeInstanceOf(CreditOracleError);
+    expect(error.name).toBe("CreditOracleError");
+    expect(error.code).toBe(7);
+    expect(error.contractName).toBe("credit-oracle");
+  });
+
+  it("exports RevocationRegistryError with code and contractName", () => {
+    const error = new RevocationRegistryError(3, "IssuerMismatch (code 3)");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).toBeInstanceOf(RevocationRegistryError);
+    expect(error.name).toBe("RevocationRegistryError");
+    expect(error.code).toBe(3);
+    expect(error.contractName).toBe("revocation-registry");
+  });
+
+  it("exports GovernanceError with code and contractName", () => {
+    const error = new GovernanceError(10, "QuorumNotMet (code 10)");
+    expect(error).toBeInstanceOf(Error);
+    expect(error).toBeInstanceOf(ContractError);
+    expect(error).toBeInstanceOf(GovernanceError);
+    expect(error.name).toBe("GovernanceError");
+    expect(error.code).toBe(10);
+    expect(error.contractName).toBe("governance");
+  });
+
+  it("mocks NotAuthorized result and produces IdentityOracleError with code 2", async () => {
+    mockSimulateTransaction.mockResolvedValue({
+      error: "Error(Contract, #2)",
+    });
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+
+    await expect(sdk.isVerified(subjectAddress)).rejects.toMatchObject({
+      name: "IdentityOracleError",
+      code: 2,
+      contractName: "identity-oracle",
+    });
+  });
+
+  it("mocks NotAuthorized result on credit-oracle and produces CreditOracleError with code 2", async () => {
+    mockSimulateTransaction.mockResolvedValue({
+      error: "Error(Contract, #2)",
+    });
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+
+    await expect(sdk.getWeights()).rejects.toMatchObject({
+      name: "CreditOracleError",
+      code: 2,
+      contractName: "credit-oracle",
+    });
+  });
+});
+
+describe("parseContractErrorCode", () => {
+  it("extracts numeric code from Error(Contract, #N) pattern", () => {
+    expect(parseContractErrorCode("Error(Contract, #4)")).toBe(4);
+    expect(parseContractErrorCode("Error(Contract, #12)")).toBe(12);
+    expect(parseContractErrorCode("something Error(Contract, #1) else")).toBe(1);
+  });
+
+  it("returns null for non-matching strings", () => {
+    expect(parseContractErrorCode("IssuerMismatch")).toBeNull();
+    expect(parseContractErrorCode("contract paused")).toBeNull();
+    expect(parseContractErrorCode("some random error")).toBeNull();
+    expect(parseContractErrorCode("")).toBeNull();
+  });
+
+  it("handles case-insensitive patterns", () => {
+    expect(parseContractErrorCode("error(contract, #5)")).toBe(5);
+    expect(parseContractErrorCode("ERROR(CONTRACT, #3)")).toBe(3);
   });
 });

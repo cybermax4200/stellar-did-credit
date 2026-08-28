@@ -4,8 +4,10 @@ members = [
   "contracts/credit-oracle",
   "contracts/credit-oracle-types",
   "contracts/revocation-registry",
+  "contracts/score-range-verifier",
   "contracts/tests",
   "contracts/governance",
+  "zk/circuit",
 ]
 resolver = "2"
 

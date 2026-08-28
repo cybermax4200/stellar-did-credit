@@ -14,6 +14,38 @@ For details on how to index events and implement event-driven syncing, please re
 
 ## Usage
 
+See the package source code for configuration variables.
+
+## Dead-Letter Queue
+
+The feeder tracks subjects that fail consecutively across polling cycles. When a subject fails `MAX_CONSECUTIVE_FAILURES` (default: 5) consecutive cycles, it enters a **dead-letter state** and is logged at ERROR level with a distinct `[dead-letter]` prefix.
+
+### Behavior
+
+- **Sub-threshold failures**: Subjects that have failed fewer than `MAX_CONSECUTIVE_FAILURES` cycles are logged at WARN level with a progress indicator (e.g. `[dead-letter] subject failure 3/5 — will retry next cycle`).
+- **At/above threshold**: Subjects at or above the threshold are logged at ERROR: `[dead-letter] subject has failed N consecutive cycles (threshold: 5)`.
+- **Recovery**: When a dead-letter subject feeds successfully, it is removed from the dead-letter set and a recovery message is logged.
+- **No permanent drops**: Dead-letter subjects are **still retried** each cycle — they are never silently skipped.
+
+### Configuration
+
+| Environment Variable       | Default | Description                                              |
+|---------------------------|---------|----------------------------------------------------------|
+| `MAX_CONSECUTIVE_FAILURES` | `5`     | Number of consecutive failures before entering dead-letter state |
+
+### Programmatic API
+
+```typescript
+import { Feeder } from "@stellar-did-credit/feeder";
+
+const feeder = new Feeder(config, keypair);
+
+// Get the current set of dead-letter subjects
+const deadLetters: string[] = feeder.getDeadLetterSubjects();
+console.log("Subjects in dead-letter:", deadLetters);
+```
+
+The dead-letter state is tracked in-memory and resets when the feeder process restarts.
 ```bash
 FEEDER_SECRET=YOUR_STELLAR_SECRET_KEY \
 SUBJECTS=G1...,G2... \
@@ -54,6 +86,43 @@ and fill in the values, or export them before running `npm start`.
 | `RETRY_BASE_DELAY_MS`   | `1000`     | Base delay for exponential backoff, in milliseconds.                           |
 | `EVENT_DRIVEN`          | `false`    | Enables event-driven mode. Subscribes to `VCAnch` and `Revoked` events to trigger immediate feed cycles. |
 | `EVENT_POLL_INTERVAL_MS`| `30000`    | How often to poll for events, in milliseconds. Used when `EVENT_DRIVEN=true`.  |
+| `FEEDER_ALLOW_PARTIAL_STATS` | `true` | Whether stats from an incomplete Horizon pagination pass are written on-chain. Set to `false` to suppress `update_tx_stats` for partial fetches. Any value other than `false` means `true`. |
+
+### Partial Horizon results
+
+A subject's 30-day history can span many Horizon pages. If a page request fails
+partway through, the feeder used to discard everything it had already read and
+restart from page 1 on the next cycle — so a consistently flaky Horizon could
+starve a subject indefinitely.
+
+The feeder now retries a failed page fetch up to `MAX_RETRIES` times with
+exponential backoff. If it still fails, pagination stops and the records
+gathered so far are kept, with the result tagged `partial: true`:
+
+```
+[feeder] Horizon pagination failed for G... after 3 retries; committing partial stats: 503 Service Unavailable
+[feeder] syncing G...
+  vc_count          = 2
+  volume_30d        = 415000000 stroops (41.5 XLM)
+  tx_count_30d      = 7
+  avg_counterparties = 1
+  partial           = true
+```
+
+The `partial` line is logged on every sync as a plain boolean, so log-based
+monitoring can alert on truncated fetches.
+
+Because partial stats understate real activity, they produce a conservative
+(lower) score. Two strategies are available:
+
+| `FEEDER_ALLOW_PARTIAL_STATS` | Behavior on a partial fetch                                                       |
+| ---------------------------- | ---------------------------------------------------------------------------------- |
+| `true` (default)             | `update_tx_stats` is submitted. Fresh but understated beats a full cycle discarded. |
+| `false`                      | `update_tx_stats` is skipped and the previous complete on-chain stats stand. The subject is re-fetched next cycle. |
+
+`set_vc_count` is unaffected either way — the VC count comes from the
+identity-oracle, not from Horizon. Non-transient errors (malformed responses,
+404s) are still raised rather than silently truncating the window.
 
 ### Optional contract integrations
 
@@ -61,6 +130,30 @@ and fill in the values, or export them before running `npm start`.
 | ------------------------- | --------- | ---------------------------------------------------------------------------------------------------------- |
 | `REVOCATION_REGISTRY_ID`  | unset     | Soroban contract address (C...) of the revocation-registry. Needed for event-driven mode so the feeder can watch for `Revoked` events and re-sync affected subjects. Validated as a contract address when set. |
 | `GOVERNANCE_ID`           | unset     | Soroban contract address (C...) of the governance contract. Reserved for future governance-aware features — the feeder does not call governance today. Validated as a contract address when set. |
+
+### Health monitoring
+
+When `HEALTH_PORT` is set, the feeder starts a lightweight HTTP server (using Node's built-in `http` module — no extra dependencies) alongside the polling loop. This is intended for Kubernetes, ECS, or other orchestrator liveness/readiness probes.
+
+| Variable      | Default | Description |
+| ------------- | ------- | ----------- |
+| `HEALTH_PORT` | unset   | TCP port for the health HTTP server. When unset, no health server is started. |
+
+**Endpoints** (available only when `HEALTH_PORT` is set):
+
+| Endpoint       | Status | Description |
+| -------------- | ------ | ----------- |
+| `GET /health`  | 200    | Always returns liveness info: `{"status":"ok","lastCycleAt":"<iso or null>","successCount":<n>,"failureCount":<n>}`. Counts are cumulative per-subject sync outcomes across all completed cycles. |
+| `GET /ready`   | 200    | Last feed cycle completed with zero failures. |
+| `GET /ready`   | 503    | Feeder has never completed a cycle, or the last cycle had at least one failure. |
+
+Example:
+
+```bash
+HEALTH_PORT=8080 FEEDER_SECRET=S... SUBJECTS=G... \
+CREDIT_ORACLE_ID=C... IDENTITY_ORACLE_ID=C... \
+npm start
+```
 
 > **Note:** `REVOCATION_REGISTRY_ID` and `GOVERNANCE_ID` are optional. The feeder
 > starts normally without them and logs which optional integrations are

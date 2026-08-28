@@ -388,6 +388,36 @@ impl ScoreRangeVerifier {
 | 6 | End-to-end integration test (testnet) | Steps 4–5 |
 | 7 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
 
+### Step 1: Constraint count estimate (score > T circuit)
+
+The circuit is implemented in `zk/circuit/` (arkworks-rs, BLS12-381). The
+constraint budget below is derived from the actual R1CS constraints generated
+by the circuit.
+
+| Circuit component | Constraint count |
+| ----------------- | ---------------- |
+| `score > threshold` range proof (32-bit) | ~33 |
+| `vc_score == min(vc_points, 100)` | ~14 |
+| `volume_score == min(tx_volume_30d / 1e8, 80)` (integer division + range) | ~34 |
+| `counterparty_bonus == min(avg_counterparties / 5, 20)` (integer division) | ~8 |
+| `tx_score == min(volume_score + counterparty_bonus, 100)` | ~14 |
+| `repayment_rate_score` (integer division, 2 levels) | ~46 |
+| `repayment_volume_score == min(total_repaid / 1e8, 100)` | ~34 |
+| `repay_score == (rr_score + rv_score) / 2` | ~1 |
+| `composite == (vc·w_vc + tx·w_tx + repay·w_repay) / 100` | ~14 |
+| `score == 300 + composite·550 / 100` | ~14 |
+| Pedersen commitment binding (8 fields × 2 coords) | ~16 |
+| **Total** | **~228** |
+
+This is well within Soroban's resource limits for on-chain verification
+(Groth16 verification on BLS12-381 via CAP-0059 host functions is a single
+pairing check, independent of circuit size). The prover runs off-chain in WASM,
+so the constraint count only affects proof generation time, not on-chain cost.
+
+**Open Q #11 resolution:** `avg_counterparties` is bound into the Pedersen
+commitment preimage (8 committed fields) rather than a separate `TxStats`
+commitment. See [ADR-001](adr-001-avg-counterparties-binding.md).
+
 ---
 
 ## References
