@@ -1246,7 +1246,7 @@ mod tests {
         );
 
         // Verify weights are NOT changed immediately (timelock in effect)
-        let weights_after_execute = credit.get_scoring_weights();
+        let weights_after_execute = credit.get_scoring_weights().unwrap();
         assert_eq!(weights_after_execute.vc_weight, 40); // Still default
 
         // Advance ledger past timelock (~24 hours = 17,280 ledgers)
@@ -1265,7 +1265,7 @@ mod tests {
         gov.apply_weights();
 
         // Verify weights were applied to the credit oracle
-        let weights = credit.get_scoring_weights();
+        let weights = credit.get_scoring_weights().unwrap();
         assert_eq!(weights.vc_weight, 50);
         assert_eq!(weights.tx_weight, 20);
         assert_eq!(weights.repayment_weight, 30);
@@ -1353,7 +1353,7 @@ mod tests {
         credit.apply_weights();
 
         // Verify the credit oracle weights were updated
-        let active_weights = credit.get_scoring_weights();
+        let active_weights = credit.get_scoring_weights().unwrap();
         assert_eq!(active_weights.vc_weight, 45);
         assert_eq!(active_weights.tx_weight, 25);
         assert_eq!(active_weights.repayment_weight, 30);
@@ -2340,7 +2340,7 @@ mod tests {
             identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[i; 32]));
         }
 
-        let weights = credit.get_scoring_weights();
+        let weights = credit.get_scoring_weights().unwrap();
         let expected = |vc_points: u32| -> u32 {
             credit_oracle::compute_score_pure(
                 vc_points,

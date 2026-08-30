@@ -732,7 +732,11 @@ impl CreditOracle {
     ///
     /// **Authentication:** only the current admin may call this function.
     pub fn migrate(env: Env, subjects: soroban_sdk::Vec<Address>) -> Result<(), CreditOracleError> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotInitialized)?;
         admin.require_auth();
 
         for i in 0..subjects.len() {
@@ -1105,7 +1109,11 @@ impl CreditOracle {
         }
         let vc_points = vc_points.min(100);
 
-        let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
+        let weights: ScoringWeights = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(CreditOracleError::NotInitialized)?;
 
         let score = compute_score_pure(
             vc_points,
@@ -1327,8 +1335,11 @@ impl CreditOracle {
     }
 
     /// Get current scoring weights
-    pub fn get_scoring_weights(env: Env) -> ScoringWeights {
-        env.storage().instance().get(&DataKey::Config).unwrap()
+    pub fn get_scoring_weights(env: Env) -> Result<ScoringWeights, CreditOracleError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(CreditOracleError::NotInitialized)
     }
 
     /// Set the identity-oracle contract ID for cross-contract VC count lookups.
@@ -1732,7 +1743,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let w = client.get_scoring_weights();
+        let w = client.get_scoring_weights().unwrap();
         assert_eq!(w.vc_weight + w.tx_weight + w.repayment_weight, 100);
     }
 
@@ -2132,7 +2143,7 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let original_weights = client.get_scoring_weights();
+        let original_weights = client.get_scoring_weights().unwrap();
         assert_eq!(original_weights.vc_weight, 40);
 
         client.propose_weights(&ScoringWeights {
@@ -2226,7 +2237,7 @@ mod tests {
             .set_sequence_number(env.ledger().sequence() + jump);
         client.apply_weights();
 
-        let w = client.get_scoring_weights();
+        let w = client.get_scoring_weights().unwrap();
         assert_eq!(w.vc_weight, 50);
         assert_eq!(w.tx_weight, 25);
         assert_eq!(w.repayment_weight, 25);
@@ -2265,6 +2276,26 @@ mod tests {
             },
         );
         assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
+    }
+
+    #[test]
+    fn test_compute_score_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Only set admin, not config (simulating a botched upgrade)
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+
+        // compute_score should return NotInitialized error
+        let result = client.try_compute_score(&subject);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotInitialized)));
     }
 
     #[test]

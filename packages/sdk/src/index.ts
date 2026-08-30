@@ -167,6 +167,10 @@ const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
   10: "InvalidInputKey",
   11: "InvalidIdentityOracle",
   12: "ContractPaused",
+  13: "InvalidRecencyConfig",
+  14: "TimelockNotExpired",
+  15: "NoPendingWeights",
+  16: "NotInitialized",
 };
 
 const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {
@@ -834,9 +838,6 @@ export class StellarDIDCreditSDK {
         "TRANSACTION_FAILED",
         `Simulation failed: ${sim.error}`,
       );
-        throw new CreditOracleError(7, "Cooldown period is active. Please wait for the cooldown ledgers to pass before recomputing the score.");
-      }
-      throwContractError(sim.error, "credit-oracle");
     }
 
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {

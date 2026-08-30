@@ -130,13 +130,23 @@ Example:
 
 **Bare `panic!()` is forbidden in contract source files** (`contracts/*/src/*.rs`) outside of `#[test]` blocks. CI enforces this via the `contract-lint` job.
 
-| Allowed | Forbidden |
-| --- | --- |
-| `return Err(ErrorVariant)` | `panic!("error message")` |
-| `soroban_sdk::panic_with_error!(ErrorVariant)` | `todo!()`, `unimplemented!()`, `unreachable!()` |
-| `expect("descriptive message")` in non-contract code | `unwrap()` in contract logic |
+Allowed:
+- `return Err(ErrorVariant)`
+- `soroban_sdk::panic_with_error!(ErrorVariant)`
+- `expect("descriptive message")` in non-contract code
+- `env.storage().instance().get(&key).ok_or(ErrorVariant)?`
+- `env.storage().instance().get(&key).unwrap_or(default)`
+
+Forbidden:
+- `panic!("error message")`
+- `todo!()`, `unimplemented!()`, `unreachable!()`
+- `unwrap()` in contract logic
+- `env.storage().instance().get(&key).unwrap()`
+- `env.storage().persistent().get(&key).unwrap()`
 
 `panic_with_error!` is the Soroban-idiomatic way to abort execution with a typed contract error. Use it when a function signature cannot return `Result` (for example, legacy `initialize` functions that return `()`). Prefer returning `Result<(), ErrorType>` when possible.
+
+Use `.ok_or(ErrorType)?` to propagate a typed error when storage reads fail. Use `.unwrap_or(default)` only when a fallback value is well-defined and semantically correct (for example, optional configuration that was added in a later version).
 
 Test code (`#[cfg(test)]`, `#[test]`) is exempt from this rule.
 

@@ -53,6 +53,8 @@ pub enum CreditOracleError {
     TimelockNotExpired = 14,
     /// No pending weights exist to apply.
     NoPendingWeights = 15,
+    /// Contract has not been initialized (config missing).
+    NotInitialized = 16,
 }
 
 /// Weights used in credit score calculation.
@@ -147,11 +149,15 @@ impl CreditOracleClient {
     }
 
     /// Get the current scoring weights from the credit-oracle.
-    pub fn get_scoring_weights(env: &Env, contract_id: &Address) -> ScoringWeights {
-        env.invoke_contract(
+    pub fn get_scoring_weights(env: &Env, contract_id: &Address) -> Result<ScoringWeights, CreditOracleError> {
+        match env.try_invoke_contract::<ScoringWeights, CreditOracleError>(
             contract_id,
             &Symbol::new(env, "get_scoring_weights"),
             soroban_sdk::vec![env],
-        )
+        ) {
+            Ok(Ok(weights)) => Ok(weights),
+            Err(Ok(e)) => Err(e),
+            _ => Err(CreditOracleError::NotInitialized),
+        }
     }
 }
