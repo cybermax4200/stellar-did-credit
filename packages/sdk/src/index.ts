@@ -288,6 +288,21 @@ export class SDKError extends Error {
   declare readonly resultXdr?: string;
 }
 
+export interface BatchChunkResult {
+  chunkIndex: number;
+  vcHashes: Buffer[];
+  status: "fulfilled" | "rejected";
+  transactionHash?: string;
+  error?: SDKError;
+}
+
+export interface BatchResult {
+  success: boolean;
+  failedChunks: number;
+  transactionHashes: string[];
+  chunks: BatchChunkResult[];
+}
+
 /**
  * Network configurations for Stellar networks.
  */
@@ -1125,6 +1140,116 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Revoke multiple verifiable credentials in one or more batched transactions.
+   *
+   * The registry batch limit is read from get_batch_limit when available and
+   * falls back to 50 if that read fails or the method is not implemented.
+   * Chunks are submitted sequentially and confirmed before the next chunk
+   * starts. Partial failures are reported in the returned BatchResult.
+   *
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param vcHashes - SHA-256 hashes of verifiable credentials (each exactly 32 bytes)
+   * @returns BatchResult with per-chunk status and transaction hashes
+   */
+  async batchRevokeVC(
+    issuerKeypair: KeypairLike,
+    vcHashes: Buffer[],
+  ): Promise<BatchResult> {
+    if (!this.config.revocationRegistryId.trim()) {
+      throw new SDKError(
+        "MISSING_REVOCATION_REGISTRY",
+        "revocationRegistryId is required to revoke VCs",
+      );
+    }
+
+    for (const vcHash of vcHashes) {
+      if (vcHash.length !== 32) {
+        throw new SDKError(
+          "INVALID_VC_HASH",
+          "Each vcHash must be exactly 32 bytes",
+        );
+      }
+    }
+
+    if (vcHashes.length === 0) {
+      return {
+        success: true,
+        failedChunks: 0,
+        transactionHashes: [],
+        chunks: [],
+      };
+    }
+
+    let maxBatchSize = 50;
+    try {
+      const limitContract = new Contract(this.config.revocationRegistryId);
+      const limitSource = new Account(this.config.simAccount, "0");
+      const limitTx = new TransactionBuilder(limitSource, {
+        fee: this.config.baseFee ?? BASE_FEE,
+        networkPassphrase: this.config.networkPassphrase,
+      })
+        .addOperation(limitContract.call("get_batch_limit"))
+        .setTimeout(this.config.timeoutSeconds ?? 30)
+        .build();
+      const limitSim = await this.server.simulateTransaction(limitTx);
+      if (
+        SorobanRpc.Api.isSimulationSuccess(limitSim) &&
+        limitSim.result?.retval
+      ) {
+        const parsedLimit = Number(scValToNative(limitSim.result.retval));
+        if (Number.isInteger(parsedLimit) && parsedLimit > 0) {
+          maxBatchSize = parsedLimit;
+        }
+      }
+    } catch {
+      // get_batch_limit is optional; fall back to 50.
+    }
+
+    const result: BatchResult = {
+      success: true,
+      failedChunks: 0,
+      transactionHashes: [],
+      chunks: [],
+    };
+
+    let chunkIndex = 0;
+    for (let i = 0; i < vcHashes.length; i += maxBatchSize) {
+      const chunk = vcHashes.slice(i, i + maxBatchSize);
+      try {
+        const transactionHash = await this.submitBatchRevokeChunk(
+          issuerKeypair,
+          chunk,
+        );
+        result.transactionHashes.push(transactionHash);
+        result.chunks.push({
+          chunkIndex,
+          vcHashes: chunk,
+          status: "fulfilled",
+          transactionHash,
+        });
+      } catch (error) {
+        result.success = false;
+        result.failedChunks += 1;
+        result.chunks.push({
+          chunkIndex,
+          vcHashes: chunk,
+          status: "rejected",
+          error:
+            error instanceof SDKError
+              ? error
+              : createRevokeError(
+                  `batchRevokeVC chunk failed: ${getErrorMessage(error)}`,
+                  error,
+                ),
+        });
+      }
+      chunkIndex += 1;
+    }
+
+    return result;
+  }
+
+  /**
    * Check if a subject address has at least one non-revoked verifiable credential.
    *
    * Uses a read-only simulation against the identity-oracle contract.
@@ -1566,6 +1691,80 @@ export class StellarDIDCreditSDK {
         callback(String(issuer), toBuffer(vcHash));
       },
     );
+  }
+
+  private async submitBatchRevokeChunk(
+    issuerKeypair: KeypairLike,
+    vcHashes: Buffer[],
+  ): Promise<string> {
+    const server = this.server;
+    const registryContract = new Contract(this.config.revocationRegistryId);
+    const publicKey = getPublicKey(issuerKeypair);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        registryContract.call(
+          "batch_revoke",
+          new Address(publicKey).toScVal(),
+          xdr.ScVal.scvVec(
+            vcHashes.map((vcHash) =>
+              nativeToScVal(new Uint8Array(vcHash), { type: "bytes" }),
+            ),
+          ),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "revocation-registry");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new SDKError(
+        "TRANSACTION_FAILED",
+        "batchRevokeVC simulation returned an unexpected response",
+      );
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(issuerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        createRevokeError(
+          `batchRevokeVC submission failed: ${response.errorResult}`,
+          response.errorResult,
+        ),
+    );
+
+    try {
+      await waitForTransactionConfirmation(
+        server,
+        txHash,
+        "batchRevokeVC",
+        getConfirmationTimeoutMs(this.config),
+        getTransactionPollIntervalMs(this.config),
+      );
+    } catch (error) {
+      throw createRevokeError(
+        `batchRevokeVC failed; this chunk rolled back: ${getErrorMessage(error)}`,
+        error,
+      );
+    }
+
+    return txHash;
   }
 
   private subscribeToEvents(
