@@ -18,6 +18,7 @@ import {
   RepaymentRecord,
   VCRecord,
   GovernanceProposal,
+  BatchResult,
 } from "./index";
 import { xdr, Keypair } from "@stellar/stellar-sdk";
 
@@ -2151,5 +2152,138 @@ describe("parseContractErrorCode", () => {
   it("handles case-insensitive patterns", () => {
     expect(parseContractErrorCode("error(contract, #5)")).toBe(5);
     expect(parseContractErrorCode("ERROR(CONTRACT, #3)")).toBe(3);
+  });
+});
+
+describe("batchRevokeVC", () => {
+  it("rejects the batch if any hash is not 32 bytes", async () => {
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+
+    await expect(
+      sdk.batchRevokeVC(issuerKeypair as never, [
+        Buffer.alloc(32, 1),
+        Buffer.alloc(31, 2),
+      ]),
+    ).rejects.toMatchObject({
+      name: "SDKError",
+      code: "INVALID_VC_HASH",
+    });
+    expect(mockGetAccount).not.toHaveBeenCalled();
+    expect(mockSendTransaction).not.toHaveBeenCalled();
+  });
+
+  it("revokes a single chunk and returns a confirmed BatchResult", async () => {
+    const vcHashes = [Buffer.alloc(32, 1), Buffer.alloc(32, 2)];
+    mockSimulateTransaction.mockResolvedValueOnce({
+      result: { retval: { value: 50 } },
+    });
+
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const result: BatchResult = await sdk.batchRevokeVC(
+      issuerKeypair as never,
+      vcHashes,
+    );
+
+    expect(result.results).toHaveLength(1);
+    expect(result.results[0]?.status).toBe("success");
+    expect(result.results[0]?.transactionHash).toBe("mock-tx-hash");
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    expect(mockGetTransaction).toHaveBeenCalledWith("mock-tx-hash");
+    const batchCalls = mockContractCalls.filter(
+      (call) => call.method === "batch_revoke",
+    );
+    expect(batchCalls).toHaveLength(1);
+    const firstArgs = batchCalls[0]?.args[1] as
+      | { value?: Buffer[] }
+      | Buffer[]
+      | undefined;
+    const firstChunkHashes = Array.isArray(firstArgs)
+      ? firstArgs
+      : (firstArgs?.value ?? []);
+    expect(firstChunkHashes).toHaveLength(vcHashes.length);
+  });
+
+  it("falls back to the default batch size when get_batch_limit fails", async () => {
+    const vcHashes = Array.from({ length: 100 }, (_, i) =>
+      Buffer.alloc(32, i + 1),
+    );
+    mockSimulateTransaction
+      .mockResolvedValueOnce({ error: "not implemented" })
+      .mockResolvedValue({ result: {} });
+
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const result: BatchResult = await sdk.batchRevokeVC(
+      issuerKeypair as never,
+      vcHashes,
+    );
+
+    expect(result.results).toHaveLength(2);
+    expect(
+      mockContractCalls.filter((call) => call.method === "batch_revoke"),
+    ).toHaveLength(2);
+  });
+
+  it("chunks 100 hashes into two sequential transactions of 50 hashes each", async () => {
+    const vcHashes = Array.from({ length: 100 }, (_, i) =>
+      Buffer.alloc(32, i + 1),
+    );
+    mockSimulateTransaction
+      .mockResolvedValueOnce({ result: { retval: { value: 50 } } })
+      .mockResolvedValueOnce({ result: {} })
+      .mockResolvedValueOnce({ result: {} });
+
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const result: BatchResult = await sdk.batchRevokeVC(
+      issuerKeypair as never,
+      vcHashes,
+    );
+
+    expect(result.results).toHaveLength(2);
+    const batchCalls = mockContractCalls.filter(
+      (call) => call.method === "batch_revoke",
+    );
+    expect(batchCalls).toHaveLength(2);
+    const firstArgs = batchCalls[0]?.args[1] as
+      | { value?: Buffer[] }
+      | Buffer[]
+      | undefined;
+    const firstChunkHashes = Array.isArray(firstArgs)
+      ? firstArgs
+      : (firstArgs?.value ?? []);
+    expect(firstChunkHashes).toHaveLength(50);
+    const secondArgs = batchCalls[1]?.args[1] as
+      | { value?: Buffer[] }
+      | Buffer[]
+      | undefined;
+    const secondChunkHashes = Array.isArray(secondArgs)
+      ? secondArgs
+      : (secondArgs?.value ?? []);
+    expect(secondChunkHashes).toHaveLength(50);
+    expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+    expect(mockGetTransaction).toHaveBeenCalledTimes(2);
+  });
+
+  it("reports partial success when a later chunk fails", async () => {
+    const vcHashes = Array.from({ length: 75 }, (_, i) =>
+      Buffer.alloc(32, i + 1),
+    );
+    mockSimulateTransaction
+      .mockResolvedValueOnce({ result: { retval: { value: 50 } } })
+      .mockResolvedValueOnce({ result: {} })
+      .mockResolvedValueOnce({ error: "Error(Contract, #4)" });
+
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const result: BatchResult = await sdk.batchRevokeVC(
+      issuerKeypair as never,
+      vcHashes,
+    );
+
+    expect(result.results).toHaveLength(2);
+    expect(result.results[0]?.status).toBe("success");
+    expect(result.results[0]?.transactionHash).toBe("mock-tx-hash");
+    expect(result.results[1]?.status).toBe("failed");
+    expect(result.results[1]?.error).toBeDefined();
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    expect(mockGetTransaction).toHaveBeenCalledTimes(1);
   });
 });
