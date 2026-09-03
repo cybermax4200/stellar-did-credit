@@ -291,7 +291,7 @@ export class SDKError extends Error {
 export interface BatchChunkResult {
   chunkIndex: number;
   vcHashes: Buffer[];
-  status: "fulfilled" | "rejected";
+  status: "success" | "failed";
   transactionHash?: string;
   error?: SDKError;
 }
@@ -300,7 +300,7 @@ export interface BatchResult {
   success: boolean;
   failedChunks: number;
   transactionHashes: string[];
-  chunks: BatchChunkResult[];
+  results: BatchChunkResult[];
 }
 
 /**
@@ -1166,7 +1166,7 @@ export class StellarDIDCreditSDK {
         success: true,
         failedChunks: 0,
         transactionHashes: [],
-        chunks: [],
+        results: [],
       };
     }
 
@@ -1199,7 +1199,7 @@ export class StellarDIDCreditSDK {
       success: true,
       failedChunks: 0,
       transactionHashes: [],
-      chunks: [],
+      results: [],
     };
 
     let chunkIndex = 0;
@@ -1211,19 +1211,19 @@ export class StellarDIDCreditSDK {
           chunk,
         );
         result.transactionHashes.push(transactionHash);
-        result.chunks.push({
+        result.results.push({
           chunkIndex,
           vcHashes: chunk,
-          status: "fulfilled",
+          status: "success",
           transactionHash,
         });
       } catch (error) {
         result.success = false;
         result.failedChunks += 1;
-        result.chunks.push({
+        result.results.push({
           chunkIndex,
           vcHashes: chunk,
-          status: "rejected",
+          status: "failed",
           error:
             error instanceof SDKError
               ? error
@@ -1895,13 +1895,27 @@ function scoringWeightsToScVal(weights: ScoringWeights): xdr.ScVal {
  * Parse a Soroban ScVal representing an Option<ScoreRecord>.
  * Returns the ScoreRecord if Some, returns null if None.
  */
-function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord | null {
+export function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord | null {
   const native = scValToNative(scVal);
   // Option::None is represented as null/undefined by scValToNative
   if (native === null || native === undefined) {
     return null;
   }
   const raw = native as Record<string, unknown>;
+  const requiredFields = [
+    "score",
+    "last_updated",
+    "vc_count",
+    "repayment_rate",
+    "tx_volume_30d",
+    "computed_at_ledger",
+    "stale",
+  ];
+  for (const field of requiredFields) {
+    if (!(field in raw)) {
+      throw new Error(`parseScoreRecord: missing field '${field}' in ScoreRecord`);
+    }
+  }
   return {
     score: Number(raw["score"]),
     lastUpdated: Number(raw["last_updated"]),

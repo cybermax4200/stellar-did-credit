@@ -1266,6 +1266,7 @@ impl IdentityOracle {
 #[allow(deprecated)]
 mod tests {
     use super::*;
+    use soroban_sdk::testutils::storage::Persistent;
     use soroban_sdk::testutils::{Address as _, Ledger};
 
     #[contract]

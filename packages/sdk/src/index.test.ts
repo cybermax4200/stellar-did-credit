@@ -11,6 +11,7 @@ import {
   parseContractErrorCode,
   MIN_SCORE,
   MAX_SCORE,
+  parseScoreRecord,
   ScoreRecord,
   ProtocolConfig,
   TxStats,
@@ -55,6 +56,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
       scvSymbol: (symbol: string) => ({
         toXDR: () => `symbol:${symbol}`,
       }),
+      scvVec: (elements: unknown[]) => elements,
     },
   },
   Keypair: {},
@@ -2285,5 +2287,52 @@ describe("batchRevokeVC", () => {
     expect(result.results[1]?.error).toBeDefined();
     expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("parseScoreRecord", () => {
+  it("test_parseScoreRecord_valid", () => {
+    const scoreRecord = {
+      score: 750,
+      last_updated: 1234567890,
+      vc_count: 5,
+      repayment_rate: 9500,
+      tx_volume_30d: 1000000,
+      previous_score: 720,
+      computed_at_ledger: 5000,
+      stale: false,
+    };
+
+    const scVal = { value: scoreRecord } as never;
+    const result = parseScoreRecord(scVal);
+
+    expect(result).not.toBeNull();
+    expect(result!.score).toBe(750);
+    expect(result!.lastUpdated).toBe(1234567890);
+    expect(result!.vcCount).toBe(5);
+    expect(result!.repaymentRate).toBe(9500);
+    expect(result!.txVolume30d).toBe(BigInt(1000000));
+    expect(result!.previousScore).toBe(720);
+    expect(result!.computedAtLedger).toBe(5000);
+    expect(result!.stale).toBe(false);
+  });
+
+  it("test_parseScoreRecord_throws_on_missing_field", () => {
+    const scoreRecord = {
+      score: 750,
+      last_updated: 1234567890,
+      vc_count: 5,
+      repayment_rate: 9500,
+      tx_volume_30d: 1000000,
+      previous_score: 720,
+      computed_at_ledger: 5000,
+      // stale intentionally missing
+    };
+
+    const scVal = { value: scoreRecord } as never;
+
+    expect(() => parseScoreRecord(scVal)).toThrow(
+      "parseScoreRecord: missing field 'stale' in ScoreRecord",
+    );
   });
 });
