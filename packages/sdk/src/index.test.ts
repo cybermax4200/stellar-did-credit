@@ -2158,6 +2158,25 @@ describe("parseContractErrorCode", () => {
 });
 
 describe("batchRevokeVC", () => {
+  beforeEach(() => {
+    mockSimulateTransaction.mockReset();
+    mockGetAccount.mockReset();
+    mockSendTransaction.mockReset();
+    mockGetTransaction.mockReset();
+    mockGetEvents.mockReset();
+    mockGetLatestLedger.mockReset();
+    mockContractCalls.length = 0;
+    mockLastContractCall = undefined;
+    mockGetAccount.mockResolvedValue({ sequenceNumber: () => "1" });
+    mockSimulateTransaction.mockResolvedValue({ result: {} });
+    mockSendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "mock-tx-hash",
+    });
+    mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+    (jest.requireMock("@stellar/stellar-sdk").SorobanRpc.Server as jest.Mock).mockClear();
+  });
+
   it("rejects the batch if any hash is not 32 bytes", async () => {
     const sdk = new StellarDIDCreditSDK(mockConfig);
 
