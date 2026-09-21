@@ -127,9 +127,10 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Emitted When:** A new governance proposal is created.
 
 #### ProposalExecuted
-* **Topic:** `[Symbol("PropExec"), proposal_id: u64]`
-* **Data:** `(votes_for: i128, votes_against: i128)`
-* **Emitted When:** An expired governance proposal is executed.
+* **Topic:** `[Symbol("PropExec")]`
+* **Data:** `(proposal_id: u64, proposed_weights: ScoringWeights)`
+* **Emitted When:** An expired governance proposal is executed (whether or not the vote passed). `proposed_weights` carries the weights the proposal would queue for the credit-oracle; when the vote passed they are the weights passed to `credit-oracle.propose_weights`, and when the vote was rejected they are recorded for audit.
+* **feeder Action:** Observe that the proposal has been finalized. When the vote passed, track the corresponding credit-oracle `WtProp`/`WtApply` events to confirm the queued weights become active.
 
 #### ProposalCancelled
 * **Topic:** `[Symbol("PropCanc"), proposal_id: u64]`

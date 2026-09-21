@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `credit-oracle`: on-chain dispute mechanism for score inputs. Subjects can call `flag_score_input(subject, input_key, reason)` to flag a `tx_stats`, `repayment`, or `vc_count` input as incorrect; admins resolve disputes via `resolve_dispute(subject, input_key, accepted)`. Anti-griefing enforced: only one `Pending` dispute per `(subject, input_key)` pair at a time. Emits `DsptFild`, `DsptRslv`, and `DsptRjct` events for off-chain feeder indexing. Read helpers: `get_dispute` and `list_disputes`. Dispute records stored with 30-day TTL (#244)
 - `packages/cli` (`@stellar-did-credit/cli`): new command-line interface with four commands — `anchor-did` (stores a DID document CID on-chain), `get-score` (reads a credit score with formatted table or JSON output), `verify-vc` (checks whether a VC hash is valid and non-revoked), and `compute-score` (submits a score computation transaction and returns the result). Reads contract IDs from environment variables, a `stellar-did-config.json` file, or `deployments.testnet.json`-style config. Built on `commander` with `--help` for every command (#161)
 
+### Changed
+
+- `governance`: `execute`'s `PropExec` event now carries `(proposal_id: u64, proposed_weights: ScoringWeights)` as its data payload, with `PropExec` as the only topic. The previous payload was `(votes_for, votes_against)` with `proposal_id` in the topics. Indexers can now observe an executed proposal and the weights it proposed without inferring them from the credit-oracle's `PendingWeights` storage. Documented in `docs/event-indexing.md` and `docs/governance.md`; covered by `test_execute_event_emits_prop_exec_with_proposed_weights` (#775)
+
 ### Fixed
 
 - TypeScript SDK (`@stellar-did-credit/sdk`): `anchorDID`, `issueVC`,

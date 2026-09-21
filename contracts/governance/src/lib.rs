@@ -422,6 +422,11 @@ impl Governance {
     /// Otherwise the proposal is marked executed without changing the weights.
     /// Can only be called after `expiry_ledger`.
     ///
+    /// Emits a `PropExec` event with `PropExec` as the only topic and
+    /// `(proposal_id, proposed_weights)` as data so off-chain indexers can
+    /// observe execution and the weights that were proposed without having to
+    /// infer them from the credit-oracle's `PendingWeights` storage.
+    ///
     /// After calling this function, `apply_weights` must be called once the
     /// credit-oracle's timelock expires (approximately 24 hours / 17,280 ledgers)
     /// to finalize the weight change.
@@ -476,8 +481,8 @@ impl Governance {
         env.storage().persistent().set(&proposal_key, &proposal);
 
         env.events().publish(
-            (symbol_short!("PropExec"), proposal_id),
-            (proposal.votes_for, proposal.votes_against),
+            (symbol_short!("PropExec"),),
+            (proposal_id, proposal.proposed_weights.clone()),
         );
 
         Ok(())
@@ -1205,6 +1210,71 @@ mod tests {
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert!(proposal.cancelled, "proposal.cancelled must be true after cancel_proposal");
         assert!(!proposal.executed, "proposal.executed must remain false");
+    }
+
+    /// `execute` must emit a `PropExec` event whose payload carries the
+    /// executed proposal's id and the weights it proposed, so off-chain
+    /// indexers can observe both without inferring them from credit-oracle
+    /// storage.
+    #[test]
+    fn test_execute_event_emits_prop_exec_with_proposed_weights() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        gov_client.execute(&proposal_id);
+
+        let events = env.events().all();
+        let mut found_event = false;
+
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id == gov_id && topics.len() == 1 {
+                let symbol: Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(symbol_short!("invalid"));
+                if symbol == symbol_short!("PropExec") {
+                    found_event = true;
+                    let (event_id, event_weights): (u64, ScoringWeights) =
+                        data.try_into_val(&env).unwrap();
+                    assert_eq!(event_id, proposal_id);
+                    assert_eq!(event_weights, proposed_weights);
+                }
+            }
+        }
+
+        assert!(
+            found_event,
+            "execute must emit a PropExec event carrying the proposal id and proposed weights"
+        );
     }
 
     /// A cancelled proposal must reject all further vote calls with

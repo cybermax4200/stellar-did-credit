@@ -357,7 +357,7 @@ assert_eq!(pending.weights.repayment_weight, 30);
 
 **What happens if quorum is not met?** `execute` returns `QuorumNotMet`, does NOT set `executed = true`. The proposal remains open for (re-)execution in the future — but there is no way to add votes, since `vote` rejects after `expiry_ledger`. In effect, a proposal that fails quorum is permanently stuck unexecuted. The `cancel()` stub cannot help here (see §2.5).
 
-Events: `PropExec(u64 id)` with data `(votes_for, votes_against)`.
+Events: `PropExec` with data `(proposal_id, proposed_weights)`.
 
 ### 3.5 `apply_weights`
 
@@ -491,7 +491,7 @@ All events use Soroban's `(topics_tuple, data)` shape with the first topic eleme
 |---|---|---|---|
 | `PropCreat` | `proposal_id: u64` | `(proposer: Address, expiry_ledger: u32)` | `create_proposal` |
 | `Voted` | `proposal_id: u64` | `(voter: Address, vote_for: bool, vote_weight: i128)` | `vote` |
-| `PropExec` | `proposal_id: u64` | `(votes_for: i128, votes_against: i128)` | `execute` |
+| `PropExec` | — | `(proposal_id: u64, proposed_weights: ScoringWeights)` | `execute` |
 | `WtApplied` | — | `(ledger_sequence_when_applied: u32)` | `apply_weights` |
 | `VoterReg` | `voter: Address` | `weight: i128` | `register_voter` |
 | `VoterUpd` | `voter: Address` | `weight: i128` | `update_voter_weight` |
