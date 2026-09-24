@@ -364,8 +364,8 @@ if (score) {
 | -------------------------------- | -------------- |
 | `getScore(address)`              | ✅ Implemented |
 | `isVerified(address)`            | ✅ Implemented |
-| `anchorDID(keypair, cid)`        | 🚧 Open        |
-| `issueVC(issuer, subject, hash)` | 🚧 Open        |
+| `anchorDID(keypair, cid)`        | ✅ Implemented |
+| `issueVC(issuer, subject, hash)` | ✅ Implemented |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
 | `revokeVC(issuer, hash)`         | ✅ Implemented |
 

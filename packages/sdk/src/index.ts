@@ -744,6 +744,7 @@ export class StellarDIDCreditSDK {
     issuerKeypair: KeypairLike,
     subjectAddress: string,
     vcHash: Buffer,
+    type?: string,
   ): Promise<string> {
     if (vcHash.length !== 32) {
       throw new Error("vcHash must be exactly 32 bytes");
@@ -764,18 +765,26 @@ export class StellarDIDCreditSDK {
     // Convert vcHash Buffer to ScVal
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        contract.call(
+    const operation = type
+      ? contract.call(
+          "anchor_vc_typed",
+          new Address(publicKey).toScVal(),
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+          nativeToScVal(type),
+        )
+      : contract.call(
           "anchor_vc",
           new Address(publicKey).toScVal(),
           new Address(subjectAddress).toScVal(),
           hashScVal,
-        ),
-      )
+        );
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
