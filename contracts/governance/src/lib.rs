@@ -46,6 +46,8 @@ pub enum GovernanceError {
     ContractPaused = 16,
     /// The vote would overflow the proposal's tally.
     VoteTallyOverflow = 17,
+    /// Proposal did not receive more for-votes than against-votes.
+    ProposalRejected = 18,
 }
 
 /// Storage keys for the governance contract.
@@ -453,24 +455,26 @@ impl Governance {
             return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
+        if proposal.votes_for <= proposal.votes_against {
+            return Err(GovernanceError::ProposalRejected);
+        }
+
         if proposal.votes_for + proposal.votes_against < proposal.quorum_required {
             return Err(GovernanceError::QuorumNotMet);
         }
 
-        if proposal.votes_for > proposal.votes_against {
-            let credit_oracle_addr: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::CreditOracle)
-                .expect("no credit oracle");
+        let credit_oracle_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreditOracle)
+            .expect("no credit oracle");
 
-            // Use propose_weights to start the timelock, not update_weights which bypasses it
-            CreditOracleClient::propose_weights(
-                &env,
-                &credit_oracle_addr,
-                &proposal.proposed_weights,
-            );
-        }
+        // Use propose_weights to start the timelock, not update_weights which bypasses it
+        CreditOracleClient::propose_weights(
+            &env,
+            &credit_oracle_addr,
+            &proposal.proposed_weights,
+        );
 
         proposal.executed = true;
         env.storage().persistent().set(&proposal_key, &proposal);
@@ -1444,6 +1448,42 @@ mod tests {
         assert_eq!(pending_record.weights.vc_weight, 50);
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_execute_rejected_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter_for = Address::generate(&env);
+        let voter_against = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter_for, &40);
+        gov_client.register_voter(&admin, &voter_against, &60);
+        gov_client.vote(&voter_for, &proposal_id, &true, &40);
+        gov_client.vote(&voter_against, &proposal_id, &false, &60);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalRejected)));
     }
 
     #[test]
