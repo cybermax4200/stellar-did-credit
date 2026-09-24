@@ -171,6 +171,7 @@ const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
   14: "TimelockNotExpired",
   15: "NoPendingWeights",
   16: "NotInitialized",
+  17: "InvalidAmount",
 };
 
 const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {

@@ -708,6 +708,9 @@ impl CreditOracle {
         amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        if amount <= 0 {
+            return Err(CreditOracleError::InvalidAmount);
+        }
         ensure_not_paused(&env)?;
         lender.require_auth();
         let is_trusted: bool = env
@@ -2420,6 +2423,27 @@ mod tests {
         client.deregister_lender(&admin, &lender);
         let result = client.try_record_repayment(&lender, &subject, &1000, &true);
         assert_eq!(result, Err(Ok(CreditOracleError::LenderNotRegistered)));
+    }
+
+    #[test]
+    fn test_record_repayment_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        let result = client.try_record_repayment(&lender, &subject, &-1, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidAmount)));
+
+        let zero_result = client.try_record_repayment(&lender, &subject, &0, &true);
+        assert_eq!(zero_result, Err(Ok(CreditOracleError::InvalidAmount)));
     }
 
     #[test]

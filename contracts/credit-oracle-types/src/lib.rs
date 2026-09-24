@@ -55,6 +55,8 @@ pub enum CreditOracleError {
     NoPendingWeights = 15,
     /// Contract has not been initialized (config missing).
     NotInitialized = 16,
+    /// Repayment amount must be positive.
+    InvalidAmount = 17,
 }
 
 /// Weights used in credit score calculation.
