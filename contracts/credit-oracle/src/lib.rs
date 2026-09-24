@@ -1392,6 +1392,9 @@ impl CreditOracle {
     /// identity-oracle instead of reading the cached `VcCount` storage key.
     /// This enables live VC count resolution that automatically excludes revoked VCs.
     ///
+    /// Emits an `IdOSet` event with the new identity oracle address so indexers
+    /// and monitoring tools can detect configuration changes.
+    ///
     /// Auth: admin only.
     pub fn set_identity_oracle(
         env: Env,
@@ -1414,7 +1417,7 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         env.events()
-            .publish((symbol_short!("IdOracle"),), identity_oracle_id);
+            .publish((symbol_short!("IdOSet"),), identity_oracle_id);
         Ok(())
     }
 
@@ -2674,6 +2677,38 @@ mod tests {
         let result = client.get_identity_oracle();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), identity_oracle_id);
+    }
+
+    #[test]
+    fn test_set_identity_oracle_emits_idoset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        let events = env.events().all();
+        // Initialized + IdOSet
+        assert_eq!(events.len(), 2, "expected Initialized + IdOSet events");
+        let (event_contract_id, topics, data) = events.get(1).unwrap();
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_sym: Symbol = topics
+            .get(0)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("IdOSet"), "expected IdOSet topic");
+        let event_oracle: Address = data.try_into_val(&env).expect("data should be an Address");
+        assert_eq!(
+            event_oracle, identity_oracle_id,
+            "event data should be the new identity oracle address"
+        );
     }
 
     #[test]

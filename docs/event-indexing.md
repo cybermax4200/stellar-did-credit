@@ -76,9 +76,9 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 ### 3. Credit Oracle Events
 
 #### IdentityOracleUpdated
-* **Topic:** `[Symbol("OrclSet")]`
-* **Data:** `(previous_oracle: Address, new_oracle: Address)`
-* **Emitted When:** The admin updates the identity-oracle contract ID on the credit oracle.
+* **Topic:** `[Symbol("IdOSet")]`
+* **Data:** `identity_oracle_id: Address`
+* **Emitted When:** The admin sets or updates the identity-oracle contract ID on the credit oracle via `set_identity_oracle`.
 * **feeder Action:** None (configuration tracking). Update local cache of the identity-oracle address.
 
 #### Score
