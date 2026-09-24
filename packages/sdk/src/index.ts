@@ -1809,6 +1809,111 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Get the weight multiplier in basis points for an issuer.
+   *
+   * @param issuer - The issuer address (Stellar G...)
+   * @returns Weight in basis points (default 100)
+   */
+  async getIssuerTier(issuer: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_issuer_tier", new Address(issuer).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for an issuer.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param issuer - The issuer address
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setIssuerTier(
+    adminKeypair: KeypairLike,
+    issuer: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_issuer_tier",
+          new Address(publicKey).toScVal(),
+          new Address(issuer).toScVal(),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setIssuerTier",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Returns the list of all currently registered (non-deregistered) trusted issuers.
    *
    * Uses a read-only simulation against the identity-oracle contract.

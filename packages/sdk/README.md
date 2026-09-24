@@ -108,6 +108,8 @@ confirmation polling. Invalid hashes throw `SDKError` with code
 | `getVCCount` | ✅ Implemented | Fetch count of active VCs for a subject |
 | `getWeights` | ✅ Implemented | Fetch contract scoring weight configuration |
 | `getRegisteredIssuers` | ✅ Implemented | List all registered trusted credential issuers |
+| `getIssuerTier` | ✅ Implemented | Get trust tier weight for an issuer |
+| `setIssuerTier` | ✅ Implemented | Set trust tier weight for an issuer |
 
 ### Governance
 

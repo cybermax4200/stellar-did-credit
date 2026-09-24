@@ -1810,6 +1810,79 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("getIssuerTier", () => {
+    it("returns tier weight for an issuer", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 150 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getIssuerTier(issuerKeypair.publicKey());
+
+      expect(result).toBe(150);
+      expect(mockLastContractCall?.method).toBe("get_issuer_tier");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getIssuerTier(issuerKeypair.publicKey())).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
+  describe("setIssuerTier", () => {
+    const adminAddress = "GADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const adminKeypair = { publicKey: () => adminAddress };
+
+    it("submits transaction to set issuer tier", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: undefined },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.setIssuerTier(
+        adminKeypair as never,
+        issuerKeypair.publicKey(),
+        120,
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(adminAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "set_issuer_tier",
+      });
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.setIssuerTier(adminKeypair as never, issuerKeypair.publicKey(), 120),
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
   describe("getRegisteredIssuers", () => {
     it("returns list of registered issuer addresses", async () => {
       const issuers = ["GISSUER1", "GISSUER2"];
