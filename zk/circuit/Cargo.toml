@@ -17,7 +17,7 @@ ark-relations = "0.4"
 ark-groth16 = "0.4"
 ark-snark = "0.4"
 ark-std = "0.4"
-ark-crypto-primitives = { version = "0.4", features = ["r1cs"] }
+ark-crypto-primitives = { version = "0.5", features = ["r1cs"] }
 ark-poly = "0.4"
 ark-serialize = "0.4"
 sha2 = "0.10"
