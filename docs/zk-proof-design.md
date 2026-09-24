@@ -384,9 +384,58 @@ impl ScoreRangeVerifier {
 | 2 | Circom/arkworks circuit + unit tests against scoring-spec vectors | Step 1 |
 | 3 | Groth16 ceremony + vk hash | Step 2 |
 | 4 | `score-range-verifier` Soroban contract + tests | Step 3, CAP-0059 |
-| 5 | TypeScript prover module in SDK | Step 2 |
 | 6 | End-to-end integration test (testnet) | Steps 4–5 |
-| 7 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
+| 7 | CLI command (`stellar-did prove-score`) | Steps 4–5 |
+| 8 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
+
+---
+
+## User Journey: CLI and SDK
+
+Users and applications interact with the ZK proof layer using either the `stellar-did` CLI or the `@stellar-did-credit/sdk`.
+
+### CLI: Proving a Score
+
+A user wants to prove their credit score exceeds a given threshold (e.g., 600) to a verifier contract, without revealing the score itself.
+
+```bash
+stellar-did prove-score --subject <YOUR_ADDRESS> --threshold 600 --verifier <VERIFIER_CONTRACT_ID>
+```
+
+Under the hood, this command:
+1. Queries the credit-oracle for the subject's private scoring inputs.
+2. Generates a Groth16 proof locally using the WASM prover.
+3. Submits a transaction to the `score-range-verifier` contract to verify the proof.
+4. Outputs `Proof successfully verified by the contract!` on success.
+
+### SDK: Programmatic Integration
+
+Lenders and dApps can generate and verify proofs programmatically:
+
+```typescript
+import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
+
+// Initialize SDK
+const sdk = new StellarDIDCreditSDK({ ...config });
+
+// 1. Generate the proof locally in WASM
+const threshold = 650;
+const blinding = 12345; // Private blinding factor
+const proofBytes = await sdk.generateScoreProof(subjectAddress, threshold, blinding);
+
+// 2. Submit the proof to the on-chain verifier
+const isValid = await sdk.verifyScoreProof(
+  payerKeypair,
+  subjectAddress,
+  threshold,
+  proofBytes,
+  verifierContractId
+);
+
+if (isValid) {
+  console.log("Subject's score is verified to be >=", threshold);
+}
+```
 
 ### Step 1: Constraint count estimate (score > T circuit)
 

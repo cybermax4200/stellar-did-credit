@@ -9,10 +9,16 @@ import {
   Address,
   xdr,
   Keypair,
+  hash,
 } from "@stellar/stellar-sdk";
 
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
+
+// Need to import WASM prover
+// In a real env, we'd import this properly, assuming it's available as @stellar-did-credit/zk-wasm
+import * as ZkWasm from "@stellar-did-credit/zk-wasm";
+
 
 export type NetworkType = "testnet" | "mainnet" | "futurenet" | "custom";
 
@@ -647,7 +653,9 @@ export class StellarDIDCreditSDK {
       this.config = config;
     }
 
-    this.server = new SorobanRpc.Server(this.config.rpcUrl);
+    this.server = new SorobanRpc.Server(this.config.rpcUrl, {
+      allowHttp: this.config.rpcUrl.startsWith("http://") || this.config.rpcUrl.startsWith("http://localhost"),
+    });
     this.governance = new GovernanceClient(this.config, this.server);
   }
 
@@ -1521,6 +1529,100 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Fetch a subject's TxStats from the credit-oracle.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns TxStats or null if not found
+   */
+  async getTxStats(subjectAddress: string): Promise<TxStats | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_tx_stats", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    const raw = native as Record<string, unknown>;
+    return {
+      volume30d: BigInt(raw["volume_30d"] as bigint),
+      txCount30d: Number(raw["tx_count_30d"]),
+      avgCounterparties: Number(raw["avg_counterparties"]),
+    };
+  }
+
+  /**
+   * Fetch a subject's RepaymentRecord from the credit-oracle.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns RepaymentRecord or null if not found
+   */
+  async getRepaymentRecord(subjectAddress: string): Promise<RepaymentRecord | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_repayment_record", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    const raw = native as Record<string, unknown>;
+    return {
+      onTimeCount: Number(raw["on_time_count"]),
+      totalCount: Number(raw["total_count"]),
+      totalRepaid: BigInt(raw["total_repaid"] as bigint),
+    };
+  }
+
+  /**
    * Fetch the recency decay configuration currently active on the credit-oracle.
    *
    * Uses a read-only simulation (no signing required).
@@ -1833,6 +1935,123 @@ export class StellarDIDCreditSDK {
     }
 
     return parseGovernanceProposalList(resultScVal);
+  }
+
+  /**
+   * Generates a zk-SNARK proof that the subject's score is > threshold.
+   * Uses the WASM prover module.
+   */
+  async generateScoreProof(
+    subjectAddress: string,
+    threshold: number,
+    blinding = 12345
+  ): Promise<Uint8Array> {
+    const scoreRecord = await this.getScore(subjectAddress);
+    if (!scoreRecord) {
+      throw new Error("Score not computed");
+    }
+
+    const txStats = await this.getTxStats(subjectAddress) || { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
+    const repaymentRecord = await this.getRepaymentRecord(subjectAddress) || { onTimeCount: 0, totalCount: 0, totalRepaid: 0n };
+    const weights = await this.getWeights();
+
+    // Default simplified vcPoints logic (same as credit-oracle when decay is disabled)
+    const vcPoints = Math.min(100, scoreRecord.vcCount * 20);
+
+    const subjectHash = hash(nativeToScVal(subjectAddress, { type: "address" }).address().toXDR());
+    const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
+    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
+
+    return ZkWasm.generate_score_proof(
+      vcPoints,
+      Number(txStats.volume30d),
+      txStats.avgCounterparties,
+      repaymentRecord.onTimeCount,
+      repaymentRecord.totalCount,
+      Number(repaymentRecord.totalRepaid),
+      weights.vcWeight,
+      weights.txWeight,
+      weights.repaymentWeight,
+      scoreRecord.vcCount,
+      BigInt(scoreRecord.lastUpdated),
+      scoreRecord.computedAtLedger,
+      scoreRecord.stale,
+      blinding,
+      threshold,
+      subjectHash,
+      oracleHash,
+      scoreRecord.computedAtLedger,
+      domainHash
+    );
+  }
+
+  /**
+   * Submits a generated zk-SNARK proof to the on-chain score-range-verifier.
+   *
+   * @param payerKeypair - Payer keypair for the transaction
+   * @param subjectAddress - Address of the subject being verified
+   * @param threshold - The threshold score
+   * @param proof - The proof bytes generated by generateScoreProof
+   * @param verifierContractId - Contract ID of the score-range-verifier
+   * @returns true if verified
+   */
+  async verifyScoreProof(
+    payerKeypair: KeypairLike,
+    subjectAddress: string,
+    threshold: number,
+    proof: Uint8Array,
+    verifierContractId: string
+  ): Promise<boolean> {
+    const contract = new Contract(verifierContractId);
+    const publicKey = getPublicKey(payerKeypair);
+
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "verify_and_consume",
+          new Address(subjectAddress).toScVal(),
+          nativeToScVal(threshold, { type: "u32" }),
+          nativeToScVal(proof, { type: "bytes" })
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(payerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (submissionResponse) => new Error(`Submission failed: ${submissionResponse.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "verifyScoreProof",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return true; // if confirmation passed
   }
 
   /**

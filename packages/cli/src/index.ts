@@ -384,12 +384,9 @@ program
         const score = await sdk.computeScore(keypair, upperAddr);
 
         if (options.json) {
-          console.log(JSON.stringify(score, (key, value) => {
-            if (typeof value === "bigint") return value.toString();
-            return value;
-          }, 2));
+          console.log(JSON.stringify({ score }, null, 2));
         } else {
-          printScoreRecord(score);
+          console.log(`\n✅ Computed Score: ${score}`);
         }
       } catch (err) {
         console.error(
@@ -821,6 +818,58 @@ program
     );
     console.log(`Completed: ${summary.success} succeeded, ${summary.skipped} skipped, ${summary.failed} failed.`);
     console.log(`Results written to ${cmdOptions.resultFile}`);
+  });
+
+program
+  .command("prove-score")
+  .description("Generate and submit a zero-knowledge proof for a credit score threshold")
+  .requiredOption("-s, --subject <address>", "Subject public key")
+  .requiredOption("-t, --threshold <number>", "Threshold score to prove", parseFloat)
+  .requiredOption("-v, --verifier <contractId>", "Contract ID of the score-range-verifier")
+  .option("-b, --blinding <number>", "Blinding factor (default: random)", parseFloat)
+  .action(async (cmdOptions) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId', 'creditOracleId', 'rpcUrl', 'networkPassphrase'], false);
+    
+    const sdk = new StellarDIDCreditSDK(config);
+    const secretKey = process.env.STELLAR_SECRET || config.simAccount;
+    const kp = parseSecret(secretKey);
+    const subject = cmdOptions.subject.toUpperCase();
+    assertStellarAddress("subject", subject);
+
+    const blinding = cmdOptions.blinding !== undefined ? cmdOptions.blinding : Math.floor(Math.random() * 1000000);
+
+    console.log(`Generating score proof for ${subject} with threshold ${cmdOptions.threshold}...`);
+    let proof: Uint8Array;
+    try {
+      proof = await sdk.generateScoreProof(subject, cmdOptions.threshold, blinding);
+      console.log(`Proof generated successfully. (${proof.length} bytes)`);
+    } catch (err: unknown) {
+      console.error(`Error generating proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+
+    console.log(`Submitting proof to verifier contract ${cmdOptions.verifier}...`);
+    try {
+      const result = await sdk.verifyScoreProof(
+        kp,
+        subject,
+        cmdOptions.threshold,
+        proof,
+        cmdOptions.verifier
+      );
+      if (result) {
+        console.log(`Proof successfully verified by the contract!`);
+      } else {
+        console.log(`Proof verification failed!`);
+        process.exit(1);
+      }
+    } catch (err: unknown) {
+      console.error(`Error verifying proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
   });
 
 // ---------------------------------------------------------------------------

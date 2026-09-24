@@ -1355,8 +1355,6 @@ describe("StellarDIDCreditSDK", () => {
           subjectAddress,
         ),
       ).rejects.toMatchObject({
-        name: "SDKError",
-        code: "TRANSACTION_FAILED",
         name: "CreditOracleError",
         code: 0,
         contractName: "credit-oracle",

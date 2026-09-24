@@ -1,0 +1,9 @@
+{
+  "name": "@stellar-did-credit/zk-wasm",
+  "version": "0.1.0",
+  "main": "pkg/zk_wasm.js",
+  "types": "pkg/zk_wasm.d.ts",
+  "scripts": {
+    "build": "wasm-pack build --target nodejs"
+  }
+}
