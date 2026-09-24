@@ -9,6 +9,7 @@ use ark_serialize::CanonicalSerialize;
 use js_sys::Uint8Array;
 
 #[wasm_bindgen]
+#[allow(clippy::too_many_arguments)]
 pub fn generate_score_proof(
     vc_points: u32,
     tx_volume_30d: f64,
