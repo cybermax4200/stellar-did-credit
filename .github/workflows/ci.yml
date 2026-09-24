@@ -104,9 +104,19 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Install SDK dependencies
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
-        working-directory: packages/sdk
+
+      - name: Build zk-wasm
+        run: pnpm --filter @stellar-did-credit/zk-wasm build
 
       - name: Run TypeScript SDK tests
         run: pnpm run test --coverage

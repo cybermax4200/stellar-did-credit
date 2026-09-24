@@ -581,11 +581,10 @@ mod tests {
 
         let inputs = make_public_inputs(&env);
         let proof = make_proof(&env);
-        // The proof's points fail the soroban-sdk 22 host's strict BLS12-381
-        // validation, so the invocation raises a host error instead of
-        // returning `false` (see `make_proof`).
+        // The proof's points are point-at-infinity, which are valid on-curve points
+        // but do not satisfy the pairing check, so verification returns `false`.
         let res = client.try_verify_score_range(&proof, &inputs);
-        assert!(res.is_err());
+        assert_eq!(res, Ok(Ok(false)));
     }
 
     #[test]
@@ -620,15 +619,14 @@ mod tests {
         let proof = make_proof(&env);
         let nonce = BytesN::from_array(&env, &[0x33; 32]);
 
-        // The tampered proof's points fail strict host validation, so the
-        // invocation raises a host error. Because the failed verification is
-        // never recorded as consumed, a second identical call fails the same
-        // way (not `ProofAlreadyConsumed`).
+        // The tampered proof fails the pairing check, returning `false`.
+        // Because the failed verification is never recorded as consumed, a second
+        // identical call fails the same way (not `ProofAlreadyConsumed`).
         let res = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert!(res.is_err());
+        assert_eq!(res, Ok(Ok(false)));
 
         let res2 = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert!(res2.is_err());
+        assert_eq!(res2, Ok(Ok(false)));
     }
 
     #[test]
