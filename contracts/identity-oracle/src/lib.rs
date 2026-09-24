@@ -2577,4 +2577,90 @@ mod tests {
         let result = client.try_anchor_did(&subject, &cid);
         assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
     }
+
+    #[test]
+    fn test_anchor_vc_typed_with_arbitrary_credential_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        
+        // Test with various credential types that should work
+        let credential_types = [
+            "kyc",
+            "employment", 
+            "education",
+            "identity",
+            "credit_score",
+            "test",
+            "a",                    // single character
+            "very_long_type_name",  // longer name
+        ];
+
+        for (i, type_name) in credential_types.iter().enumerate() {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i as u8;
+            hash_arr[1] = 42; // distinguishing byte
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            
+            let credential_type = Symbol::new(&env, type_name);
+            let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
+            
+            // Should succeed for all valid credential types
+            assert!(result.is_ok(), "Failed to anchor VC with credential type: {}", type_name);
+        }
+    }
+
+    #[test] 
+    fn test_anchor_vc_typed_vc_limit_with_credential_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        
+        // Anchor exactly 100 VCs with different credential types
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 10; // distinguishing byte
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            
+            // Vary credential types to simulate fuzz input
+            let credential_type = match i % 4 {
+                0 => Symbol::new(&env, "kyc"),
+                1 => Symbol::new(&env, "employment"),
+                2 => Symbol::new(&env, "education"), 
+                _ => Symbol::new(&env, "identity"),
+            };
+            
+            let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
+            assert!(result.is_ok(), "Failed to anchor VC {} with credential type", i);
+        }
+        
+        // The 101st VC should fail with VCLimitReached
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 10;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let credential_type = Symbol::new(&env, "test");
+        
+        let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash_101, &credential_type);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
 }

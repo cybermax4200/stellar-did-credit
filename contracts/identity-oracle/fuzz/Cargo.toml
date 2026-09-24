@@ -23,3 +23,10 @@ path = "fuzz_targets/anchor_vc_typed.rs"
 bench = false
 test = false
 doc = false
+
+[[bin]]
+name = "fuzz_anchor_vc_typed"
+path = "fuzz_targets/fuzz_anchor_vc_typed.rs"
+bench = false
+test = false
+doc = false

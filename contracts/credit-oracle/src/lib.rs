@@ -2536,6 +2536,94 @@ mod tests {
     }
 
     #[test]
+    fn test_deregister_feeder_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Clear any existing events
+        env.events().all();
+
+        // Deregister the feeder
+        client.deregister_feeder(&admin, &feeder);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the FdrDeReg event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("FdrDeReg")
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_val = topics.get(0).unwrap();
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("FdrDeReg"), "expected FdrDeReg topic");
+
+        // Verify the data payload is the feeder address
+        let event_feeder: Address = data
+            .try_into_val(&env)
+            .expect("data should be Address");
+        assert_eq!(event_feeder, feeder, "event feeder mismatch");
+    }
+
+    #[test]
+    fn test_deregister_lender_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        // Clear any existing events
+        env.events().all();
+
+        // Deregister the lender
+        client.deregister_lender(&admin, &lender);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the LndDeReg event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("LndDeReg")
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_val = topics.get(0).unwrap();
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("LndDeReg"), "expected LndDeReg topic");
+
+        // Verify the data payload is the lender address
+        let event_lender: Address = data
+            .try_into_val(&env)
+            .expect("data should be Address");
+        assert_eq!(event_lender, lender, "event lender mismatch");
+    }
+
+    #[test]
     fn test_upgrade_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
