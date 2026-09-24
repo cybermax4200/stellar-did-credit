@@ -1426,6 +1426,18 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * List all verifiable credential records for a subject, including revoked ones.
+   *
+   * Alias for `getVCs` for CLI/SDK consumers expecting `listVCs`.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns Array of VCRecord entries, or an empty array if none exist
+   */
+  async listVCs(subjectAddress: string): Promise<VCRecord[]> {
+    return this.getVCs(subjectAddress);
+  }
+
+  /**
    * Fetch the credential type label anchored for a subject's VC hash from the
    * identity-oracle.
    *

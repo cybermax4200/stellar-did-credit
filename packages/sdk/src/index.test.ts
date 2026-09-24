@@ -1517,6 +1517,39 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("listVCs", () => {
+    it("returns the same VC records as getVCs including revoked", async () => {
+      const vcHash = Buffer.alloc(32, 7);
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: [
+              {
+                vc_hash: vcHash,
+                issuer: issuerKeypair.publicKey(),
+                anchored_at: 1_700_000_000,
+                revoked: false,
+              },
+              {
+                vc_hash: Buffer.alloc(32, 8),
+                issuer: issuerKeypair.publicKey(),
+                anchored_at: 1_700_000_001,
+                revoked: true,
+              },
+            ],
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.listVCs(subjectAddress);
+
+      expect(result).toHaveLength(2);
+      expect(result[1]?.revoked).toBe(true);
+      expect(mockLastContractCall?.method).toBe("get_vc_details");
+    });
+  });
+
   describe("getCredentialType", () => {
     it("returns the credential type label for a valid hash", async () => {
       mockSimulateTransaction.mockResolvedValue({
