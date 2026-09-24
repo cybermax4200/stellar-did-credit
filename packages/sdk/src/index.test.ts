@@ -1652,6 +1652,79 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("getCredentialTypeWeight", () => {
+    it("returns weight for a credential type", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: 150 },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getCredentialTypeWeight("employment");
+
+      expect(result).toBe(150);
+      expect(mockLastContractCall?.method).toBe("get_credential_type_weight");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getCredentialTypeWeight("kyc")).rejects.toMatchObject({
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
+  describe("setCredentialTypeWeight", () => {
+    const adminAddress = "GADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const adminKeypair = { publicKey: () => adminAddress };
+
+    it("submits transaction to set credential type weight", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: undefined },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.setCredentialTypeWeight(
+        adminKeypair as never,
+        "kyc",
+        120,
+      );
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(adminAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "set_credential_type_weight",
+      });
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.setCredentialTypeWeight(adminKeypair as never, "kyc", 120),
+      ).rejects.toMatchObject({
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
   describe("getWeights", () => {
     it("returns scoring weights from the credit-oracle", async () => {
       mockSimulateTransaction.mockResolvedValue({

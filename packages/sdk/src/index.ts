@@ -1631,6 +1631,116 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Get the weight multiplier in basis points for a credential type.
+   *
+   * @param credentialType - The credential type label (e.g. "kyc", "employment")
+   * @returns Weight in basis points (default 100)
+   */
+  async getCredentialTypeWeight(credentialType: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "get_credential_type_weight",
+          nativeToScVal(credentialType),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for a credential type.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param credentialType - The credential type label
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setCredentialTypeWeight(
+    adminKeypair: KeypairLike,
+    credentialType: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_credential_type_weight",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(credentialType),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setCredentialTypeWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Fetch the scoring weights currently configured on the credit-oracle contract.
    *
    * Uses a read-only simulation (no signing required).
