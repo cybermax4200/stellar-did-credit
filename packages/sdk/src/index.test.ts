@@ -2623,6 +2623,8 @@ describe("parseContractErrorCode", () => {
     expect(() =>
       throwContractError("Error(Contract, #17)", "credit-oracle"),
     ).toThrow(new CreditOracleError(17, "InvalidAmount (code 17)"));
+  });
+
   it("maps InvalidIssuerTier identity-oracle errors to their variant name", () => {
     expect(() =>
       throwContractError("Error(Contract, #11)", "identity-oracle"),
