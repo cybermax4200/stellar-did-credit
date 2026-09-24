@@ -48,6 +48,10 @@ export interface ScoringWeights {
   txWeight: number;
   repaymentWeight: number;
 }
+export interface PendingWeights {
+  weights: ScoringWeights;
+  effectiveLedger: number;
+}
 export interface RecencyDecayConfig {
   enabled: boolean;
   decayBpsPerDay: number;
@@ -174,6 +178,7 @@ const IDENTITY_ORACLE_ERROR_CODES: Record<number, string> = {
   8: "ContractPaused",
   9: "InvalidRevocationRegistry",
   10: "VCLimitReached",
+  11: "InvalidIssuerTier",
 };
 
 const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
@@ -408,8 +413,200 @@ export class GovernanceClient {
    * approximately 24 hours for the credit-oracle timelock, and then call
    * `applyWeights` before the new weights become active.
    */
+  /**
+   * Register a new voter with the specified weight.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - Voting weight to assign
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async registerVoter(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "register_voter",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "registerVoter",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Update the voting weight for a registered voter.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - New voting weight (0 to deregister)
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async updateVoterWeight(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "update_voter_weight",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "updateVoterWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Set the contract-wide default quorum required for new proposals.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param quorum - New default quorum requirement
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setQuorum(
+    adminKeypair: KeypairLike,
+    quorum: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_quorum",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(quorum, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "setQuorum",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
   async createProposal(
-    proposerKeypair: Keypair,
+    proposerKeypair: KeypairLike,
     weights: ScoringWeights,
     votingPeriodLedgers: number,
     executionDelayLedgers: number,
@@ -1273,6 +1470,110 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Check if a subject has voluntarily deactivated their identity.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns true if subject has deactivated their identity
+   */
+  async isDeactivated(subjectAddress: string): Promise<boolean> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("is_deactivated", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as boolean;
+  }
+
+  /**
+   * Re-activate a previously deactivated identity.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the subject
+   * keypair to authorize the operation.
+   *
+   * @param subjectKeypair - Stellar keypair of the subject
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async reactivateIdentity(subjectKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(subjectKeypair);
+
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "reactivate_identity",
+          new Address(publicKey).toScVal(),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(subjectKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "reactivateIdentity",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Check if a subject address has at least one non-revoked verifiable credential.
    *
    * Uses a read-only simulation against the identity-oracle contract.
@@ -1729,6 +2030,116 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Get the weight multiplier in basis points for a credential type.
+   *
+   * @param credentialType - The credential type label (e.g. "kyc", "employment")
+   * @returns Weight in basis points (default 100)
+   */
+  async getCredentialTypeWeight(credentialType: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "get_credential_type_weight",
+          nativeToScVal(credentialType),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for a credential type.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param credentialType - The credential type label
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setCredentialTypeWeight(
+    adminKeypair: KeypairLike,
+    credentialType: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_credential_type_weight",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(credentialType),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setCredentialTypeWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Fetch the scoring weights currently configured on the credit-oracle contract.
    *
    * Uses a read-only simulation (no signing required).
@@ -1764,6 +2175,70 @@ export class StellarDIDCreditSDK {
     }
 
     return parseScoringWeights(resultScVal);
+  }
+
+  /**
+   * Fetch scoring weights queued for activation on the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Pending weights and their effective ledger, or null when none exist
+   */
+  async getPendingWeights(): Promise<PendingWeights | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_pending_weights"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    if (typeof native !== "object") {
+      throw new Error("get_pending_weights returned an invalid result");
+    }
+
+    const raw = native as Record<string, unknown>;
+    const rawWeights = raw["weights"];
+    if (
+      rawWeights === null ||
+      rawWeights === undefined ||
+      typeof rawWeights !== "object"
+    ) {
+      throw new Error("get_pending_weights returned invalid weights");
+    }
+    const weights = rawWeights as Record<string, unknown>;
+
+    return {
+      weights: {
+        vcWeight: Number(weights["vc_weight"]),
+        txWeight: Number(weights["tx_weight"]),
+        repaymentWeight: Number(weights["repayment_weight"]),
+      },
+      effectiveLedger: Number(raw["effective_ledger"]),
+    };
   }
 
   /**
@@ -1840,6 +2315,111 @@ export class StellarDIDCreditSDK {
     }
 
     return parseCreditProtocolStats(resultScVal);
+  }
+
+  /**
+   * Get the weight multiplier in basis points for an issuer.
+   *
+   * @param issuer - The issuer address (Stellar G...)
+   * @returns Weight in basis points (default 100)
+   */
+  async getIssuerTier(issuer: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_issuer_tier", new Address(issuer).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for an issuer.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param issuer - The issuer address
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setIssuerTier(
+    adminKeypair: KeypairLike,
+    issuer: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_issuer_tier",
+          new Address(publicKey).toScVal(),
+          new Address(issuer).toScVal(),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setIssuerTier",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
   }
 
   /**
@@ -2257,6 +2837,286 @@ export class StellarDIDCreditSDK {
         timer = undefined;
       }
     };
+  }
+
+  private async submitContractTransaction(
+    signerKeypair: KeypairLike,
+    contractName:
+      | "identity-oracle"
+      | "credit-oracle"
+      | "revocation-registry"
+      | "governance",
+    operation: xdr.Operation,
+    operationName: string,
+  ): Promise<string> {
+    const server = this.server;
+    const publicKey = getPublicKey(signerKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error ?? "Simulation failed", contractName);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(signerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      operationName,
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Pause all write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, write operations (such as anchoring
+   * DIDs or credentials) will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("pause"),
+      "pauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("unpause"),
+      "unpauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, score computation and other write
+   * operations will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("pause", new Address(publicKey).toScVal()),
+      "pauseCreditOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("unpause", new Address(publicKey).toScVal()),
+      "unpauseCreditOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation. When paused, credential revocations will fail until
+   * unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("pause"),
+      "pauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Resume write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("unpause"),
+      "unpauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the identity-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeIdentityOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.identityOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("upgrade", hashScVal),
+      "upgradeIdentityOracle",
+    );
+  }
+
+  /**
+   * Upgrade the revocation-registry contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeRevocationRegistry(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.revocationRegistryId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("upgrade", hashScVal),
+      "upgradeRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the credit-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeCreditOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("upgrade", new Address(publicKey).toScVal(), hashScVal),
+      "upgradeCreditOracle",
+    );
   }
 }
 

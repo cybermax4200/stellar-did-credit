@@ -117,7 +117,7 @@ Computes and stores credit scores based on on-chain data.
 | `list_feeders()`                                     | Returns all currently registered feeders           |
 | `list_lenders()`                                     | Returns all currently registered lenders           |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
-| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
+| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome. Returns InvalidAmount if amount ≤ 0. |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
@@ -140,6 +140,7 @@ On-chain proposal creation, weighted voting, and multi-step execution for updati
 | `update_voter_weight(admin, voter, weight)`                | Admin updates or deregisters a voter (weight = 0)      |
 | `set_quorum(admin, quorum_required)`                       | Admin sets the default quorum for future proposals     |
 | `get_proposal(proposal_id)`                                | Returns a proposal by ID                               |
+| `list_voters()`                                            | Returns all registered voters with their current weights. |
 | `cancel_proposal(canceller, proposal_id)`                  | Proposer/admin cancels; sets `cancelled: bool`, blocks further voting/execution |
 
 ### revocation-registry
