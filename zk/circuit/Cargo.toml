@@ -12,7 +12,7 @@ crate-type = ["cdylib", "rlib"]
 ark-ff = "0.4"
 ark-ec = "0.4"
 ark-bls12-381 = "0.4"
-ark-r1cs-std = { version = "0.4", features = ["parallel"] }
+ark-r1cs-std = { version = "0.6", features = ["parallel"] }
 ark-relations = "0.4"
 ark-groth16 = "0.4"
 ark-snark = "0.4"
