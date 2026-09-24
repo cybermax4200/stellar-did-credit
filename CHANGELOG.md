@@ -25,6 +25,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with code `TRANSACTION_TIMEOUT` (#501)
 - SDK (`@stellar-did-credit/sdk`): removed duplicate `revokeVC` method that referenced undefined helpers; added missing `SorobanRpc.Server` instance property to the class constructor; fixed `computeScore` to use the class-level server and inline helpers; resolved type error in `waitForTransactionConfirmation` where `GetTransactionStatus` union was compared against string literals (#161)
 - `credit-oracle`: `record_repayment` now records the public `amount` parameter in `RepaymentRecord.total_repaid` and includes capped repayment volume in the repayment score component (#221)
+- `credit-oracle`: `set_identity_oracle` now emits `IdOSet` with the new identity-oracle address (replaces `IdOracle`); documented in `docs/event-indexing.md` (#670)
 
 ### Added
 

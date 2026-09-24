@@ -2693,22 +2693,29 @@ mod tests {
         client.set_identity_oracle(&admin, &identity_oracle_id);
 
         let events = env.events().all();
-        // Initialized + IdOSet
-        assert_eq!(events.len(), 2, "expected Initialized + IdOSet events");
-        let (event_contract_id, topics, data) = events.get(1).unwrap();
-        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
-        assert_eq!(topics.len(), 1, "expected 1 topic element");
-        let topic_sym: Symbol = topics
-            .get(0)
-            .unwrap()
-            .try_into_val(&env)
-            .expect("topic should be a Symbol");
-        assert_eq!(topic_sym, symbol_short!("IdOSet"), "expected IdOSet topic");
-        let event_oracle: Address = data.try_into_val(&env).expect("data should be an Address");
-        assert_eq!(
-            event_oracle, identity_oracle_id,
-            "event data should be the new identity oracle address"
-        );
+        // Filter for the IdOSet event from this contract (robust to
+        // additional setup events such as Initialized).
+        let mut idoset_count = 0u32;
+        for (event_contract_id, topics, data) in events.iter() {
+            if event_contract_id != contract_id || topics.len() != 1 {
+                continue;
+            }
+            let topic_sym: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+            if topic_sym != symbol_short!("IdOSet") {
+                continue;
+            }
+            let event_oracle: Address = data.try_into_val(&env).expect("data should be an Address");
+            assert_eq!(
+                event_oracle, identity_oracle_id,
+                "event data should be the new identity oracle address"
+            );
+            idoset_count += 1;
+        }
+        assert_eq!(idoset_count, 1, "expected exactly one IdOSet event");
     }
 
     #[test]
