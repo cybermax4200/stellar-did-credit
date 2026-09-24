@@ -22,8 +22,16 @@ pub const CIRCUIT_DOMAIN: &[u8] = b"stellar-did-credit::score-gt-threshold::v1";
 pub struct ScorePublicInputs {
     /// The threshold the prover claims `score > threshold`.
     pub threshold: u32,
-    /// Commitment to the private ScoreRecord fields (an `Fr` element).
+    /// Subject bound to the proof (SHA-256 of XDR).
+    pub subject: Fr,
+    /// Credit oracle ID (SHA-256 of XDR).
+    pub credit_oracle_id: Fr,
+    /// Commitment to the private ScoreRecord fields.
     pub score_commitment: Fr,
+    /// Snapshot ledger.
+    pub snapshot_ledger: u32,
+    /// Domain separator.
+    pub domain_separator: Fr,
 }
 
 /// Private witness for the circuit.
@@ -129,8 +137,20 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         let threshold = FpVar::new_input(cs.clone(), || {
             Ok(Fr::from(self.public_inputs.threshold))
         })?;
+        let _subject = FpVar::new_input(cs.clone(), || {
+            Ok(self.public_inputs.subject)
+        })?;
+        let _credit_oracle_id = FpVar::new_input(cs.clone(), || {
+            Ok(self.public_inputs.credit_oracle_id)
+        })?;
         let commitment = FpVar::new_input(cs.clone(), || {
             Ok(self.public_inputs.score_commitment)
+        })?;
+        let _snapshot_ledger = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.snapshot_ledger))
+        })?;
+        let _domain_separator = FpVar::new_input(cs.clone(), || {
+            Ok(self.public_inputs.domain_separator)
         })?;
 
         // ---- Private witness ----
@@ -501,7 +521,11 @@ mod tests {
             Some(w),
             ScorePublicInputs {
                 threshold: 600,
+                subject: Fr::from(1u32),
+                credit_oracle_id: Fr::from(2u32),
                 score_commitment: commitment,
+                snapshot_ledger: 12345,
+                domain_separator: Fr::from(3u32),
             },
         );
         circuit.generate_constraints(cs.clone()).unwrap();

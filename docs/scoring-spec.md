@@ -57,6 +57,16 @@ Default weights (governed on-chain via the governance contract, see
 
 ## Worked examples
 
+**Example scores** (all arithmetic uses integer division, matching the contract):
+
+| Profile     | VCs | 30d Volume | Total repaid | Counterparties | Repayment rate | Score |
+| ----------- | --- | ---------- | ------------ | -------------- | -------------- | ----- |
+| New user    | 0   | 0 XLM      | 0 XLM        | 0              | —              | 300   |
+| Early stage | 1   | 5 XLM      | 5 XLM        | 0              | 70%            | 410   |
+| Established | 2   | 20 XLM     | 20 XLM       | 0              | 85%            | 503   |
+| Strong      | 3   | 50 XLM     | 50 XLM       | 5              | 95%            | 630   |
+| Exceptional | ≥5  | 100+ XLM   | 100+ XLM     | 100+           | 100%           | 850   |
+
 ### New user (no history) → 300
 
 Inputs: `vc_count = 0`, no volume, no repayment record.
@@ -85,10 +95,10 @@ composite            = (40×40 + 20×30 + 52×30) ÷ 100 = 3760 ÷ 100 = 37
 final_score          = 300 + 37×550 ÷ 100 = 300 + 203 = 503
 ```
 
-Cross-checked by the unit test `test_score_formula_readme_example_rows`:
+Cross-checked by the unit test `scoring_examples`:
 
 ```
-cargo test -p credit-oracle -- score_formula
+cargo test -p credit-oracle -- scoring_examples
 ```
 
 ### Exceptional profile → 850

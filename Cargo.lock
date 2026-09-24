@@ -2206,6 +2206,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "zk-wasm"
+version = "0.1.0"
+dependencies = [
+ "ark-bls12-381",
+ "ark-ff",
+ "ark-serialize",
+ "ark-std",
+ "js-sys",
+ "wasm-bindgen",
+ "zk-circuit",
+]
+
+[[package]]
 name = "zmij"
 version = "1.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"

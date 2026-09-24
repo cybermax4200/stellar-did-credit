@@ -5,7 +5,10 @@
 //!
 //! Each property executes 1 000 random cases by default.
 
-use crate::{compute_score_pure, MAX_SCORE, MIN_SCORE};
+use crate::{
+    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_SCORE,
+    MIN_SCORE, SECONDS_PER_DAY,
+};
 use proptest::prelude::*;
 
 // ---------------------------------------------------------------------------
@@ -233,5 +236,109 @@ proptest! {
                 diff, base, perturbed
             );
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 7 — Future credential: anchored_at > now -> age 0 -> full multiplier
+//
+// Clock skew (credential anchored at a future ledger) must not underflow.
+// `now.saturating_sub(anchored_at)` returns 0, so age_days = 0, decay = 0, and
+// the multiplier equals BPS_DENOMINATOR regardless of decay settings.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_recency_future_anchored_at_full_multiplier(
+        future_offset_secs in 1u64..=1_000_000_000u64,
+        now               in 0u64..=u64::MAX - 1_000_000_000u64,
+        decay_bps_per_day in 0u32..=BPS_DENOMINATOR,
+        min_recency_bps   in 0u32..=BPS_DENOMINATOR,
+    ) {
+        let anchored_at = now.saturating_add(future_offset_secs);
+        let multiplier = recency_multiplier_bps(
+            anchored_at, now, decay_bps_per_day, min_recency_bps,
+        );
+        prop_assert_eq!(
+            multiplier, BPS_DENOMINATOR,
+            "future anchored_at must yield BPS_DENOMINATOR (age 0), got {}",
+            multiplier
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 8 — Zero decay: any age -> full multiplier
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_recency_zero_decay_full_multiplier(
+        anchored_at in 0u64..=u64::MAX / 2,
+        age_days    in 0u64..=10_000_000u64,
+        min_recency_bps in 0u32..=BPS_DENOMINATOR,
+    ) {
+        let now = anchored_at
+            .saturating_add(age_days.saturating_mul(SECONDS_PER_DAY));
+        let multiplier = recency_multiplier_bps(anchored_at, now, 0, min_recency_bps);
+        prop_assert_eq!(
+            multiplier, BPS_DENOMINATOR,
+            "zero decay must yield BPS_DENOMINATOR for any age, got {}",
+            multiplier
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 9 — Floor = denominator: any age -> full multiplier
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_recency_floor_at_denominator_full_multiplier(
+        anchored_at       in 0u64..=u64::MAX / 2,
+        age_days          in 0u64..=10_000_000u64,
+        decay_bps_per_day in 0u32..=BPS_DENOMINATOR,
+    ) {
+        let now = anchored_at
+            .saturating_add(age_days.saturating_mul(SECONDS_PER_DAY));
+        let multiplier = recency_multiplier_bps(
+            anchored_at, now, decay_bps_per_day, BPS_DENOMINATOR,
+        );
+        prop_assert_eq!(
+            multiplier, BPS_DENOMINATOR,
+            "floor = BPS_DENOMINATOR must yield BPS_DENOMINATOR for any age/decay, got {}",
+            multiplier
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 10 — Oversize floor is clamped to BPS_DENOMINATOR
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_recency_oversize_floor_clamped_to_denominator(
+        anchored_at       in 0u64..=u64::MAX / 2,
+        age_days          in 0u64..=10_000_000u64,
+        decay_bps_per_day in 0u32..=BPS_DENOMINATOR,
+        floor_overshoot   in 1u32..=u32::MAX - BPS_DENOMINATOR,
+    ) {
+        let now = anchored_at
+            .saturating_add(age_days.saturating_mul(SECONDS_PER_DAY));
+        let min_recency_bps = BPS_DENOMINATOR.saturating_add(floor_overshoot);
+        let multiplier = recency_multiplier_bps(
+            anchored_at, now, decay_bps_per_day, min_recency_bps,
+        );
+        prop_assert_eq!(
+            multiplier, BPS_DENOMINATOR,
+            "oversize floor must clamp to BPS_DENOMINATOR, got {}",
+            multiplier
+        );
     }
 }

@@ -271,17 +271,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
+    if (!options.json) {
+      console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const score = await sdk.getScore(upperAddr);
 
-      if (!score) {
-        console.log();
-        console.log("No score computed yet for this address.");
-        console.log(
-          'Run "stellar-did compute-score" to compute one, or ask a feeder to sync data first.',
-        );
+      if (score === null) {
+        if (options.json) {
+          console.log(JSON.stringify({ score: null }));
+        } else {
+          console.log();
+          console.log(
+            "No credit score has been computed for this subject yet. Run `compute-score` first.",
+          );
+        }
+        process.exit(0);
         return;
       }
 
@@ -290,6 +296,8 @@ program
           if (typeof value === "bigint") return value.toString();
           return value;
         }, 2));
+        process.exit(0);
+        return;
       } else {
         printScoreRecord(score);
       }
@@ -384,12 +392,9 @@ program
         const score = await sdk.computeScore(keypair, upperAddr);
 
         if (options.json) {
-          console.log(JSON.stringify(score, (key, value) => {
-            if (typeof value === "bigint") return value.toString();
-            return value;
-          }, 2));
+          console.log(JSON.stringify({ score }, null, 2));
         } else {
-          printScoreRecord(score);
+          console.log(`\n✅ Computed Score: ${score}`);
         }
       } catch (err) {
         console.error(
@@ -411,7 +416,8 @@ program
     "Check whether a subject has at least one active, non-revoked verifiable credential.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -421,16 +427,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Checking verification status for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Checking verification status for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const verified = await sdk.isVerified(upperAddr);
 
-      console.log();
-      if (verified) {
-        console.log("✅ Subject is VERIFIED.");
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ isVerified: verified }));
+        process.exit(0);
       } else {
-        console.log("❌ Subject is NOT verified — no active credentials found.");
+        console.log();
+        if (verified) {
+          console.log("✅ Subject is VERIFIED.");
+        } else {
+          console.log("❌ Subject is NOT verified — no active credentials found.");
+        }
       }
     } catch (err) {
       console.error(
@@ -451,7 +464,8 @@ program
     "Returns the number of active (non-revoked) verifiable credentials for a subject.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -461,13 +475,20 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const count = await sdk.getVCCount(upperAddr);
 
-      console.log();
-      console.log(`Active VC count: ${count}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ vcCount: count }));
+        process.exit(0);
+      } else {
+        console.log();
+        console.log(`Active VC count: ${count}`);
+      }
     } catch (err) {
       console.error(
         "Failed:",
@@ -563,7 +584,8 @@ program
     "Fetch the IPFS CID of the DID document anchored for a subject address.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -572,16 +594,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const cid = await sdk.getDIDDocument(upperAddr);
 
-      console.log();
-      if (cid) {
-        console.log(`DID Document CID: ${cid}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ didDocument: cid || null }));
+        process.exit(0);
       } else {
-        console.log("No DID document anchored for this address.");
+        console.log();
+        if (cid) {
+          console.log(`DID Document CID: ${cid}`);
+        } else {
+          console.log("No DID document anchored for this address.");
+        }
       }
     } catch (err) {
       console.error(
@@ -799,6 +828,58 @@ program
     console.log(`Results written to ${cmdOptions.resultFile}`);
   });
 
+program
+  .command("prove-score")
+  .description("Generate and submit a zero-knowledge proof for a credit score threshold")
+  .requiredOption("-s, --subject <address>", "Subject public key")
+  .requiredOption("-t, --threshold <number>", "Threshold score to prove", parseFloat)
+  .requiredOption("-v, --verifier <contractId>", "Contract ID of the score-range-verifier")
+  .option("-b, --blinding <number>", "Blinding factor (default: random)", parseFloat)
+  .action(async (cmdOptions) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId', 'creditOracleId', 'rpcUrl', 'networkPassphrase'], false);
+    
+    const sdk = new StellarDIDCreditSDK(config);
+    const secretKey = process.env.STELLAR_SECRET || config.simAccount;
+    const kp = parseSecret(secretKey);
+    const subject = cmdOptions.subject.toUpperCase();
+    assertStellarAddress("subject", subject);
+
+    const blinding = cmdOptions.blinding !== undefined ? cmdOptions.blinding : Math.floor(Math.random() * 1000000);
+
+    console.log(`Generating score proof for ${subject} with threshold ${cmdOptions.threshold}...`);
+    let proof: Uint8Array;
+    try {
+      proof = await sdk.generateScoreProof(subject, cmdOptions.threshold, blinding);
+      console.log(`Proof generated successfully. (${proof.length} bytes)`);
+    } catch (err: unknown) {
+      console.error(`Error generating proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+
+    console.log(`Submitting proof to verifier contract ${cmdOptions.verifier}...`);
+    try {
+      const result = await sdk.verifyScoreProof(
+        kp,
+        subject,
+        cmdOptions.threshold,
+        proof,
+        cmdOptions.verifier
+      );
+      if (result) {
+        console.log(`Proof successfully verified by the contract!`);
+      } else {
+        console.log(`Proof verification failed!`);
+        process.exit(1);
+      }
+    } catch (err: unknown) {
+      console.error(`Error verifying proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
 // ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
@@ -807,3 +888,6 @@ program
 if (require.main === module) {
   program.parse();
 }
+
+export { program };
+

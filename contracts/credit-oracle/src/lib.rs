@@ -708,6 +708,9 @@ impl CreditOracle {
         amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        if amount <= 0 {
+            return Err(CreditOracleError::InvalidAmount);
+        }
         ensure_not_paused(&env)?;
         lender.require_auth();
         let is_trusted: bool = env
@@ -1392,6 +1395,9 @@ impl CreditOracle {
     /// identity-oracle instead of reading the cached `VcCount` storage key.
     /// This enables live VC count resolution that automatically excludes revoked VCs.
     ///
+    /// Emits an `IdOSet` event with the new identity oracle address so indexers
+    /// and monitoring tools can detect configuration changes.
+    ///
     /// Auth: admin only.
     pub fn set_identity_oracle(
         env: Env,
@@ -1414,7 +1420,7 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         env.events()
-            .publish((symbol_short!("IdOracle"),), identity_oracle_id);
+            .publish((symbol_short!("IdOSet"),), identity_oracle_id);
         Ok(())
     }
 
@@ -1796,7 +1802,7 @@ mod tests {
     }
 
     #[test]
-    fn test_score_formula_readme_example_rows() {
+    fn scoring_examples() {
         // Pins every "Example scores" row in README.md (and the worked
         // examples in docs/scoring-spec.md) to compute_score_pure so the
         // documentation can never drift from the implementation again.
@@ -2423,6 +2429,27 @@ mod tests {
     }
 
     #[test]
+    fn test_record_repayment_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        let result = client.try_record_repayment(&lender, &subject, &-1, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidAmount)));
+
+        let zero_result = client.try_record_repayment(&lender, &subject, &0, &true);
+        assert_eq!(zero_result, Err(Ok(CreditOracleError::InvalidAmount)));
+    }
+
+    #[test]
     fn test_list_feeders_returns_only_currently_registered() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2500,6 +2527,40 @@ mod tests {
             index.len()
         });
         assert_eq!(index_len, 2);
+    }
+
+    #[test]
+    fn test_list_feeders_empty_index_returns_empty_vec() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // No feeder ever registered -> FeedersIndex unset -> empty Vec.
+        assert_eq!(
+            client.list_feeders(),
+            Vec::<Address>::new(&env)
+        );
+    }
+
+    #[test]
+    fn test_list_lenders_empty_index_returns_empty_vec() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // No lender ever registered -> LendersIndex unset -> empty Vec.
+        assert_eq!(
+            client.list_lenders(),
+            Vec::<Address>::new(&env)
+        );
     }
 
     #[test]
@@ -2765,6 +2826,45 @@ mod tests {
     }
 
     #[test]
+    fn test_set_identity_oracle_emits_idoset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        let events = env.events().all();
+        // Filter for the IdOSet event from this contract (robust to
+        // additional setup events such as Initialized).
+        let mut idoset_count = 0u32;
+        for (event_contract_id, topics, data) in events.iter() {
+            if event_contract_id != contract_id || topics.len() != 1 {
+                continue;
+            }
+            let topic_sym: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+            if topic_sym != symbol_short!("IdOSet") {
+                continue;
+            }
+            let event_oracle: Address = data.try_into_val(&env).expect("data should be an Address");
+            assert_eq!(
+                event_oracle, identity_oracle_id,
+                "event data should be the new identity oracle address"
+            );
+            idoset_count += 1;
+        }
+        assert_eq!(idoset_count, 1, "expected exactly one IdOSet event");
+    }
+
+    #[test]
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2961,7 +3061,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flag_score_input_rejects_invalid_key() {
+    fn flag_score_input_invalid_key() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -2971,7 +3071,7 @@ mod tests {
         let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        let bad_key = soroban_sdk::Symbol::new(&env, "bad_input");
+        let bad_key = soroban_sdk::Symbol::new(&env, "invalid");
         let reason = soroban_sdk::String::from_str(&env, "test");
         let result = client.try_flag_score_input(&subject, &bad_key, &reason);
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidInputKey)));

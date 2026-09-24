@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TypeScript SDK: pause, unpause, and upgrade helpers for contracts (#701)
 - TypeScript SDK (`@stellar-did-credit/sdk`): added polling subscriptions for `VCAnch`, `Score`, and `Revoked` events with typed callbacks and unsubscribe support (#502)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `revokeVC(issuerKeypair, vcHash)` now submits issuer-signed revocations through the revocation registry, validates 32-byte hashes and registry configuration with typed `SDKError` codes, and polls pending transactions with configurable confirmation timeouts. The issuer example can demonstrate the flow with `--revoke` (#499)
 - `governance`: `cancel_proposal(canceller, proposal_id)` — replaces the previous no-op `cancel()` stub with a real on-chain cancellation function. Only the original proposer or the contract admin may cancel; any other caller receives `NotAuthorized`. Cancelled proposals cannot be executed (`ProposalAlreadyCancelled` is returned on any `execute` attempt). Emits a `PropCanc` event with `(proposal_id)` as topics and the canceller address as data. Votes already cast are preserved in storage but have no effect — registered voter weight is not consumed globally and remains available for other proposals. `GovernanceProposal` struct gains a `cancelled: bool` field and a `proposer: Address` field. New `ProposalAlreadyCancelled = 14` error variant added. New `DataKey::Proposer(u64)` persistent storage key stores the proposer address at creation time. Integration tests: `test_cancel_proposal_create_cancel_execute_fails`, `test_admin_can_cancel_proposal`, `test_unauthorized_cancel_is_rejected`, `test_double_cancel_is_rejected` (#issue)
@@ -18,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `packages/cli` (`@stellar-did-credit/cli`): handle unscored subjects in `get-score` command by printing a helpful message and outputting `{ "score": null }` in JSON mode (#700)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `anchorDID`, `issueVC`,
   `revokeVC`, and `computeScore` now retry transient transaction submissions
   with exponential backoff and wait for final transaction status. Confirmation
@@ -25,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   with code `TRANSACTION_TIMEOUT` (#501)
 - SDK (`@stellar-did-credit/sdk`): removed duplicate `revokeVC` method that referenced undefined helpers; added missing `SorobanRpc.Server` instance property to the class constructor; fixed `computeScore` to use the class-level server and inline helpers; resolved type error in `waitForTransactionConfirmation` where `GetTransactionStatus` union was compared against string literals (#161)
 - `credit-oracle`: `record_repayment` now records the public `amount` parameter in `RepaymentRecord.total_repaid` and includes capped repayment volume in the repayment score component (#221)
+- `credit-oracle`: `set_identity_oracle` now emits `IdOSet` with the new identity-oracle address (replaces `IdOracle`); documented in `docs/event-indexing.md` (#670)
 
 ### Added
 

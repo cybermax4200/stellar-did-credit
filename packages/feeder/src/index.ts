@@ -51,27 +51,26 @@ import {
   Keypair,
   Horizon,
 } from "@stellar/stellar-sdk";
-import {
-  HealthTracker,
-  createHealthServer,
-  parseHealthPort,
-} from "./health";
+import { HealthTracker, createHealthServer, parseHealthPort } from "./health";
 
 // ---------------------------------------------------------------------------
 // Network configurations
 // ---------------------------------------------------------------------------
 
-type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
+type NetworkType = "testnet" | "mainnet" | "futurenet";
 
-const NETWORK_CONFIGS: Record<NetworkType, {
-  networkPassphrase: string;
-  rpcUrl: string;
-  horizonUrl: string;
-  simAccount: string;
-}> = {
+const NETWORK_CONFIGS: Record<
+  NetworkType,
+  {
+    networkPassphrase: string;
+    rpcUrl: string;
+    horizonUrl: string;
+    simAccount: string;
+  }
+> = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
-    rpcUrl: "https://soroban-testnet.stellar.org", 
+    rpcUrl: "https://soroban-testnet.stellar.org",
     horizonUrl: "https://horizon-testnet.stellar.org",
     simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
   },
@@ -82,7 +81,7 @@ const NETWORK_CONFIGS: Record<NetworkType, {
     simAccount: "", // Must be set via env var for mainnet
   },
   futurenet: {
-    networkPassphrase: "Test SDF Future Network ; October 2022", 
+    networkPassphrase: "Test SDF Future Network ; October 2022",
     rpcUrl: "https://rpc-futurenet.stellar.org",
     horizonUrl: "https://horizon-futurenet.stellar.org",
     simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
@@ -205,6 +204,13 @@ interface ErrorWithMeta {
     data?: { extras?: { result_codes?: unknown } };
     headers?: { get(name: string): string | null } | Record<string, string>;
   };
+}
+
+class HorizonRateLimitError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "HorizonRateLimitError";
+  }
 }
 
 /**
@@ -424,7 +430,9 @@ export async function fetchHorizonStats(
   const maxPageRetries = Number.isFinite(options.maxRetries as number)
     ? Math.max(0, options.maxRetries as number)
     : 3;
-  const pageRetryBaseDelayMs = Number.isFinite(options.retryBaseDelayMs as number)
+  const pageRetryBaseDelayMs = Number.isFinite(
+    options.retryBaseDelayMs as number,
+  )
     ? Math.max(1, options.retryBaseDelayMs as number)
     : 1_000;
   // Validate address before making API calls
@@ -444,7 +452,6 @@ export async function fetchHorizonStats(
   // Rate-limit aware call helper: if Horizon responds with 429 and a
   // `Retry-After` header, wait that duration and retry.
   async function callWithHorizonRateLimit<T>(fn: () => Promise<T>): Promise<T> {
-    const maxRateLimitRetries = 5;
     for (let attempt = 0; ; attempt++) {
       try {
         return await fn();
@@ -453,18 +460,28 @@ export async function fetchHorizonStats(
         const status = errMeta?.response?.status;
         const headers = errMeta?.response?.headers;
         if (status === 429 && headers) {
-          // Try to read `Retry-After` header (seconds). Fall back to a small delay.
-          let retryAfterMs = 1000;
+          if (attempt >= maxPageRetries) {
+            throw new HorizonRateLimitError(
+              `Horizon rate limit persisted after ${maxPageRetries} retries`,
+            );
+          }
+
+          // Try to read `Retry-After` header (seconds). Otherwise use
+          // exponential backoff with jitter to avoid synchronized retries.
+          let retryAfterMs = pageRetryBaseDelayMs * 2 ** attempt;
           try {
             const sec = getRetryAfterSeconds(headers);
-            if (sec !== undefined) retryAfterMs = Math.max(500, sec * 1000);
-          } catch (e) {
-            // ignore header parsing errors
+            if (sec !== undefined) {
+              retryAfterMs = Math.max(500, sec * 1000);
+            } else {
+              retryAfterMs *= 0.5 + Math.random();
+            }
+          } catch {
+            retryAfterMs *= 0.5 + Math.random();
           }
           console.warn(
             `[feeder] Horizon rate-limited (429); retrying in ${retryAfterMs}ms`,
           );
-          if (attempt >= maxRateLimitRetries) throw err;
           await sleep(retryAfterMs);
           continue;
         }
@@ -492,6 +509,7 @@ export async function fetchHorizonStats(
         // 500/503, connection resets, and 429s past its own budget).
         return await callWithHorizonRateLimit(() => current.next());
       } catch (err) {
+        if (err instanceof HorizonRateLimitError) throw err;
         if (!isTransientError(err)) throw err;
         if (attempt >= maxPageRetries) {
           console.warn(
@@ -522,6 +540,12 @@ export async function fetchHorizonStats(
       horizon.payments().forAccount(address).order("desc").limit(200).call(),
     );
   } catch (err) {
+    if (err instanceof HorizonRateLimitError) {
+      console.warn(
+        `[feeder] Horizon rate limit exhausted for ${address}, skipping subject`,
+      );
+      throw err;
+    }
     if (isAccountNotFoundError(err)) {
       console.log(`[feeder] Account not found for ${address}, skipping`);
       return EMPTY_TX_STATS();
@@ -580,7 +604,11 @@ export async function fetchHorizonStats(
         // Strategy: if the subject is the sender, count the XLM source leg;
         //           if the subject is the recipient, count the XLM destination leg;
         //           both legs can be XLM simultaneously (same-asset path).
-        if (op.from === address && op.source_asset_type === "native" && op.source_amount) {
+        if (
+          op.from === address &&
+          op.source_asset_type === "native" &&
+          op.source_amount
+        ) {
           const amountXLM = parseFloat(op.source_amount);
           volumeStroops += BigInt(Math.round(amountXLM * 10_000_000));
         }
@@ -895,7 +923,10 @@ export class Feeder {
    * complete (transaction submission cannot be cancelled mid-flight) but no
    * further steps are started — the subject may end up partially synced.
    */
-  async feedSubject(subjectAddress: string, signal?: AbortSignal): Promise<void> {
+  async feedSubject(
+    subjectAddress: string,
+    signal?: AbortSignal,
+  ): Promise<void> {
     const maxRetries = this.config.maxRetries ?? 3;
     const retryBaseDelayMs = this.config.retryBaseDelayMs ?? 1_000;
     // Issue #518: partial stats are submitted unless explicitly opted out.
@@ -914,16 +945,27 @@ export class Feeder {
     }
 
     // Step 2: fetch 30-day payment stats from Horizon
-    const stats = await withExponentialBackoff(
-      `fetch_horizon_stats(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () =>
-        fetchHorizonStats(this.config.horizonUrl, subjectAddress, {
-          maxRetries,
-          retryBaseDelayMs,
-        }),
-    );
+    let stats: TxStats;
+    try {
+      stats = await withExponentialBackoff(
+        `fetch_horizon_stats(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          fetchHorizonStats(this.config.horizonUrl, subjectAddress, {
+            maxRetries,
+            retryBaseDelayMs,
+          }),
+      );
+    } catch (err) {
+      if (err instanceof HorizonRateLimitError) {
+        console.warn(
+          `[feeder] ${subjectAddress} — rate limited by Horizon, skipping subject`,
+        );
+        return;
+      }
+      throw err;
+    }
     if (signal?.aborted) {
       console.log(`[feeder] ${subjectAddress} — aborted after horizon fetch`);
       return;
@@ -973,11 +1015,12 @@ export class Feeder {
     );
 
     // Step 3: submit set_vc_count (skip if cross-contract is configured or explicitly disabled)
-    const shouldSkipVcCount = identityOracleConfigured || this.config.skipLegacyVcCount === true;
-    
+    const shouldSkipVcCount =
+      identityOracleConfigured || this.config.skipLegacyVcCount === true;
+
     if (shouldSkipVcCount) {
-      const reason = identityOracleConfigured 
-        ? "cross-contract lookup configured" 
+      const reason = identityOracleConfigured
+        ? "cross-contract lookup configured"
         : "skipLegacyVcCount enabled";
       console.log(`  skipping set_vc_count (${reason})`);
     } else {
@@ -1109,9 +1152,7 @@ export class Feeder {
 
     for (const subject of validSubjects) {
       if (signal?.aborted) {
-        console.log(
-          `[feeder] cycle aborted — not starting remaining subjects`,
-        );
+        console.log(`[feeder] cycle aborted — not starting remaining subjects`);
         break;
       }
       try {
@@ -1193,13 +1234,17 @@ export class Feeder {
       try {
         if (
           identityLastLedger === undefined ||
-          (this.config.revocationRegistryId && revocationLastLedger === undefined)
+          (this.config.revocationRegistryId &&
+            revocationLastLedger === undefined)
         ) {
           const latestLedger = await this.server.getLatestLedger();
           if (identityLastLedger === undefined) {
             identityLastLedger = latestLedger.sequence;
           }
-          if (this.config.revocationRegistryId && revocationLastLedger === undefined) {
+          if (
+            this.config.revocationRegistryId &&
+            revocationLastLedger === undefined
+          ) {
             revocationLastLedger = latestLedger.sequence;
           }
         }
@@ -1225,7 +1270,8 @@ export class Feeder {
               (highestLedger, event) => Math.max(highestLedger, event.ledger),
               identityLastLedger!,
             );
-            identityLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+            identityLastLedger =
+              Math.max(response.latestLedger, latestEventLedger) + 1;
 
             for (const event of response.events) {
               const val = event.value;
@@ -1240,21 +1286,30 @@ export class Feeder {
                     if (subjectScVal.switch().name === "scvAddress") {
                       subject = scValToNative(subjectScVal) as string;
                     }
-                  } catch (e) { /* ignore */ }
+                  } catch (e) {
+                    /* ignore */
+                  }
 
                   let hash: string | undefined;
                   try {
                     if (hashScVal.switch().name === "scvBytes") {
                       hash = Buffer.from(hashScVal.bytes()).toString("hex");
                     }
-                  } catch (e) { /* ignore */ }
+                  } catch (e) {
+                    /* ignore */
+                  }
 
                   if (subject && hash) {
                     this.hashToSubject.set(hash, subject);
                     if (this.config.subjects.includes(subject)) {
-                      this.feedSubject(subject, controller.signal).catch((err) => {
-                        console.error(`[feeder] Error event-syncing ${subject}:`, err);
-                      });
+                      this.feedSubject(subject, controller.signal).catch(
+                        (err) => {
+                          console.error(
+                            `[feeder] Error event-syncing ${subject}:`,
+                            err,
+                          );
+                        },
+                      );
                     }
                   }
                 }
@@ -1287,7 +1342,8 @@ export class Feeder {
                 (highestLedger, event) => Math.max(highestLedger, event.ledger),
                 revocationLastLedger!,
               );
-              revocationLastLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
+              revocationLastLedger =
+                Math.max(response.latestLedger, latestEventLedger) + 1;
 
               for (const event of response.events) {
                 const val = event.value;
@@ -1301,14 +1357,21 @@ export class Feeder {
                       if (hashScVal.switch().name === "scvBytes") {
                         hash = Buffer.from(hashScVal.bytes()).toString("hex");
                       }
-                    } catch (e) { /* ignore */ }
+                    } catch (e) {
+                      /* ignore */
+                    }
 
                     if (hash) {
                       const subject = this.hashToSubject.get(hash);
                       if (subject && this.config.subjects.includes(subject)) {
-                        this.feedSubject(subject, controller.signal).catch((err) => {
-                          console.error(`[feeder] Error event-syncing ${subject}:`, err);
-                        });
+                        this.feedSubject(subject, controller.signal).catch(
+                          (err) => {
+                            console.error(
+                              `[feeder] Error event-syncing ${subject}:`,
+                              err,
+                            );
+                          },
+                        );
                       }
                     }
                   }
@@ -1402,6 +1465,7 @@ async function withExponentialBackoff<T>(
     try {
       return await fn();
     } catch (err) {
+      if (err instanceof HorizonRateLimitError) throw err;
       const isLastAttempt = attempt >= retries;
       if (isLastAttempt) {
         throw err;
@@ -1505,23 +1569,31 @@ if (require.main === module) {
   const identityOracleId = requireEnv("IDENTITY_ORACLE_ID");
 
   // Get network from NETWORK env var, default to testnet
-  const network = (process.env["NETWORK"]?.toLowerCase() as NetworkType) || 'testnet';
-  if (network !== 'testnet' && network !== 'mainnet' && network !== 'futurenet') {
-    console.error(`Error: NETWORK must be one of: testnet, mainnet, futurenet. Got: ${process.env["NETWORK"]}`);
+  const network =
+    (process.env["NETWORK"]?.toLowerCase() as NetworkType) || "testnet";
+  if (
+    network !== "testnet" &&
+    network !== "mainnet" &&
+    network !== "futurenet"
+  ) {
+    console.error(
+      `Error: NETWORK must be one of: testnet, mainnet, futurenet. Got: ${process.env["NETWORK"]}`,
+    );
     process.exit(1);
   }
 
   // Get network defaults, allow env var overrides
   const networkDefaults = NETWORK_CONFIGS[network];
-  const networkPassphrase = process.env["NETWORK_PASSPHRASE"] ?? networkDefaults.networkPassphrase;
+  const networkPassphrase =
+    process.env["NETWORK_PASSPHRASE"] ?? networkDefaults.networkPassphrase;
   const rpcUrl = process.env["RPC_URL"] ?? networkDefaults.rpcUrl;
   const horizonUrl = process.env["HORIZON_URL"] ?? networkDefaults.horizonUrl;
   const simAccount = process.env["SIM_ACCOUNT"] ?? networkDefaults.simAccount;
 
   // Validate mainnet SIM_ACCOUNT requirement
-  if (network === 'mainnet' && !simAccount) {
+  if (network === "mainnet" && !simAccount) {
     console.error(
-      "Error: SIM_ACCOUNT is required for mainnet feeder operations. Set SIM_ACCOUNT=G... to a funded mainnet account."
+      "Error: SIM_ACCOUNT is required for mainnet feeder operations. Set SIM_ACCOUNT=G... to a funded mainnet account.",
     );
     process.exit(1);
   }
@@ -1537,7 +1609,8 @@ if (require.main === module) {
   // Issue #518: opt-out flag. Anything other than the exact string "false"
   // keeps the default of committing partial stats, so a typo cannot silently
   // stop a feeder from writing.
-  const allowPartialStats = process.env["FEEDER_ALLOW_PARTIAL_STATS"] !== "false";
+  const allowPartialStats =
+    process.env["FEEDER_ALLOW_PARTIAL_STATS"] !== "false";
 
   // Optional contract integrations. The feeder must not fail when these are
   // absent — they only enable additional behaviour (event-driven revocation
@@ -1611,7 +1684,9 @@ if (require.main === module) {
   console.log(`  horizon    : ${horizonUrl}`);
   console.log(`  maxRetries : ${maxRetries}`);
   console.log(`  retryBase  : ${retryBaseDelayMs}ms`);
-  console.log(`  partialStats: ${allowPartialStats ? "submitted" : "suppressed"}`);
+  console.log(
+    `  partialStats: ${allowPartialStats ? "submitted" : "suppressed"}`,
+  );
   const eventDriven = process.env["EVENT_DRIVEN"] === "true";
   const eventPollIntervalMsStr = process.env["EVENT_POLL_INTERVAL_MS"];
   const eventPollIntervalMs = eventPollIntervalMsStr
@@ -1629,7 +1704,8 @@ if (require.main === module) {
   }
 
   const healthPort = parseHealthPort(process.env["HEALTH_PORT"]);
-  const healthTracker = healthPort !== undefined ? new HealthTracker() : undefined;
+  const healthTracker =
+    healthPort !== undefined ? new HealthTracker() : undefined;
 
   if (healthPort !== undefined && healthTracker) {
     createHealthServer(healthPort, healthTracker);

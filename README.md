@@ -84,7 +84,7 @@ graph TB
 
 ## Contracts
 
-The protocol is composed of four Soroban smart contracts deployed on the Stellar network.
+The protocol is composed of five Soroban smart contracts deployed on the Stellar network.
 
 ### identity-oracle
 
@@ -117,7 +117,7 @@ Computes and stores credit scores based on on-chain data.
 | `list_feeders()`                                     | Returns all currently registered feeders           |
 | `list_lenders()`                                     | Returns all currently registered lenders           |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
-| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
+| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome. Returns InvalidAmount if amount ≤ 0. |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
@@ -128,19 +128,20 @@ Computes and stores credit scores based on on-chain data.
 
 On-chain proposal creation, weighted voting, and multi-step execution for updating credit-oracle scoring weights. Voting power is assigned by the contract admin (admin-registered voters, not token-weighted). Full documentation: [docs/governance.md](docs/governance.md).
 
-| Function                                                     | Description                                              |
-| ------------------------------------------------------------ | -------------------------------------------------------- |
-| `initialize(admin, credit_oracle, quorum_required)`          | Sets admin, oracle address, and default quorum           |
-| `accept_oracle_admin()`                                       | Accepts credit-oracle admin role (two-step transfer)     |
-| `create_proposal(proposer, weights, voting_period, delay)`   | Creates a weight-update proposal; returns proposal ID    |
-| `vote(voter, proposal_id, vote_for, vote_weight)`            | Casts a weighted vote on an open proposal                |
-| `execute(proposal_id)`                                        | After expiry + delay, queues weights in credit-oracle    |
-| `apply_weights()`                                             | Finalizes queued weights after credit-oracle timelock    |
-| `register_voter(admin, voter, weight)`                       | Admin registers a voter with a weight                    |
-| `update_voter_weight(admin, voter, weight)`                  | Admin updates or deregisters a voter (weight = 0)        |
-| `set_quorum(admin, quorum_required)`                         | Admin sets the default quorum for future proposals       |
-| `get_proposal(proposal_id)`                                  | Returns a proposal by ID                                 |
-| `cancel(canceller, proposal_id, reason)`                     | Emits a cancellation event (stub — no on-chain effect)   |
+| Function                                                   | Description                                            |
+| ---------------------------------------------------------- | ------------------------------------------------------ |
+| `initialize(admin, credit_oracle, quorum_required)`        | Sets admin, oracle address, and default quorum         |
+| `accept_oracle_admin()`                                    | Accepts credit-oracle admin role (two-step transfer)   |
+| `create_proposal(proposer, weights, voting_period, delay)` | Creates a weight-update proposal; returns proposal ID  |
+| `vote(voter, proposal_id, vote_for, vote_weight)`          | Casts a weighted vote on an open proposal              |
+| `execute(proposal_id)`                                     | After expiry + delay, queues weights in credit-oracle  |
+| `apply_weights()`                                          | Finalizes queued weights after credit-oracle timelock  |
+| `register_voter(admin, voter, weight)`                     | Admin registers a voter with a weight                  |
+| `update_voter_weight(admin, voter, weight)`                | Admin updates or deregisters a voter (weight = 0)      |
+| `set_quorum(admin, quorum_required)`                       | Admin sets the default quorum for future proposals     |
+| `get_proposal(proposal_id)`                                | Returns a proposal by ID                               |
+| `list_voters()`                                            | Returns all registered voters with their current weights. |
+| `cancel_proposal(canceller, proposal_id)`                  | Proposer/admin cancels; sets `cancelled: bool`, blocks further voting/execution |
 
 ### revocation-registry
 
@@ -153,6 +154,15 @@ Maintains an on-chain list of revoked credential hashes.
 | `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
 | `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
 | `upgrade(admin, new_wasm_hash)`   | Upgrades the contract WASM in-place             |
+
+### score-range-verifier
+
+Verifies zero-knowledge proofs that a committed credit score falls within a specified range without revealing the exact score. The embedded verification key is currently a placeholder until the trusted setup is complete; it must be replaced before mainnet deployment.
+
+| Function                             | Description                  |
+| ------------------------------------ | ---------------------------- |
+| `initialize(admin)`                  | Initializes the verifier     |
+| `verify_proof(proof, public_inputs)` | Verifies a score-range proof |
 
 ---
 
@@ -355,8 +365,8 @@ if (score) {
 | -------------------------------- | -------------- |
 | `getScore(address)`              | ✅ Implemented |
 | `isVerified(address)`            | ✅ Implemented |
-| `anchorDID(keypair, cid)`        | 🚧 Open        |
-| `issueVC(issuer, subject, hash)` | 🚧 Open        |
+| `anchorDID(keypair, cid)`        | ✅ Implemented |
+| `issueVC(issuer, subject, hash)` | ✅ Implemented |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
 | `revokeVC(issuer, hash)`         | ✅ Implemented |
 
@@ -395,7 +405,7 @@ const config: FeederConfig = {
 #### For credit-oracle operators:
 
 1. **Phase 1** — Deploy and configure identity-oracle via `set_identity_oracle`
-2. **Phase 2** — Feeders automatically stop calling `set_vc_count`  
+2. **Phase 2** — Feeders automatically stop calling `set_vc_count`
 3. **Phase 3** — Future contract version will remove `set_vc_count` entirely
 
 The migration is backward-compatible — existing feeders continue to work without modification.
@@ -489,6 +499,29 @@ await feeder.runCycle();
 | Cross-contract vc_count | 📋 Planned     |                                                                      |
 | ZK proof layer          | 📋 Research    |                                                                      |
 | Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future |
+| Component               | Status         | Notes                                                                                         |
+| ----------------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
+| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open                                                                    |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
+| CLI tool                | ✅ Complete    | `packages/cli`                                                                                |
+| Cross-contract vc_count | 📋 Planned     |                                                                                               |
+| ZK proof layer          | 📋 Research    |                                                                                               |
+| Governance contract     | 📋 Planned     |                                                                                               |
+| Component               | Status         | Notes                                                                                         |
+| ----------------------- | -------------- | --------------------------------------------------------------------                          |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
+| governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
+| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available                           |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
+| CLI tool                | 📋 Planned     |                                                                                               |
+| Cross-contract vc_count | 📋 Planned     |                                                                                               |
+| ZK proof layer          | 📋 Research    |                                                                                               |
+| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future                         |
 
 ---
 
@@ -525,15 +558,15 @@ Contract IDs are loaded from (in order of precedence):
 
 #### Environment variables
 
-| Variable                 | Description                              |
-| ------------------------ | ---------------------------------------- |
-| `IDENTITY_ORACLE_ID`     | identity-oracle contract address         |
-| `CREDIT_ORACLE_ID`       | credit-oracle contract address           |
-| `REVOCATION_REGISTRY_ID` | revocation-registry contract address     |
-| `GOVERNANCE_ID`          | governance contract address              |
+| Variable                 | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `IDENTITY_ORACLE_ID`     | identity-oracle contract address              |
+| `CREDIT_ORACLE_ID`       | credit-oracle contract address                |
+| `REVOCATION_REGISTRY_ID` | revocation-registry contract address          |
+| `GOVERNANCE_ID`          | governance contract address                   |
 | `NETWORK_PASSPHRASE`     | Stellar network passphrase (default: testnet) |
-| `RPC_URL`                | Soroban RPC endpoint (default: testnet)  |
-| `SIM_ACCOUNT`            | Funded account for read-only simulations |
+| `RPC_URL`                | Soroban RPC endpoint (default: testnet)       |
+| `SIM_ACCOUNT`            | Funded account for read-only simulations      |
 
 #### Config file
 
@@ -577,6 +610,7 @@ stellar-did anchor-did YOUR_STELLAR_SECRET_KEY QmExampleCid123
 ```
 
 **Output:**
+
 ```
 Anchoring DID for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
   DID Doc CID: QmExampleCid123
@@ -598,6 +632,7 @@ stellar-did anchor-vc YOUR_STELLAR_SECRET_KEY GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 **Output:**
+
 ```
 Anchoring VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX on testnet...
   Issuer:  GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
@@ -624,6 +659,7 @@ stellar-did get-score --json GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 **Output:**
+
 ```
 Fetching credit score for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
 
@@ -652,6 +688,7 @@ stellar-did verify-vc GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 **Output:**
+
 ```
 Verifying VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
   VC Hash: a1b2c3d4...
@@ -742,6 +779,7 @@ stellar-did compute-score --json YOUR_STELLAR_SECRET_KEY G...
 Provides subcommands to create proposals, vote, execute, and apply weight changes. Requires `GOVERNANCE_ID` to be configured.
 
 **Create a proposal**
+
 ```bash
 stellar-did governance create-proposal <proposer-secret> <vc-weight> <tx-weight> <repay-weight> [--voting-period <ledgers>] [--delay <ledgers>]
 
@@ -750,6 +788,7 @@ stellar-did governance create-proposal YOUR_STELLAR_SECRET_KEY 40 30 30
 ```
 
 **Vote on a proposal**
+
 ```bash
 stellar-did governance vote <voter-secret> <proposal-id> <for|against> <weight>
 
@@ -759,17 +798,20 @@ stellar-did governance vote YOUR_STELLAR_SECRET_KEY 1 for 100
 
 **Execute a proposal**
 Queues a passing proposal's weights in the credit-oracle.
+
 ```bash
 stellar-did governance execute <payer-secret> <proposal-id>
 ```
 
 **Apply weights**
 Applies queued weights after the credit-oracle timelock expires (~24 hours).
+
 ```bash
 stellar-did governance apply-weights <payer-secret>
 ```
 
 **Show a proposal**
+
 ```bash
 stellar-did governance show <proposal-id>
 
@@ -778,6 +820,7 @@ stellar-did governance show 1
 ```
 
 **List proposals**
+
 ```bash
 stellar-did governance list [--from <id>] [--limit <n>]
 ```

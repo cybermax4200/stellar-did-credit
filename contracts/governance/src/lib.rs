@@ -46,6 +46,8 @@ pub enum GovernanceError {
     ContractPaused = 16,
     /// The vote would overflow the proposal's tally.
     VoteTallyOverflow = 17,
+    /// Proposal did not receive more for-votes than against-votes.
+    ProposalRejected = 18,
 }
 
 /// Storage keys for the governance contract.
@@ -177,7 +179,7 @@ impl Governance {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
-        // Issue #302: emit an Initialized event so off-chain indexers can
+        // Issue #665: emit an Initialized event so off-chain indexers can
         // observe governance deployment before the first admin action.
         // Data tuple includes the admin and the credit-oracle target so
         // indexers can record the contract's wiring.
@@ -453,24 +455,26 @@ impl Governance {
             return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
+        if proposal.votes_for <= proposal.votes_against {
+            return Err(GovernanceError::ProposalRejected);
+        }
+
         if proposal.votes_for + proposal.votes_against < proposal.quorum_required {
             return Err(GovernanceError::QuorumNotMet);
         }
 
-        if proposal.votes_for > proposal.votes_against {
-            let credit_oracle_addr: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::CreditOracle)
-                .expect("no credit oracle");
+        let credit_oracle_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreditOracle)
+            .expect("no credit oracle");
 
-            // Use propose_weights to start the timelock, not update_weights which bypasses it
-            CreditOracleClient::propose_weights(
-                &env,
-                &credit_oracle_addr,
-                &proposal.proposed_weights,
-            );
-        }
+        // Use propose_weights to start the timelock, not update_weights which bypasses it
+        CreditOracleClient::propose_weights(
+            &env,
+            &credit_oracle_addr,
+            &proposal.proposed_weights,
+        );
 
         proposal.executed = true;
         env.storage().persistent().set(&proposal_key, &proposal);
@@ -1010,6 +1014,66 @@ mod tests {
         assert_eq!(active_weights.repayment_weight, 30);
     }
 
+    /// Issue #665: `initialize` must emit exactly one `Initialized` event
+    /// carrying the admin and credit-oracle addresses so off-chain indexers
+    /// can observe governance deployments before the first admin action, and
+    /// a second initialization must fail without emitting a duplicate event.
+    #[test]
+    fn test_initialize_emits_initialized_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        // A second initialize must fail and must not emit another event.
+        let events = env.events().all();
+        let mut gov_events = 0;
+        let mut found_initialized = false;
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id != gov_id {
+                continue;
+            }
+            gov_events += 1;
+            if topics.len() == 1 {
+                let evt_topic: soroban_sdk::Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(soroban_sdk::symbol_short!("invalid"));
+                if evt_topic == Symbol::new(&env, "Initialized") {
+                    found_initialized = true;
+                    let payload: (Address, Address) = data.try_into_val(&env).unwrap();
+                    assert_eq!(
+                        payload.0, admin,
+                        "governance Initialized event admin mismatch"
+                    );
+                    assert_eq!(
+                        payload.1, credit_oracle_id,
+                        "governance Initialized event credit_oracle mismatch"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            gov_events, 1,
+            "governance should emit exactly one event on initialize"
+        );
+        assert!(
+            found_initialized,
+            "governance Initialized event should be emitted"
+        );
+
+        let res = gov_client.try_initialize(&admin, &credit_oracle_id, &500);
+        assert_eq!(res, Err(Ok(GovernanceError::AlreadyInitialized)));
+    }
+
     #[test]
     fn test_proposal_with_exactly_quorum_votes_succeeds() {
         let env = Env::default();
@@ -1384,6 +1448,42 @@ mod tests {
         assert_eq!(pending_record.weights.vc_weight, 50);
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_execute_rejected_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter_for = Address::generate(&env);
+        let voter_against = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter_for, &40);
+        gov_client.register_voter(&admin, &voter_against, &60);
+        gov_client.vote(&voter_for, &proposal_id, &true, &40);
+        gov_client.vote(&voter_against, &proposal_id, &false, &60);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalRejected)));
     }
 
     #[test]

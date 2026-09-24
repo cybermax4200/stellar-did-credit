@@ -68,7 +68,11 @@ pub fn verify_proof(
     //   [threshold, commitment]
     let public_inputs_vec = vec![
         Fr::from(public_inputs.threshold),
+        public_inputs.subject,
+        public_inputs.credit_oracle_id,
         public_inputs.score_commitment,
+        Fr::from(public_inputs.snapshot_ledger),
+        public_inputs.domain_separator,
     ];
 
     Groth16::<Bls12_381>::verify(vk, &public_inputs_vec, proof)
@@ -85,7 +89,11 @@ pub fn generate_test_keys<R: RngCore + CryptoRng>(
         None,
         ScorePublicInputs {
             threshold: 0,
+            subject: Fr::from(0u32),
+            credit_oracle_id: Fr::from(0u32),
             score_commitment: Fr::from(0u32),
+            snapshot_ledger: 0,
+            domain_separator: Fr::from(0u32),
         },
     );
     Groth16::<Bls12_381>::circuit_specific_setup(circuit, rng)
@@ -147,7 +155,11 @@ mod tests {
         let commitment = scheme.commit(&fields, w.blinding);
         ScorePublicInputs {
             threshold,
+            subject: Fr::from(1u32), // dummy for test
+            credit_oracle_id: Fr::from(2u32), // dummy for test
             score_commitment: commitment,
+            snapshot_ledger: 12345, // dummy for test
+            domain_separator: Fr::from(3u32), // dummy for test
         }
     }
 
@@ -181,7 +193,11 @@ mod tests {
         // Verify with a different threshold -> should fail.
         let wrong_inputs = ScorePublicInputs {
             threshold: 700,
+            subject: public_inputs.subject,
+            credit_oracle_id: public_inputs.credit_oracle_id,
             score_commitment: public_inputs.score_commitment,
+            snapshot_ledger: public_inputs.snapshot_ledger,
+            domain_separator: public_inputs.domain_separator,
         };
         let valid = verify_proof(&proof, &wrong_inputs, &vk).unwrap();
         assert!(!valid, "proof should NOT verify with wrong threshold");

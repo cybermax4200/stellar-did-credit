@@ -86,7 +86,7 @@ mod tests {
             "Init event admin mismatch for revocation-registry"
         );
 
-        // Issue #302: governance contract must also emit an Initialized event
+        // Issue #665: governance contract must also emit an Initialized event
         // with the admin and credit-oracle target addresses so off-chain
         // indexers can detect deployments before the first admin action.
         let gov_id = env.register_contract(None, Governance);

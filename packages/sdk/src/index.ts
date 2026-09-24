@@ -9,12 +9,19 @@ import {
   Address,
   xdr,
   Keypair,
+  hash,
 } from "@stellar/stellar-sdk";
 
 export const MIN_SCORE = 300;
 export const MAX_SCORE = 850;
+const BATCH_ANCHOR_MAX_SIZE = 10;
 
-export type NetworkType = 'testnet' | 'mainnet' | 'futurenet' | 'custom';
+// Need to import WASM prover
+// In a real env, we'd import this properly, assuming it's available as @stellar-did-credit/zk-wasm
+import * as ZkWasm from "@stellar-did-credit/zk-wasm";
+
+
+export type NetworkType = "testnet" | "mainnet" | "futurenet" | "custom";
 
 export interface ScoreRecord {
   score: number;
@@ -42,6 +49,15 @@ export interface ScoringWeights {
   txWeight: number;
   repaymentWeight: number;
 }
+export interface PendingWeights {
+  weights: ScoringWeights;
+  effectiveLedger: number;
+}
+export interface RecencyDecayConfig {
+  enabled: boolean;
+  decayBpsPerDay: number;
+  minRecencyBps: number;
+}
 export interface RepaymentRecord {
   onTimeCount: number;
   totalCount: number;
@@ -65,6 +81,17 @@ export interface GovernanceProposal {
   executed: boolean;
   cancelled: boolean;
   quorumRequired: bigint;
+}
+
+export interface IdentityProtocolStats {
+  totalDIDsAnchored: number;
+  totalVCsAnchored: number;
+  totalVCsRevoked: number;
+}
+
+export interface CreditProtocolStats {
+  totalSubjectsScored: number;
+  totalRepaymentsRecorded: number;
 }
 
 export interface ProtocolConfig {
@@ -152,6 +179,7 @@ const IDENTITY_ORACLE_ERROR_CODES: Record<number, string> = {
   8: "ContractPaused",
   9: "InvalidRevocationRegistry",
   10: "VCLimitReached",
+  11: "InvalidIssuerTier",
 };
 
 const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
@@ -171,6 +199,7 @@ const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
   14: "TimelockNotExpired",
   15: "NoPendingWeights",
   16: "NotInitialized",
+  17: "InvalidAmount",
 };
 
 const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {
@@ -199,6 +228,8 @@ const GOVERNANCE_ERROR_CODES: Record<number, string> = {
   12: "VoterNotRegistered",
   13: "InsufficientVoteWeight",
   14: "ProposalAlreadyCancelled",
+  18: "ProposalRejected",
+  19: "InvalidVotingPeriod",
 };
 
 const ERROR_CODE_MAPS: Record<string, Record<number, string>> = {
@@ -306,7 +337,10 @@ export interface BatchResult {
 /**
  * Network configurations for Stellar networks.
  */
-const NETWORK_CONFIGS: Record<Exclude<NetworkType, 'custom'>, Partial<ProtocolConfig>> = {
+const NETWORK_CONFIGS: Record<
+  Exclude<NetworkType, "custom">,
+  Partial<ProtocolConfig>
+> = {
   testnet: {
     networkPassphrase: "Test SDF Network ; September 2015",
     rpcUrl: "https://soroban-testnet.stellar.org",
@@ -330,19 +364,19 @@ export type KeypairLike = Keypair | { publicKey: string };
 
 /**
  * Create a ProtocolConfig with network-specific defaults.
- * 
+ *
  * @param network - Network type (testnet, mainnet, futurenet, custom)
  * @param overrides - Configuration overrides
  * @returns Complete ProtocolConfig with network defaults applied
  */
 export function createNetworkConfig(
   network: NetworkType,
-  overrides: Partial<ProtocolConfig> = {}
+  overrides: Partial<ProtocolConfig> = {},
 ): Partial<ProtocolConfig> {
-  if (network === 'custom') {
+  if (network === "custom") {
     return overrides;
   }
-  
+
   const networkDefaults = NETWORK_CONFIGS[network];
   return {
     ...networkDefaults,
@@ -373,15 +407,207 @@ export class GovernanceClient {
 
   /**
    * Create a scoring-weight proposal and return its on-chain ID.
-    * Proposal IDs are 1-based: the first proposal has ID 1 and ID 0 is unused.
+   * Proposal IDs are 1-based: the first proposal has ID 1 and ID 0 is unused.
    *
    * This starts the governance voting window. If the proposal passes, callers
    * must still wait for its governance execution delay, call `execute`, wait
    * approximately 24 hours for the credit-oracle timelock, and then call
    * `applyWeights` before the new weights become active.
    */
+  /**
+   * Register a new voter with the specified weight.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - Voting weight to assign
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async registerVoter(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "register_voter",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "registerVoter",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Update the voting weight for a registered voter.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - New voting weight (0 to deregister)
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async updateVoterWeight(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "update_voter_weight",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "updateVoterWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Set the contract-wide default quorum required for new proposals.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param quorum - New default quorum requirement
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setQuorum(
+    adminKeypair: KeypairLike,
+    quorum: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_quorum",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(quorum, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "setQuorum",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
   async createProposal(
-    proposerKeypair: Keypair,
+    proposerKeypair: KeypairLike,
     weights: ScoringWeights,
     votingPeriodLedgers: number,
     executionDelayLedgers: number,
@@ -505,8 +731,8 @@ export class GovernanceClient {
 
   /**
    * Fetch proposals by scanning the contract's monotonically increasing IDs.
-    * Proposal IDs start at 1; pass `1` or `1n` as `fromId` to include the first
-    * proposal.
+   * Proposal IDs start at 1; pass `1` or `1n` as `fromId` to include the first
+   * proposal.
    *
    * The governance contract exposes `get_proposal`, but no list endpoint, so
    * this helper performs up to `limit` read-only RPC simulations starting at
@@ -535,9 +761,7 @@ export class GovernanceClient {
 
   private governanceContract(): Contract {
     if (!this.config.governanceId?.trim()) {
-      throw new Error(
-        "governanceId is required to use the governance client",
-      );
+      throw new Error("governanceId is required to use the governance client");
     }
     return new Contract(this.config.governanceId);
   }
@@ -573,10 +797,7 @@ export class GovernanceClient {
   ): Promise<{ hash: string; retval?: xdr.ScVal }> {
     const publicKey = getPublicKey(keypair);
     const accountData = await this.server.getAccount(publicKey);
-    const sourceAccount = new Account(
-      publicKey,
-      accountData.sequenceNumber(),
-    );
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
     const tx = new TransactionBuilder(sourceAccount, {
       fee: this.config.baseFee ?? BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
@@ -590,7 +811,9 @@ export class GovernanceClient {
       throwContractError(sim.error, "governance");
     }
     if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
-      throw new Error(`${operationName} simulation returned unexpected response`);
+      throw new Error(
+        `${operationName} simulation returned unexpected response`,
+      );
     }
 
     const retval = sim.result?.retval;
@@ -618,7 +841,7 @@ export class StellarDIDCreditSDK {
 
   constructor(config: ProtocolConfig) {
     // Apply network defaults if network is specified but URL fields are missing
-    if (config.network && config.network !== 'custom') {
+    if (config.network && config.network !== "custom") {
       const networkDefaults = NETWORK_CONFIGS[config.network];
       this.config = {
         ...networkDefaults,
@@ -628,7 +851,9 @@ export class StellarDIDCreditSDK {
       this.config = config;
     }
 
-    this.server = new SorobanRpc.Server(this.config.rpcUrl);
+    this.server = new SorobanRpc.Server(this.config.rpcUrl, {
+      allowHttp: this.config.rpcUrl.startsWith("http://") || this.config.rpcUrl.startsWith("http://localhost"),
+    });
     this.governance = new GovernanceClient(this.config, this.server);
   }
 
@@ -730,6 +955,7 @@ export class StellarDIDCreditSDK {
     issuerKeypair: KeypairLike,
     subjectAddress: string,
     vcHash: Buffer,
+    type?: string,
   ): Promise<string> {
     if (vcHash.length !== 32) {
       throw new Error("vcHash must be exactly 32 bytes");
@@ -750,18 +976,26 @@ export class StellarDIDCreditSDK {
     // Convert vcHash Buffer to ScVal
     const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
 
-    const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
-      networkPassphrase: this.config.networkPassphrase,
-    })
-      .addOperation(
-        contract.call(
+    const operation = type
+      ? contract.call(
+          "anchor_vc_typed",
+          new Address(publicKey).toScVal(),
+          new Address(subjectAddress).toScVal(),
+          hashScVal,
+          nativeToScVal(type),
+        )
+      : contract.call(
           "anchor_vc",
           new Address(publicKey).toScVal(),
           new Address(subjectAddress).toScVal(),
           hashScVal,
-        ),
-      )
+        );
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
@@ -797,6 +1031,74 @@ export class StellarDIDCreditSDK {
     );
 
     return txHash;
+  }
+
+  /**
+   * Anchor multiple verifiable credentials in sequential transactions.
+   *
+   * Entries are submitted in chunks of at most 10 contract operations. A failed
+   * chunk is recorded in the returned BatchResult and does not stop later chunks.
+   *
+   * @param issuerKeypair - Stellar keypair of the credential issuer
+   * @param entries - Subjects, VC hashes, and optional credential type labels
+   * @returns BatchResult with per-chunk status and transaction hashes
+   */
+  async batchAnchorVCs(
+    issuerKeypair: KeypairLike,
+    entries: { subject: string; vcHash: Buffer; type?: string }[],
+  ): Promise<BatchResult> {
+    for (const entry of entries) {
+      if (entry.vcHash.length !== 32) {
+        throw new SDKError(
+          "INVALID_VC_HASH",
+          "Each vcHash must be exactly 32 bytes",
+        );
+      }
+    }
+
+    const result: BatchResult = {
+      success: true,
+      failedChunks: 0,
+      transactionHashes: [],
+      results: [],
+    };
+
+    let chunkIndex = 0;
+    for (let i = 0; i < entries.length; i += BATCH_ANCHOR_MAX_SIZE) {
+      const chunk = entries.slice(i, i + BATCH_ANCHOR_MAX_SIZE);
+      try {
+        const transactionHash = await this.submitBatchAnchorChunk(
+          issuerKeypair,
+          chunk,
+        );
+        result.transactionHashes.push(transactionHash);
+        result.results.push({
+          chunkIndex,
+          vcHashes: chunk.map((entry) => entry.vcHash),
+          status: "success",
+          transactionHash,
+        });
+      } catch (error) {
+        result.success = false;
+        result.failedChunks += 1;
+        result.results.push({
+          chunkIndex,
+          vcHashes: chunk.map((entry) => entry.vcHash),
+          status: "failed",
+          error:
+            error instanceof SDKError
+              ? error
+              : new SDKError(
+                  "TRANSACTION_FAILED",
+                  `batchAnchorVCs chunk failed: ${getErrorMessage(error)}`,
+                  { cause: error },
+                ),
+        });
+      }
+      chunkIndex += 1;
+    }
+
+    return result;
   }
 
   /**
@@ -993,7 +1295,10 @@ export class StellarDIDCreditSDK {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        contract.call("get_did_document", new Address(subjectAddress).toScVal()),
+        contract.call(
+          "get_did_document",
+          new Address(subjectAddress).toScVal(),
+        ),
       )
       .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
@@ -1035,15 +1340,9 @@ export class StellarDIDCreditSDK {
    * @throws SDKError with code `INVALID_VC_HASH` for a non-32-byte hash
    * @throws SDKError with code `NOT_REGISTERED_ISSUER` for `IssuerMismatch`
    */
-  async revokeVC(
-    issuerKeypair: KeypairLike,
-    vcHash: Buffer,
-  ): Promise<string> {
+  async revokeVC(issuerKeypair: KeypairLike, vcHash: Buffer): Promise<string> {
     if (vcHash.length !== 32) {
-      throw new SDKError(
-        "INVALID_VC_HASH",
-        "vcHash must be exactly 32 bytes",
-      );
+      throw new SDKError("INVALID_VC_HASH", "vcHash must be exactly 32 bytes");
     }
 
     if (!this.config.revocationRegistryId.trim()) {
@@ -1240,6 +1539,110 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Check if a subject has voluntarily deactivated their identity.
+   *
+   * Uses a read-only simulation against the identity-oracle contract.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns true if subject has deactivated their identity
+   */
+  async isDeactivated(subjectAddress: string): Promise<boolean> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("is_deactivated", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return scValToNative(resultScVal) as boolean;
+  }
+
+  /**
+   * Re-activate a previously deactivated identity.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the subject
+   * keypair to authorize the operation.
+   *
+   * @param subjectKeypair - Stellar keypair of the subject
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async reactivateIdentity(subjectKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(subjectKeypair);
+
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "reactivate_identity",
+          new Address(publicKey).toScVal(),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(subjectKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "reactivateIdentity",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Check if a subject address has at least one non-revoked verifiable credential.
    *
    * Uses a read-only simulation against the identity-oracle contract.
@@ -1358,7 +1761,10 @@ export class StellarDIDCreditSDK {
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
-        contract.call("get_active_vc_count", new Address(subjectAddress).toScVal()),
+        contract.call(
+          "get_active_vc_count",
+          new Address(subjectAddress).toScVal(),
+        ),
       )
       .setTimeout(30)
       .build();
@@ -1425,6 +1831,18 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * List all verifiable credential records for a subject, including revoked ones.
+   *
+   * Alias for `getVCs` for CLI/SDK consumers expecting `listVCs`.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns Array of VCRecord entries, or an empty array if none exist
+   */
+  async listVCs(subjectAddress: string): Promise<VCRecord[]> {
+    return this.getVCs(subjectAddress);
+  }
+
+  /**
    * Fetch the credential type label anchored for a subject's VC hash from the
    * identity-oracle.
    *
@@ -1481,6 +1899,316 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Fetch a subject's TxStats from the credit-oracle.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns TxStats or null if not found
+   */
+  async getTxStats(subjectAddress: string): Promise<TxStats | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_tx_stats", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    const raw = native as Record<string, unknown>;
+    return {
+      volume30d: BigInt(raw["volume_30d"] as bigint),
+      txCount30d: Number(raw["tx_count_30d"]),
+      avgCounterparties: Number(raw["avg_counterparties"]),
+    };
+  }
+
+  /**
+   * Fetch a subject's RepaymentRecord from the credit-oracle.
+   *
+   * @param subjectAddress - Stellar G... address of the subject
+   * @returns RepaymentRecord or null if not found
+   */
+  async getRepaymentRecord(subjectAddress: string): Promise<RepaymentRecord | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_repayment_record", new Address(subjectAddress).toScVal()),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    const raw = native as Record<string, unknown>;
+    return {
+      onTimeCount: Number(raw["on_time_count"]),
+      totalCount: Number(raw["total_count"]),
+      totalRepaid: BigInt(raw["total_repaid"] as bigint),
+    };
+  }
+
+  /**
+   * Fetch the recency decay configuration currently active on the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns The current RecencyDecayConfig
+   */
+  async getRecencyDecayConfig(): Promise<RecencyDecayConfig> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_recency_decay"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseRecencyDecayConfig(resultScVal);
+  }
+
+  /**
+   * Update the recency decay configuration on the credit-oracle.
+   *
+   * Submits a signed transaction. Requires the admin keypair.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param config - The new RecencyDecayConfig to apply
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setRecencyDecayConfig(
+    adminKeypair: KeypairLike,
+    config: RecencyDecayConfig,
+  ): Promise<string> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+
+    const publicKey = getPublicKey(adminKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_recency_decay",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(config.enabled),
+          nativeToScVal(config.decayBpsPerDay, { type: "u32" }),
+          nativeToScVal(config.minRecencyBps, { type: "u32" })
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setRecencyDecayConfig",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Get the weight multiplier in basis points for a credential type.
+   *
+   * @param credentialType - The credential type label (e.g. "kyc", "employment")
+   * @returns Weight in basis points (default 100)
+   */
+  async getCredentialTypeWeight(credentialType: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "get_credential_type_weight",
+          nativeToScVal(credentialType),
+        ),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for a credential type.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param credentialType - The credential type label
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setCredentialTypeWeight(
+    adminKeypair: KeypairLike,
+    credentialType: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_credential_type_weight",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(credentialType),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setCredentialTypeWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Fetch the scoring weights currently configured on the credit-oracle contract.
    *
    * Uses a read-only simulation (no signing required).
@@ -1516,6 +2244,251 @@ export class StellarDIDCreditSDK {
     }
 
     return parseScoringWeights(resultScVal);
+  }
+
+  /**
+   * Fetch scoring weights queued for activation on the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Pending weights and their effective ledger, or null when none exist
+   */
+  async getPendingWeights(): Promise<PendingWeights | null> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_pending_weights"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    const native = scValToNative(resultScVal);
+    if (native === null || native === undefined) {
+      return null;
+    }
+    if (typeof native !== "object") {
+      throw new Error("get_pending_weights returned an invalid result");
+    }
+
+    const raw = native as Record<string, unknown>;
+    const rawWeights = raw["weights"];
+    if (
+      rawWeights === null ||
+      rawWeights === undefined ||
+      typeof rawWeights !== "object"
+    ) {
+      throw new Error("get_pending_weights returned invalid weights");
+    }
+    const weights = rawWeights as Record<string, unknown>;
+
+    return {
+      weights: {
+        vcWeight: Number(weights["vc_weight"]),
+        txWeight: Number(weights["tx_weight"]),
+        repaymentWeight: Number(weights["repayment_weight"]),
+      },
+      effectiveLedger: Number(raw["effective_ledger"]),
+    };
+  }
+
+  /**
+   * Fetch aggregate protocol counters from the identity-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Totals for anchored DIDs, anchored VCs, and revoked VCs
+   */
+  async getIdentityProtocolStats(): Promise<IdentityProtocolStats> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_protocol_stats"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseIdentityProtocolStats(resultScVal);
+  }
+
+  /**
+   * Fetch aggregate protocol counters from the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Totals for scored subjects and recorded repayments
+   */
+  async getCreditProtocolStats(): Promise<CreditProtocolStats> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_protocol_stats"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseCreditProtocolStats(resultScVal);
+  }
+
+  /**
+   * Get the weight multiplier in basis points for an issuer.
+   *
+   * @param issuer - The issuer address (Stellar G...)
+   * @returns Weight in basis points (default 100)
+   */
+  async getIssuerTier(issuer: string): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call("get_issuer_tier", new Address(issuer).toScVal()),
+      )
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return Number(scValToNative(resultScVal));
+  }
+
+  /**
+   * Set the weight multiplier in basis points for an issuer.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param issuer - The issuer address
+   * @param weightBps - Weight in basis points
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setIssuerTier(
+    adminKeypair: KeypairLike,
+    issuer: string,
+    weightBps: number,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_issuer_tier",
+          new Address(publicKey).toScVal(),
+          new Address(issuer).toScVal(),
+          nativeToScVal(weightBps, { type: "u32" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setIssuerTier",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
   }
 
   /**
@@ -1614,6 +2587,123 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Generates a zk-SNARK proof that the subject's score is > threshold.
+   * Uses the WASM prover module.
+   */
+  async generateScoreProof(
+    subjectAddress: string,
+    threshold: number,
+    blinding = 12345
+  ): Promise<Uint8Array> {
+    const scoreRecord = await this.getScore(subjectAddress);
+    if (!scoreRecord) {
+      throw new Error("Score not computed");
+    }
+
+    const txStats = await this.getTxStats(subjectAddress) || { volume30d: 0n, txCount30d: 0, avgCounterparties: 0 };
+    const repaymentRecord = await this.getRepaymentRecord(subjectAddress) || { onTimeCount: 0, totalCount: 0, totalRepaid: 0n };
+    const weights = await this.getWeights();
+
+    // Default simplified vcPoints logic (same as credit-oracle when decay is disabled)
+    const vcPoints = Math.min(100, scoreRecord.vcCount * 20);
+
+    const subjectHash = hash(nativeToScVal(subjectAddress, { type: "address" }).address().toXDR());
+    const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
+    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
+
+    return ZkWasm.generate_score_proof(
+      vcPoints,
+      Number(txStats.volume30d),
+      txStats.avgCounterparties,
+      repaymentRecord.onTimeCount,
+      repaymentRecord.totalCount,
+      Number(repaymentRecord.totalRepaid),
+      weights.vcWeight,
+      weights.txWeight,
+      weights.repaymentWeight,
+      scoreRecord.vcCount,
+      BigInt(scoreRecord.lastUpdated),
+      scoreRecord.computedAtLedger,
+      scoreRecord.stale,
+      blinding,
+      threshold,
+      subjectHash,
+      oracleHash,
+      scoreRecord.computedAtLedger,
+      domainHash
+    );
+  }
+
+  /**
+   * Submits a generated zk-SNARK proof to the on-chain score-range-verifier.
+   *
+   * @param payerKeypair - Payer keypair for the transaction
+   * @param subjectAddress - Address of the subject being verified
+   * @param threshold - The threshold score
+   * @param proof - The proof bytes generated by generateScoreProof
+   * @param verifierContractId - Contract ID of the score-range-verifier
+   * @returns true if verified
+   */
+  async verifyScoreProof(
+    payerKeypair: KeypairLike,
+    subjectAddress: string,
+    threshold: number,
+    proof: Uint8Array,
+    verifierContractId: string
+  ): Promise<boolean> {
+    const contract = new Contract(verifierContractId);
+    const publicKey = getPublicKey(payerKeypair);
+
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "verify_and_consume",
+          new Address(subjectAddress).toScVal(),
+          nativeToScVal(threshold, { type: "u32" }),
+          nativeToScVal(proof, { type: "bytes" })
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`Simulation failed: ${sim.error}`);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(payerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (submissionResponse) => new Error(`Submission failed: ${submissionResponse.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "verifyScoreProof",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return true; // if confirmation passed
+  }
+
+  /**
    * Poll for VCAnch events emitted by an identity-oracle contract.
    *
    * The first poll starts at the latest ledger returned by the RPC server.
@@ -1627,18 +2717,10 @@ export class StellarDIDCreditSDK {
     contractId: string,
     callback: (issuer: string, subject: string, vcHash: Buffer) => void,
   ): Unsubscribe {
-    return this.subscribeToEvents(
-      contractId,
-      "VCAnch",
-      (value) => {
-        const [issuer, subject, vcHash] = parseEventTuple(
-          value,
-          "VCAnch",
-          3,
-        );
-        callback(String(issuer), String(subject), toBuffer(vcHash));
-      },
-    );
+    return this.subscribeToEvents(contractId, "VCAnch", (value) => {
+      const [issuer, subject, vcHash] = parseEventTuple(value, "VCAnch", 3);
+      callback(String(issuer), String(subject), toBuffer(vcHash));
+    });
   }
 
   /**
@@ -1652,14 +2734,10 @@ export class StellarDIDCreditSDK {
     contractId: string,
     callback: (subject: string, score: number) => void,
   ): Unsubscribe {
-    return this.subscribeToEvents(
-      contractId,
-      "Score",
-      (value) => {
-        const [subject, score] = parseEventTuple(value, "Score", 2);
-        callback(String(subject), Number(score));
-      },
-    );
+    return this.subscribeToEvents(contractId, "Score", (value) => {
+      const [subject, score] = parseEventTuple(value, "Score", 2);
+      callback(String(subject), Number(score));
+    });
   }
 
   /**
@@ -1673,14 +2751,10 @@ export class StellarDIDCreditSDK {
     contractId: string,
     callback: (issuer: string, vcHash: Buffer) => void,
   ): Unsubscribe {
-    return this.subscribeToEvents(
-      contractId,
-      "Revoked",
-      (value) => {
-        const [issuer, vcHash] = parseEventTuple(value, "Revoked", 2);
-        callback(String(issuer), toBuffer(vcHash));
-      },
-    );
+    return this.subscribeToEvents(contractId, "Revoked", (value) => {
+      const [issuer, vcHash] = parseEventTuple(value, "Revoked", 2);
+      callback(String(issuer), toBuffer(vcHash));
+    });
   }
 
   private async submitBatchRevokeChunk(
@@ -1757,6 +2831,80 @@ export class StellarDIDCreditSDK {
     return txHash;
   }
 
+  private async submitBatchAnchorChunk(
+    issuerKeypair: KeypairLike,
+    entries: { subject: string; vcHash: Buffer; type?: string }[],
+  ): Promise<string> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const publicKey = getPublicKey(issuerKeypair);
+
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+    const txBuilder = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    });
+
+    for (const entry of entries) {
+      const operation = entry.type
+        ? contract.call(
+            "anchor_vc_typed",
+            new Address(publicKey).toScVal(),
+            new Address(entry.subject).toScVal(),
+            nativeToScVal(new Uint8Array(entry.vcHash), { type: "bytes" }),
+            nativeToScVal(entry.type),
+          )
+        : contract.call(
+            "anchor_vc",
+            new Address(publicKey).toScVal(),
+            new Address(entry.subject).toScVal(),
+            nativeToScVal(new Uint8Array(entry.vcHash), { type: "bytes" }),
+          );
+      txBuilder.addOperation(operation);
+    }
+
+    const tx = txBuilder
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new SDKError(
+        "TRANSACTION_FAILED",
+        "batchAnchorVCs simulation returned an unexpected response",
+      );
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(issuerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new SDKError(
+          "TRANSACTION_FAILED",
+          `batchAnchorVCs submission failed: ${response.errorResult}`,
+        ),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "batchAnchorVCs",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
   private subscribeToEvents(
     contractId: string,
     eventName: string,
@@ -1804,8 +2952,7 @@ export class StellarDIDCreditSDK {
           (highestLedger, event) => Math.max(highestLedger, event.ledger),
           lastSeenLedger,
         );
-        lastSeenLedger =
-          Math.max(response.latestLedger, latestEventLedger) + 1;
+        lastSeenLedger = Math.max(response.latestLedger, latestEventLedger) + 1;
 
         for (const event of response.events) {
           if (!active) {
@@ -1834,12 +2981,296 @@ export class StellarDIDCreditSDK {
       }
     };
   }
+
+  private async submitContractTransaction(
+    signerKeypair: KeypairLike,
+    contractName:
+      | "identity-oracle"
+      | "credit-oracle"
+      | "revocation-registry"
+      | "governance",
+    operation: xdr.Operation,
+    operationName: string,
+  ): Promise<string> {
+    const server = this.server;
+    const publicKey = getPublicKey(signerKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error ?? "Simulation failed", contractName);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(signerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      operationName,
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Pause all write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, write operations (such as anchoring
+   * DIDs or credentials) will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("pause"),
+      "pauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("unpause"),
+      "unpauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, score computation and other write
+   * operations will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("pause", new Address(publicKey).toScVal()),
+      "pauseCreditOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("unpause", new Address(publicKey).toScVal()),
+      "unpauseCreditOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation. When paused, credential revocations will fail until
+   * unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("pause"),
+      "pauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Resume write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("unpause"),
+      "unpauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the identity-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeIdentityOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.identityOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("upgrade", hashScVal),
+      "upgradeIdentityOracle",
+    );
+  }
+
+  /**
+   * Upgrade the revocation-registry contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeRevocationRegistry(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.revocationRegistryId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("upgrade", hashScVal),
+      "upgradeRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the credit-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeCreditOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("upgrade", new Address(publicKey).toScVal(), hashScVal),
+      "upgradeCreditOracle",
+    );
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
 export class ScoreNotComputedError extends Error {
   constructor(address?: string) {
-    super(address ? `No score computed for address: ${address}` : "Score has not been computed");
+    super(
+      address
+        ? `No score computed for address: ${address}`
+        : "Score has not been computed",
+    );
     this.name = "ScoreNotComputedError";
   }
 }
@@ -1913,7 +3344,9 @@ export function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord | null {
   ];
   for (const field of requiredFields) {
     if (!(field in raw)) {
-      throw new Error(`parseScoreRecord: missing field '${field}' in ScoreRecord`);
+      throw new Error(
+        `parseScoreRecord: missing field '${field}' in ScoreRecord`,
+      );
     }
   }
   return {
@@ -1923,9 +3356,7 @@ export function parseScoreRecord(scVal: xdr.ScVal): ScoreRecord | null {
     repaymentRate: Number(raw["repayment_rate"]),
     txVolume30d: BigInt(raw["tx_volume_30d"] as bigint),
     previousScore:
-      raw["previous_score"] != null
-        ? Number(raw["previous_score"])
-        : null,
+      raw["previous_score"] != null ? Number(raw["previous_score"]) : null,
     computedAtLedger: Number(raw["computed_at_ledger"]),
     stale: Boolean(raw["stale"]),
   };
@@ -1942,6 +3373,49 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
     vcWeight: Number(raw["vc_weight"]),
     txWeight: Number(raw["tx_weight"]),
     repaymentWeight: Number(raw["repayment_weight"]),
+  };
+}
+
+function parseRecencyDecayConfig(scVal: xdr.ScVal): RecencyDecayConfig {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_recency_decay returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    enabled: Boolean(raw["enabled"]),
+    decayBpsPerDay: Number(raw["decay_bps_per_day"]),
+    minRecencyBps: Number(raw["min_recency_bps"]),
+  };
+}
+
+function parseIdentityProtocolStats(scVal: xdr.ScVal): IdentityProtocolStats {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_protocol_stats returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    totalDIDsAnchored: Number(raw["total_dids_anchored"] as bigint),
+    totalVCsAnchored: Number(raw["total_vcs_anchored"] as bigint),
+    totalVCsRevoked: Number(raw["total_vcs_revoked"] as bigint),
+  };
+}
+
+function parseCreditProtocolStats(scVal: xdr.ScVal): CreditProtocolStats {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_protocol_stats returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    totalSubjectsScored: Number(raw["total_subjects_scored"] as bigint),
+    totalRepaymentsRecorded: Number(
+      raw["total_repayments_recorded"] as bigint,
+    ),
   };
 }
 
@@ -1966,16 +3440,12 @@ function parseGovernanceProposal(native: unknown): GovernanceProposal {
       repaymentWeight: Number(rawWeights["repayment_weight"]),
     },
     votesFor: BigInt(raw["votes_for"] as bigint | number | string),
-    votesAgainst: BigInt(
-      raw["votes_against"] as bigint | number | string,
-    ),
+    votesAgainst: BigInt(raw["votes_against"] as bigint | number | string),
     expiryLedger: Number(raw["expiry_ledger"]),
     executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
     executed: Boolean(raw["executed"]),
     cancelled: Boolean(raw["cancelled"]),
-    quorumRequired: BigInt(
-      raw["quorum_required"] as bigint | number | string,
-    ),
+    quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
   };
 }
 
@@ -2028,7 +3498,9 @@ function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
       executionDelayLedgers: Number(raw["execution_delay_ledgers"]),
       executed: Boolean(raw["executed"]),
       cancelled: Boolean(raw["cancelled"]),
-      quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
+      quorumRequired: BigInt(
+        raw["quorum_required"] as bigint | number | string,
+      ),
     };
   });
 }
@@ -2179,10 +3651,7 @@ function throwTransactionTimeout(operationName: string, txHash: string): never {
 }
 
 function getConfirmationTimeoutMs(config: ProtocolConfig): number {
-  return (
-    config.confirmationTimeoutMs ??
-    (config.timeoutSeconds ?? 30) * 1000
-  );
+  return config.confirmationTimeoutMs ?? (config.timeoutSeconds ?? 30) * 1000;
 }
 
 function getTransactionPollIntervalMs(config: ProtocolConfig): number {
@@ -2237,9 +3706,13 @@ function isRetryableError(error: unknown): boolean {
 
   const code = String(candidate?.code ?? "").toUpperCase();
   if (
-    ["ECONNRESET", "ECONNREFUSED", "ENETUNREACH", "ETIMEDOUT", "EAI_AGAIN"].includes(
-      code,
-    )
+    [
+      "ECONNRESET",
+      "ECONNREFUSED",
+      "ENETUNREACH",
+      "ETIMEDOUT",
+      "EAI_AGAIN",
+    ].includes(code)
   ) {
     return true;
   }
@@ -2248,7 +3721,9 @@ function isRetryableError(error: unknown): boolean {
     error instanceof Error
       ? error.message.toLowerCase()
       : String(error).toLowerCase();
-  return /\b503\b|timeout|timed out|network|fetch failed|unavailable|socket/.test(message);
+  return /\b503\b|timeout|timed out|network|fetch failed|unavailable|socket/.test(
+    message,
+  );
 }
 
 function createRevokeError(message: string, details: unknown): SDKError {
@@ -2260,10 +3735,7 @@ function createRevokeError(message: string, details: unknown): SDKError {
     );
   }
 
-  if (
-    details instanceof SDKError &&
-    details.code === "TRANSACTION_TIMEOUT"
-  ) {
+  if (details instanceof SDKError && details.code === "TRANSACTION_TIMEOUT") {
     return new SDKError("TRANSACTION_TIMEOUT", message, {
       cause: details,
       transactionHash: details.transactionHash,
@@ -2271,10 +3743,7 @@ function createRevokeError(message: string, details: unknown): SDKError {
     });
   }
 
-  if (
-    details instanceof SDKError &&
-    details.code === "TRANSACTION_FAILED"
-  ) {
+  if (details instanceof SDKError && details.code === "TRANSACTION_FAILED") {
     if (containsIssuerMismatch(details.cause)) {
       return new SDKError(
         "NOT_REGISTERED_ISSUER",

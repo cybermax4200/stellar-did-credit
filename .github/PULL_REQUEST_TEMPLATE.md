@@ -16,6 +16,9 @@ Closes #
 - [ ] `cargo clippy --workspace -- -D warnings` passes with zero warnings
 - [ ] New functions have at least one test
 - [ ] New public contract functions have a `///` doc comment
+- [ ] Updated `docs/gas-costs.md` if any contract function was added or modified
+
+For contract changes, re-run `bash scripts/estimate-gas.sh` and copy the output into the PR description.
 
 ## Changelog
 

@@ -8,6 +8,7 @@ members = [
   "contracts/tests",
   "contracts/governance",
   "zk/circuit",
+  "packages/zk-wasm",
 ]
 resolver = "2"
 

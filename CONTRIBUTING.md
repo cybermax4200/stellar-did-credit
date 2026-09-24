@@ -59,19 +59,44 @@ pnpm test
 
 This runs all Rust and TypeScript tests. See [Scripts](#scripts) below for details.
 
-## Test snapshots
+## Test Organization
 
-Soroban tests use snapshots stored in `test_snapshots/` directories to capture expected contract state for deterministic verification. Snapshots are committed alongside code changes to ensure tests remain reproducible across environments.
+The test suite is organized into distinct categories to keep unit verification and cross-contract flows separated:
 
-### Updating snapshots
+- **Unit tests (in-module):** Located directly within each contract crate in `contracts/<contract-name>/src/` (inside `#[cfg(test)]` modules or dedicated test files like `test.rs`). Unit tests focus on isolated contract logic, parameter boundaries, error codes, and local state transitions without spinning up external contract dependencies. Run a specific contract's unit tests with:
+  ```bash
+  cargo test -p <contract-crate>
+  ```
+- **Integration tests (`contracts/tests/`):** Located in the dedicated `integration-tests` crate under `contracts/tests/` (primarily `contracts/tests/src/integration_test.rs`). These tests instantiate multiple Soroban contracts together (e.g., `identity-oracle`, `credit-oracle`, `revocation-registry`, and `governance`) to validate cross-contract calls, shared workflows, event emissions, and authentication delegation across contracts. Run integration tests with:
+  ```bash
+  cargo test -p integration-tests --lib tests::integration_test
+  ```
+- **TTL / Expiry tests:** Located in `contracts/tests/src/ttl_expiry_tests.rs`. These tests simulate Soroban ledger advancements and verify time-to-live (TTL) expiration semantics for both instance and persistent storage entries. They ensure that lifetime extensions (`extend_ttl`) maintain vital entries and that archived storage reads fail predictably rather than corrupting state. Run with:
+  ```bash
+  cargo test -p integration-tests --lib tests::ttl_expiry_tests
+  ```
+- **Gas profiling tests:** Located in `contracts/tests/src/gas_profiling.rs`. These tests measure CPU instruction execution and memory byte consumption across core contract operations and variable payload sizes, ensuring operations remain within Soroban gas budgets. Run with:
+  ```bash
+  cargo test -p integration-tests --lib tests::gas_profiling
+  ```
 
-If you modify a Soroban contract (or its test), the snapshot may change. Update it with:
+## Snapshot Tests
+
+Soroban tests make extensive use of deterministic test snapshots stored in `test_snapshots/` directories across contract crates (e.g., `contracts/credit-oracle/test_snapshots/`, `contracts/identity-oracle/test_snapshots/`, `contracts/revocation-registry/test_snapshots/`, `contracts/governance/test_snapshots/`, `contracts/score-range-verifier/test_snapshots/`, and `contracts/tests/test_snapshots/`).
+
+Snapshots record execution traces, storage footprints, authorization trees, and emitted events for deterministic verification across environments. If contract logic, storage representations, or emitted events change, the corresponding snapshot tests will fail until regenerated.
+
+### Updating and regenerating snapshots
+
+When you make intentional changes to contract logic or test flows, regenerate all workspace snapshots by running:
 
 ```bash
-UPDATE_EXPECT=true cargo test --workspace
+SOROBAN_TEST_SNAPSHOT_FILE_UPDATE=true cargo test --workspace
 ```
 
-**Important:** Snapshot files must be committed in the same PR as the code change that causes them to change. Stale snapshots are a common source of CI failures and reviewer confusion.
+(Note: `UPDATE_EXPECT=true cargo test --workspace` can also be used for expect-based snapshot assertions.)
+
+**Important:** Snapshot files must be reviewed via `git diff` and committed in the same PR as the code change that causes them to update. Stale snapshots are a common source of CI failures.
 
 For more details, see the [Soroban testutils snapshot documentation](https://docs.rs/soroban-sdk/latest/soroban_sdk/testutils/index.html).
 
@@ -126,14 +151,44 @@ Example:
 
 - `sdk`: added a convenience helper for reading the latest score from the chain (#174)
 
-## No `panic!()` in contract logic
+## Contract Code Rules
+
+Contract code must be resilient, safe, and easily auditable. Contributors writing contract logic must adhere strictly to these rules:
+
+### Explicit rule: No `unwrap()` in contract logic
+
+**No `unwrap()` in contract logic — use `expect("descriptive message")`.**
+
+Bare `.unwrap()` is forbidden in contract source files (`contracts/*/src/*.rs`). If an operation can fail or an `Option`/`Result` depends on caller input or storage data, handle it gracefully by returning a typed `ContractError` via `?` or `.ok_or(ContractError::Variant)?`.
+
+When an `Option` or `Result` represents an internal invariant that is mathematically or logically guaranteed by preceding contract logic, use `.expect("descriptive message")` with a clear explanation of why the state is invariant:
+
+```rust
+// ❌ FORBIDDEN: Bare unwrap in contract logic
+let admin = env.storage().instance().get(&DataKey::Admin).unwrap();
+let record = anchors.get(i).unwrap();
+
+// ✅ RECOMMENDED: Propagate typed error for storage lookups or user inputs
+let admin: Address = env
+    .storage()
+    .instance()
+    .get(&DataKey::Admin)
+    .ok_or(ContractError::NotInitialized)?;
+
+// ✅ ALLOWED: Use expect with a descriptive message for proven internal invariants
+let record = anchors
+    .get(i)
+    .expect("index guaranteed to be within bounds by loop range");
+```
+
+### No `panic!()` in contract logic
 
 **Bare `panic!()` is forbidden in contract source files** (`contracts/*/src/*.rs`) outside of `#[test]` blocks. CI enforces this via the `contract-lint` job.
 
 Allowed:
 - `return Err(ErrorVariant)`
 - `soroban_sdk::panic_with_error!(ErrorVariant)`
-- `expect("descriptive message")` in non-contract code
+- `expect("descriptive message")` for internal contract invariants
 - `env.storage().instance().get(&key).ok_or(ErrorVariant)?`
 - `env.storage().instance().get(&key).unwrap_or(default)`
 
