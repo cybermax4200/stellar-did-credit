@@ -411,7 +411,8 @@ program
     "Check whether a subject has at least one active, non-revoked verifiable credential.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -421,16 +422,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Checking verification status for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Checking verification status for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const verified = await sdk.isVerified(upperAddr);
 
-      console.log();
-      if (verified) {
-        console.log("✅ Subject is VERIFIED.");
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ isVerified: verified }));
+        process.exit(0);
       } else {
-        console.log("❌ Subject is NOT verified — no active credentials found.");
+        console.log();
+        if (verified) {
+          console.log("✅ Subject is VERIFIED.");
+        } else {
+          console.log("❌ Subject is NOT verified — no active credentials found.");
+        }
       }
     } catch (err) {
       console.error(
@@ -451,7 +459,8 @@ program
     "Returns the number of active (non-revoked) verifiable credentials for a subject.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -461,13 +470,20 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const count = await sdk.getVCCount(upperAddr);
 
-      console.log();
-      console.log(`Active VC count: ${count}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ vcCount: count }));
+        process.exit(0);
+      } else {
+        console.log();
+        console.log(`Active VC count: ${count}`);
+      }
     } catch (err) {
       console.error(
         "Failed:",
@@ -563,7 +579,8 @@ program
     "Fetch the IPFS CID of the DID document anchored for a subject address.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
     const options = program.opts();
     const network = options.network as NetworkType;
     const config = loadConfig(network);
@@ -572,16 +589,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const cid = await sdk.getDIDDocument(upperAddr);
 
-      console.log();
-      if (cid) {
-        console.log(`DID Document CID: ${cid}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ didDocument: cid || null }));
+        process.exit(0);
       } else {
-        console.log("No DID document anchored for this address.");
+        console.log();
+        if (cid) {
+          console.log(`DID Document CID: ${cid}`);
+        } else {
+          console.log("No DID document anchored for this address.");
+        }
       }
     } catch (err) {
       console.error(
