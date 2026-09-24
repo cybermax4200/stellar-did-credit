@@ -144,8 +144,8 @@ When `HEALTH_PORT` is set, the feeder starts a lightweight HTTP server (using No
 | Endpoint       | Status | Description |
 | -------------- | ------ | ----------- |
 | `GET /health`  | 200    | Always returns liveness info: `{"status":"ok","lastCycleAt":"<iso or null>","successCount":<n>,"failureCount":<n>}`. Counts are cumulative per-subject sync outcomes across all completed cycles. |
-| `GET /ready`   | 200    | Last feed cycle completed with zero failures. |
-| `GET /ready`   | 503    | Feeder has never completed a cycle, or the last cycle had at least one failure. |
+| `GET /ready`   | 200    | The feeder has completed at least one full feed cycle with zero failures. |
+| `GET /ready`   | 503    | The feeder has never completed a successful cycle yet (returns 503 until the first fully successful cycle completes). |
 
 Example:
 

@@ -18,6 +18,8 @@ export class HealthTracker {
   private failureCount = 0;
   /** null = no cycle has completed yet */
   private lastCycleSucceeded: boolean | null = null;
+  /** True once a successful cycle (zero failures) has completed at least once */
+  private cycleCompleted = false;
 
   /** Record the outcome of a completed feed cycle. */
   recordCycleResult(succeeded: number, failed: number): void {
@@ -25,6 +27,9 @@ export class HealthTracker {
     this.successCount += succeeded;
     this.failureCount += failed;
     this.lastCycleSucceeded = failed === 0;
+    if (failed === 0 && !this.cycleCompleted) {
+      this.cycleCompleted = true;
+    }
   }
 
   getSnapshot(): HealthSnapshot {
@@ -36,9 +41,13 @@ export class HealthTracker {
     };
   }
 
-  /** True only after at least one cycle completed with zero failures. */
+  /**
+   * Readiness for orchestrators: returns true once a successful cycle
+   * (zero failures) has completed at least once. It remains true
+   * thereafter regardless of later cycle outcomes.
+   */
   isReady(): boolean {
-    return this.lastCycleSucceeded === true;
+    return this.cycleCompleted;
   }
 }
 

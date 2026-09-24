@@ -45,7 +45,9 @@ describe("HealthTracker", () => {
     );
 
     tracker.recordCycleResult(1, 1);
-    expect(tracker.isReady()).toBe(false);
+    // Readiness remains true once a successful cycle has completed
+    // at least once, even if later cycles have failures.
+    expect(tracker.isReady()).toBe(true);
     expect(tracker.getSnapshot().successCount).toBe(3);
     expect(tracker.getSnapshot().failureCount).toBe(1);
   });
@@ -110,6 +112,8 @@ describe("createHealthServer", () => {
 
   it("GET /ready returns 503 after a failed cycle", async () => {
     const tracker = new HealthTracker();
+    // A failed cycle should not mark readiness; until a successful
+    // cycle occurs, /ready stays 503.
     tracker.recordCycleResult(0, 1);
 
     await new Promise<void>((resolve) => {
