@@ -1,4 +1,4 @@
-use ark_bls12_381::{Bls12_381, G1Affine, G2Affine};
+
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::SeedableRng;
 use ark_std::rand::rngs::StdRng;
