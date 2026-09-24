@@ -2107,6 +2107,286 @@ export class StellarDIDCreditSDK {
       }
     };
   }
+
+  private async submitContractTransaction(
+    signerKeypair: KeypairLike,
+    contractName:
+      | "identity-oracle"
+      | "credit-oracle"
+      | "revocation-registry"
+      | "governance",
+    operation: xdr.Operation,
+    operationName: string,
+  ): Promise<string> {
+    const server = this.server;
+    const publicKey = getPublicKey(signerKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error ?? "Simulation failed", contractName);
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(signerKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      operationName,
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Pause all write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, write operations (such as anchoring
+   * DIDs or credentials) will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("pause"),
+      "pauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the identity-oracle contract.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseIdentityOracle(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.identityOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("unpause"),
+      "unpauseIdentityOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation. When paused, score computation and other write
+   * operations will fail until unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("pause", new Address(publicKey).toScVal()),
+      "pauseCreditOracle",
+    );
+  }
+
+  /**
+   * Resume write operations on the credit-oracle contract.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseCreditOracle(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("unpause", new Address(publicKey).toScVal()),
+      "unpauseCreditOracle",
+    );
+  }
+
+  /**
+   * Pause all write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation. When paused, credential revocations will fail until
+   * unpaused. Read operations remain functional.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async pauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("pause"),
+      "pauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Resume write operations on the revocation-registry contract.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async unpauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const contract = new Contract(this.config.revocationRegistryId);
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("unpause"),
+      "unpauseRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the identity-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the identity-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeIdentityOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.identityOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "identity-oracle",
+      contract.call("upgrade", hashScVal),
+      "upgradeIdentityOracle",
+    );
+  }
+
+  /**
+   * Upgrade the revocation-registry contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the revocation-registry contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeRevocationRegistry(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const contract = new Contract(this.config.revocationRegistryId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "revocation-registry",
+      contract.call("upgrade", hashScVal),
+      "upgradeRevocationRegistry",
+    );
+  }
+
+  /**
+   * Upgrade the credit-oracle contract WASM bytecode in-place.
+   *
+   * Submits a signed transaction to the credit-oracle contract. Requires the admin
+   * keypair to authorize the operation.
+   *
+   * **Security Warning:** Contract WASM upgrades are irreversible once confirmed on-chain.
+   * Ensure that the new WASM hash corresponds to a thoroughly audited and tested binary
+   * before proceeding. Upgrading with an invalid or buggy bytecode can permanently disable
+   * or compromise the contract.
+   *
+   * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
+   * @param newWasmHash - SHA-256 hash of the new WASM bytecode (must be a 32-byte Buffer)
+   * @returns Transaction hash after successful ledger confirmation
+   * @throws Error if newWasmHash is not a 32-byte Buffer
+   */
+  async upgradeCreditOracle(
+    adminKeypair: KeypairLike,
+    newWasmHash: Buffer,
+  ): Promise<string> {
+    if (!Buffer.isBuffer(newWasmHash) || newWasmHash.length !== 32) {
+      throw new Error("newWasmHash must be a 32-byte Buffer");
+    }
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.creditOracleId);
+    const hashScVal = nativeToScVal(new Uint8Array(newWasmHash), {
+      type: "bytes",
+    });
+    return this.submitContractTransaction(
+      adminKeypair,
+      "credit-oracle",
+      contract.call("upgrade", new Address(publicKey).toScVal(), hashScVal),
+      "upgradeCreditOracle",
+    );
+  }
 }
 
 /** Thrown when get_score is called for an address that has no computed score yet. */
