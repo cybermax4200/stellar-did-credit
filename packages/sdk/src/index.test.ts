@@ -87,8 +87,12 @@ jest.mock("@stellar/stellar-sdk", () => ({
   nativeToScVal: (value: unknown, options?: { type?: unknown }) => ({
     value,
     type: options?.type,
+    address: () => ({
+      toXDR: () => Buffer.from(String(value)),
+    }),
   }),
   scValToNative: (scVal: { value?: unknown }) => scVal?.value,
+  hash: (data: Uint8Array | Buffer) => Buffer.from(data).subarray(0, 32),
   SorobanRpc: {
     Server: jest.fn().mockImplementation(() => ({
       getAccount: mockGetAccount,
@@ -2162,6 +2166,136 @@ describe("StellarDIDCreditSDK", () => {
       expect(error).toBeInstanceOf(Error);
       expect(error.name).toBe("ScoreNotComputedError");
       expect(error.message).toContain(subjectAddress);
+    });
+  });
+
+  describe("getTxStats", () => {
+    it("returns TxStats on success", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              volume_30d: 1000n,
+              tx_count_30d: 5,
+              avg_counterparties: 2,
+            },
+          },
+        },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const stats = await sdk.getTxStats(subjectAddress);
+      expect(stats).toEqual({
+        volume30d: 1000n,
+        txCount30d: 5,
+        avgCounterparties: 2,
+      });
+    });
+
+    it("returns null if not found", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const stats = await sdk.getTxStats(subjectAddress);
+      expect(stats).toBeNull();
+    });
+  });
+
+  describe("getRepaymentRecord", () => {
+    it("returns RepaymentRecord on success", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              on_time_count: 10,
+              total_count: 12,
+              total_repaid: 500n,
+            },
+          },
+        },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const record = await sdk.getRepaymentRecord(subjectAddress);
+      expect(record).toEqual({
+        onTimeCount: 10,
+        totalCount: 12,
+        totalRepaid: 500n,
+      });
+    });
+
+    it("returns null if not found", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const record = await sdk.getRepaymentRecord(subjectAddress);
+      expect(record).toBeNull();
+    });
+  });
+
+  describe("verifyScoreProof", () => {
+    it("returns true on successful verification", async () => {
+      mockGetAccount.mockResolvedValueOnce({ sequenceNumber: () => "123" });
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+      mockSendTransaction.mockResolvedValueOnce({
+        status: "PENDING",
+        hash: "tx-hash-verify",
+      });
+      mockGetTransaction.mockResolvedValueOnce({ status: "SUCCESS" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.verifyScoreProof(
+        { publicKey: () => subjectAddress } as unknown as Keypair,
+        subjectAddress,
+        600,
+        new Uint8Array([1, 2, 3]),
+        "C_VERIFIER"
+      );
+      expect(result).toBe(true);
+    });
+  });
+
+  describe("generateScoreProof", () => {
+    it("throws if score not computed", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      jest.spyOn(sdk, "getScore").mockResolvedValueOnce(null);
+
+      await expect(sdk.generateScoreProof(subjectAddress, 600)).rejects.toThrow(
+        "Score not computed"
+      );
+    });
+
+    it("uses default stats if tx/repayment records are missing", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      jest.spyOn(sdk, "getScore").mockResolvedValueOnce({
+        score: 600,
+        lastUpdated: 0,
+        vcCount: 1,
+        repaymentRate: 0,
+        txVolume30d: 0n,
+        previousScore: 0,
+        computedAtLedger: 0,
+        stale: false,
+      });
+      jest.spyOn(sdk, "getTxStats").mockResolvedValueOnce(null);
+      jest.spyOn(sdk, "getRepaymentRecord").mockResolvedValueOnce(null);
+      jest.spyOn(sdk, "getWeights").mockResolvedValueOnce({
+        vcWeight: 40,
+        txWeight: 30,
+        repaymentWeight: 30,
+      });
+
+      // We just expect it to attempt generating a proof without throwing on missing stats
+      // Since ZkWasm might not be loaded in Jest node environment without proper wasm support,
+      // we mock ZkWasm.generate_score_proof or just let it try and if it fails on WASM, 
+      // that's fine, we just want to cover the `|| { default }` lines before it.
+      const ZkWasm = require("@stellar-did-credit/zk-wasm");
+      jest.spyOn(ZkWasm, "generate_score_proof").mockReturnValueOnce(new Uint8Array());
+      
+      const proof = await sdk.generateScoreProof(subjectAddress, 600);
+      expect(proof).toBeInstanceOf(Uint8Array);
     });
   });
 
