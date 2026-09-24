@@ -406,8 +406,200 @@ export class GovernanceClient {
    * approximately 24 hours for the credit-oracle timelock, and then call
    * `applyWeights` before the new weights become active.
    */
+  /**
+   * Register a new voter with the specified weight.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - Voting weight to assign
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async registerVoter(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "register_voter",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "registerVoter",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Update the voting weight for a registered voter.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param voter - Stellar G... address of the voter
+   * @param weight - New voting weight (0 to deregister)
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async updateVoterWeight(
+    adminKeypair: KeypairLike,
+    voter: string,
+    weight: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "update_voter_weight",
+          new Address(publicKey).toScVal(),
+          new Address(voter).toScVal(),
+          nativeToScVal(weight, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "updateVoterWeight",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Set the contract-wide default quorum required for new proposals.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param quorum - New default quorum requirement
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setQuorum(
+    adminKeypair: KeypairLike,
+    quorum: bigint,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = new Contract(this.config.governanceId);
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_quorum",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(quorum, { type: "i128" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "setQuorum",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
   async createProposal(
-    proposerKeypair: Keypair,
+    proposerKeypair: KeypairLike,
     weights: ScoringWeights,
     votingPeriodLedgers: number,
     executionDelayLedgers: number,

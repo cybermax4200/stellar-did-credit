@@ -156,6 +156,86 @@ describe("StellarDIDCreditSDK", () => {
   });
 
   describe("governance", () => {
+    const adminAddress = "GADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+    const adminKeypair = { publicKey: () => adminAddress };
+
+    describe("admin methods", () => {
+      beforeEach(() => {
+        mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+      });
+
+      it("registers a voter", async () => {
+        mockSimulateTransaction.mockResolvedValue({
+          result: { retval: { value: undefined } },
+        });
+
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const result = await sdk.governance.registerVoter(
+          adminKeypair as never,
+          subjectAddress,
+          100n,
+        );
+
+        expect(result).toBe("mock-tx-hash");
+        expect(mockGetAccount).toHaveBeenCalledWith(adminAddress);
+        expect(mockGetTransaction).toHaveBeenCalledWith("mock-tx-hash");
+        expect(mockContractCalls[0]).toMatchObject({
+          contractId: mockConfig.governanceId,
+          method: "register_voter",
+        });
+        expect(mockContractCalls[0]?.args).toHaveLength(3);
+        expect(mockContractCalls[0]?.args[2]).toMatchObject({
+          value: 100n,
+          type: "i128",
+        });
+      });
+
+      it("updates a voter weight", async () => {
+        mockSimulateTransaction.mockResolvedValue({
+          result: { retval: { value: undefined } },
+        });
+
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const result = await sdk.governance.updateVoterWeight(
+          adminKeypair as never,
+          subjectAddress,
+          200n,
+        );
+
+        expect(result).toBe("mock-tx-hash");
+        expect(mockContractCalls[0]).toMatchObject({
+          contractId: mockConfig.governanceId,
+          method: "update_voter_weight",
+        });
+        expect(mockContractCalls[0]?.args[2]).toMatchObject({
+          value: 200n,
+          type: "i128",
+        });
+      });
+
+      it("sets the quorum", async () => {
+        mockSimulateTransaction.mockResolvedValue({
+          result: { retval: { value: undefined } },
+        });
+
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const result = await sdk.governance.setQuorum(
+          adminKeypair as never,
+          1000n,
+        );
+
+        expect(result).toBe("mock-tx-hash");
+        expect(mockContractCalls[0]).toMatchObject({
+          contractId: mockConfig.governanceId,
+          method: "set_quorum",
+        });
+        expect(mockContractCalls[0]?.args[1]).toMatchObject({
+          value: 1000n,
+          type: "i128",
+        });
+      });
+    });
+
     const governanceWeights: ScoringWeights = {
       vcWeight: 50,
       txWeight: 25,
