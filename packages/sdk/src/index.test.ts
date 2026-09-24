@@ -2343,7 +2343,14 @@ describe("parseContractErrorCode", () => {
       throwContractError("Error(Contract, #19)", "governance"),
     ).toThrow(new GovernanceError(19, "InvalidVotingPeriod (code 19)"));
   });
+
+  it("maps InvalidAmount credit-oracle errors to their variant name", () => {
+    expect(() =>
+      throwContractError("Error(Contract, #17)", "credit-oracle"),
+    ).toThrow(new CreditOracleError(17, "InvalidAmount (code 17)"));
+  });
 });
+
 
 describe("batchRevokeVC", () => {
   beforeEach(() => {
