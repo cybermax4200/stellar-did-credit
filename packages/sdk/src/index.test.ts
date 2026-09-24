@@ -1652,6 +1652,86 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("isDeactivated", () => {
+    it("returns true when subject has deactivated identity", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: true },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isDeactivated(subjectAddress);
+
+      expect(result).toBe(true);
+      expect(mockLastContractCall?.method).toBe("is_deactivated");
+      expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("returns false when subject has active identity", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isDeactivated(subjectAddress);
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("is_deactivated");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.isDeactivated(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
+  describe("reactivateIdentity", () => {
+    it("submits transaction to reactivate identity", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: undefined }, // return value is ()
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.reactivateIdentity(subjectKeypair as never);
+
+      expect(result).toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
+      expect(mockSendTransaction).toHaveBeenCalled();
+      expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
+        contractId: mockConfig.identityOracleId,
+        method: "reactivate_identity",
+      });
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(
+        sdk.reactivateIdentity(subjectKeypair as never),
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
   describe("getWeights", () => {
     it("returns scoring weights from the credit-oracle", async () => {
       mockSimulateTransaction.mockResolvedValue({
