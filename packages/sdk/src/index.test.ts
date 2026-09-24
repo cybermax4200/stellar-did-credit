@@ -21,6 +21,7 @@ import {
   VCRecord,
   GovernanceProposal,
   BatchResult,
+  RecencyDecayConfig,
 } from "./index";
 import { xdr, Keypair } from "@stellar/stellar-sdk";
 
@@ -2497,6 +2498,58 @@ describe("batchRevokeVC", () => {
     expect(result.results[1]?.error).toBeDefined();
     expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     expect(mockGetTransaction).toHaveBeenCalledTimes(1);
+  });
+
+  describe("recency decay config", () => {
+    const adminKeypair = { publicKey: () => "GADMIN" };
+    const mockConfigData = {
+      enabled: true,
+      decayBpsPerDay: 5,
+      minRecencyBps: 5000,
+    };
+
+    it("gets the recency decay config", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              enabled: true,
+              decay_bps_per_day: 5,
+              min_recency_bps: 5000,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const config = await sdk.getRecencyDecayConfig();
+
+      expect(config).toEqual(mockConfigData);
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_recency_decay",
+      });
+    });
+
+    it("sets the recency decay config", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: null,
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const txHash = await sdk.setRecencyDecayConfig(adminKeypair as never, mockConfigData);
+
+      expect(txHash).toBe("mock-tx-hash");
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "set_recency_decay",
+      });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

@@ -42,6 +42,11 @@ export interface ScoringWeights {
   txWeight: number;
   repaymentWeight: number;
 }
+export interface RecencyDecayConfig {
+  enabled: boolean;
+  decayBpsPerDay: number;
+  minRecencyBps: number;
+}
 export interface RepaymentRecord {
   onTimeCount: number;
   totalCount: number;
@@ -1507,6 +1512,112 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Fetch the recency decay configuration currently active on the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns The current RecencyDecayConfig
+   */
+  async getRecencyDecayConfig(): Promise<RecencyDecayConfig> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_recency_decay"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseRecencyDecayConfig(resultScVal);
+  }
+
+  /**
+   * Update the recency decay configuration on the credit-oracle.
+   *
+   * Submits a signed transaction. Requires the admin keypair.
+   *
+   * @param adminKeypair - Stellar keypair of the contract admin
+   * @param config - The new RecencyDecayConfig to apply
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async setRecencyDecayConfig(
+    adminKeypair: KeypairLike,
+    config: RecencyDecayConfig,
+  ): Promise<string> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+
+    const publicKey = getPublicKey(adminKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "set_recency_decay",
+          new Address(publicKey).toScVal(),
+          nativeToScVal(config.enabled),
+          nativeToScVal(config.decayBpsPerDay, { type: "u32" }),
+          nativeToScVal(config.minRecencyBps, { type: "u32" })
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      server,
+      txHash,
+      "setRecencyDecayConfig",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
    * Fetch the scoring weights currently configured on the credit-oracle contract.
    *
    * Uses a read-only simulation (no signing required).
@@ -2031,6 +2142,20 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
     vcWeight: Number(raw["vc_weight"]),
     txWeight: Number(raw["tx_weight"]),
     repaymentWeight: Number(raw["repayment_weight"]),
+  };
+}
+
+function parseRecencyDecayConfig(scVal: xdr.ScVal): RecencyDecayConfig {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_recency_decay returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    enabled: Boolean(raw["enabled"]),
+    decayBpsPerDay: Number(raw["decay_bps_per_day"]),
+    minRecencyBps: Number(raw["min_recency_bps"]),
   };
 }
 
