@@ -1660,6 +1660,82 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("getIdentityProtocolStats", () => {
+    it("returns identity protocol counters", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              total_dids_anchored: 2n,
+              total_vcs_anchored: 5n,
+              total_vcs_revoked: 1n,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getIdentityProtocolStats();
+
+      expect(result).toEqual({
+        totalDIDsAnchored: 2,
+        totalVCsAnchored: 5,
+        totalVCsRevoked: 1,
+      });
+      expect(mockLastContractCall?.method).toBe("get_protocol_stats");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getIdentityProtocolStats()).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 0,
+        contractName: "identity-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
+  describe("getCreditProtocolStats", () => {
+    it("returns credit protocol counters", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: {
+              total_subjects_scored: 3n,
+              total_repayments_recorded: 7n,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getCreditProtocolStats();
+
+      expect(result).toEqual({
+        totalSubjectsScored: 3,
+        totalRepaymentsRecorded: 7,
+      });
+      expect(mockLastContractCall?.method).toBe("get_protocol_stats");
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getCreditProtocolStats()).rejects.toMatchObject({
+        name: "CreditOracleError",
+        code: 0,
+        contractName: "credit-oracle",
+        message: "rpc error",
+      });
+    });
+  });
+
   describe("getRegisteredIssuers", () => {
     it("returns list of registered issuer addresses", async () => {
       const issuers = ["GISSUER1", "GISSUER2"];

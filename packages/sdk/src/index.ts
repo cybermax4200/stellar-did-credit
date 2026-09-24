@@ -67,6 +67,17 @@ export interface GovernanceProposal {
   quorumRequired: bigint;
 }
 
+export interface IdentityProtocolStats {
+  totalDIDsAnchored: number;
+  totalVCsAnchored: number;
+  totalVCsRevoked: number;
+}
+
+export interface CreditProtocolStats {
+  totalSubjectsScored: number;
+  totalRepaymentsRecorded: number;
+}
+
 export interface ProtocolConfig {
   identityOracleId: string;
   creditOracleId: string;
@@ -1520,6 +1531,82 @@ export class StellarDIDCreditSDK {
   }
 
   /**
+   * Fetch aggregate protocol counters from the identity-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Totals for anchored DIDs, anchored VCs, and revoked VCs
+   */
+  async getIdentityProtocolStats(): Promise<IdentityProtocolStats> {
+    const server = this.server;
+    const contract = new Contract(this.config.identityOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_protocol_stats"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "identity-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseIdentityProtocolStats(resultScVal);
+  }
+
+  /**
+   * Fetch aggregate protocol counters from the credit-oracle.
+   *
+   * Uses a read-only simulation (no signing required).
+   *
+   * @returns Totals for scored subjects and recorded repayments
+   */
+  async getCreditProtocolStats(): Promise<CreditProtocolStats> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_protocol_stats"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const resultScVal = sim.result?.retval;
+    if (!resultScVal) {
+      throw new Error("No return value in simulation result");
+    }
+
+    return parseCreditProtocolStats(resultScVal);
+  }
+
+  /**
    * Returns the list of all currently registered (non-deregistered) trusted issuers.
    *
    * Uses a read-only simulation against the identity-oracle contract.
@@ -1930,6 +2017,35 @@ function parseScoringWeights(scVal: xdr.ScVal): ScoringWeights {
     vcWeight: Number(raw["vc_weight"]),
     txWeight: Number(raw["tx_weight"]),
     repaymentWeight: Number(raw["repayment_weight"]),
+  };
+}
+
+function parseIdentityProtocolStats(scVal: xdr.ScVal): IdentityProtocolStats {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_protocol_stats returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    totalDIDsAnchored: Number(raw["total_dids_anchored"] as bigint),
+    totalVCsAnchored: Number(raw["total_vcs_anchored"] as bigint),
+    totalVCsRevoked: Number(raw["total_vcs_revoked"] as bigint),
+  };
+}
+
+function parseCreditProtocolStats(scVal: xdr.ScVal): CreditProtocolStats {
+  const native = scValToNative(scVal);
+  if (native === null || native === undefined || typeof native !== "object") {
+    throw new Error("get_protocol_stats returned an invalid result");
+  }
+
+  const raw = native as Record<string, unknown>;
+  return {
+    totalSubjectsScored: Number(raw["total_subjects_scored"] as bigint),
+    totalRepaymentsRecorded: Number(
+      raw["total_repayments_recorded"] as bigint,
+    ),
   };
 }
 
