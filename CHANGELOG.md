@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `packages/cli` (`@stellar-did-credit/cli`): handle unscored subjects in `get-score` command by printing a helpful message and outputting `{ "score": null }` in JSON mode (#700)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `anchorDID`, `issueVC`,
   `revokeVC`, and `computeScore` now retry transient transaction submissions
   with exponential backoff and wait for final transaction status. Confirmation

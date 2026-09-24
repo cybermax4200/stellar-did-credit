@@ -271,17 +271,23 @@ program
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
+    if (!options.json) {
+      console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const score = await sdk.getScore(upperAddr);
 
-      if (!score) {
-        console.log();
-        console.log("No score computed yet for this address.");
-        console.log(
-          'Run "stellar-did compute-score" to compute one, or ask a feeder to sync data first.',
-        );
+      if (score === null) {
+        if (options.json) {
+          console.log(JSON.stringify({ score: null }));
+        } else {
+          console.log();
+          console.log(
+            "No credit score has been computed for this subject yet. Run `compute-score` first.",
+          );
+        }
+        process.exit(0);
         return;
       }
 
@@ -290,6 +296,8 @@ program
           if (typeof value === "bigint") return value.toString();
           return value;
         }, 2));
+        process.exit(0);
+        return;
       } else {
         printScoreRecord(score);
       }
@@ -831,3 +839,6 @@ program
 if (require.main === module) {
   program.parse();
 }
+
+export { program };
+

@@ -1652,20 +1652,34 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
-  describe("getCredentialTypeWeight", () => {
-    it("returns weight for a credential type", async () => {
+  describe("isDeactivated", () => {
+    it("returns true when subject has deactivated identity", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
-          retval: { value: 150 },
+          retval: { value: true },
         },
       });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
-      const result = await sdk.getCredentialTypeWeight("employment");
+      const result = await sdk.isDeactivated(subjectAddress);
 
-      expect(result).toBe(150);
-      expect(mockLastContractCall?.method).toBe("get_credential_type_weight");
+      expect(result).toBe(true);
+      expect(mockLastContractCall?.method).toBe("is_deactivated");
       expect(mockLastContractCall?.args).toHaveLength(1);
+    });
+
+    it("returns false when subject has active identity", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: false },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.isDeactivated(subjectAddress);
+
+      expect(result).toBe(false);
+      expect(mockLastContractCall?.method).toBe("is_deactivated");
     });
 
     it("throws on simulation error", async () => {
@@ -1673,39 +1687,32 @@ describe("StellarDIDCreditSDK", () => {
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
-      await expect(sdk.getCredentialTypeWeight("kyc")).rejects.toMatchObject({
-        name: "CreditOracleError",
+      await expect(sdk.isDeactivated(subjectAddress)).rejects.toMatchObject({
+        name: "IdentityOracleError",
         code: 0,
-        contractName: "credit-oracle",
+        contractName: "identity-oracle",
         message: "rpc error",
       });
     });
   });
 
-  describe("setCredentialTypeWeight", () => {
-    const adminAddress = "GADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
-    const adminKeypair = { publicKey: () => adminAddress };
-
-    it("submits transaction to set credential type weight", async () => {
+  describe("reactivateIdentity", () => {
+    it("submits transaction to reactivate identity", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
-          retval: { value: undefined },
+          retval: { value: undefined }, // return value is ()
         },
       });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
-      const result = await sdk.setCredentialTypeWeight(
-        adminKeypair as never,
-        "kyc",
-        120,
-      );
+      const result = await sdk.reactivateIdentity(subjectKeypair as never);
 
       expect(result).toBe("mock-tx-hash");
-      expect(mockGetAccount).toHaveBeenCalledWith(adminAddress);
+      expect(mockGetAccount).toHaveBeenCalledWith(subjectAddress);
       expect(mockSendTransaction).toHaveBeenCalled();
       expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
-        contractId: mockConfig.creditOracleId,
-        method: "set_credential_type_weight",
+        contractId: mockConfig.identityOracleId,
+        method: "reactivate_identity",
       });
     });
 
@@ -1715,11 +1722,11 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
       await expect(
-        sdk.setCredentialTypeWeight(adminKeypair as never, "kyc", 120),
+        sdk.reactivateIdentity(subjectKeypair as never),
       ).rejects.toMatchObject({
-        name: "CreditOracleError",
+        name: "IdentityOracleError",
         code: 0,
-        contractName: "credit-oracle",
+        contractName: "identity-oracle",
         message: "rpc error",
       });
     });

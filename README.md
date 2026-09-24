@@ -117,7 +117,7 @@ Computes and stores credit scores based on on-chain data.
 | `list_feeders()`                                     | Returns all currently registered feeders           |
 | `list_lenders()`                                     | Returns all currently registered lenders           |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
-| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
+| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome. Returns InvalidAmount if amount ≤ 0. |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |

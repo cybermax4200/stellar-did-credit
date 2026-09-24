@@ -86,7 +86,7 @@ and fill in the values, or export them before running `npm start`.
 | `RETRY_BASE_DELAY_MS`   | `1000`     | Base delay for exponential backoff, in milliseconds.                           |
 | `EVENT_DRIVEN`          | `false`    | Enables event-driven mode. Subscribes to `VCAnch` and `Revoked` events to trigger immediate feed cycles. |
 | `EVENT_POLL_INTERVAL_MS`| `30000`    | How often to poll for events, in milliseconds. Used when `EVENT_DRIVEN=true`.  |
-| `FEEDER_ALLOW_PARTIAL_STATS` | `true` | Whether stats from an incomplete Horizon pagination pass are written on-chain. Set to `false` to suppress `update_tx_stats` for partial fetches. Any value other than `false` means `true`. |
+| `FEEDER_ALLOW_PARTIAL_STATS` | `true` | Whether stats from an incomplete Horizon pagination pass are written on-chain. Defaults to `true` (partial data is submitted rather than discarded). Set to `"false"` to suppress `update_tx_stats` for partial fetches, leaving previous complete stats in place. Any value other than `"false"` means `true`. |
 
 ### Partial Horizon results
 
