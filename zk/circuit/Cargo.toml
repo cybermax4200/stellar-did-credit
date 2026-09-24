@@ -13,7 +13,7 @@ ark-ff = "0.4"
 ark-ec = "0.4"
 ark-bls12-381 = "0.4"
 ark-r1cs-std = { version = "0.4", features = ["parallel"] }
-ark-relations = "0.4"
+ark-relations = "0.6"
 ark-groth16 = "0.4"
 ark-snark = "0.4"
 ark-std = "0.4"
