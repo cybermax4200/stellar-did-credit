@@ -598,7 +598,8 @@ mod tests {
 
         // Advance the ledger past PERS_TTL_EXTEND to confirm the write
         // path is what extends the entry's TTL (not an implicit default).
-        env.ledger().set_sequence_number(1_000_000);
+        env.storage().instance().extend_ttl(PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.ledger().set_sequence_number(PERS_TTL_EXTEND - 1);
 
         // Sanity: the storage extended_ttl helper is the only thing that
         // would keep a persistent entry alive this long. Since we cannot
@@ -620,7 +621,8 @@ mod tests {
 
         // Advance the ledger again to prove no entry lingers for the
         // rejected proof.
-        env.ledger().set_sequence_number(2_000_000);
+        env.storage().instance().extend_ttl(PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.ledger().set_sequence_number(2 * PERS_TTL_EXTEND - 1);
 
         // A second attempt with the same proof still fails the same way
         // (not ProofAlreadyConsumed) — proving no ConsumedProof entry was
