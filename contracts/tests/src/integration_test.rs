@@ -1825,6 +1825,123 @@ mod tests {
         assert_eq!(rec1_v2_updated.total_repaid, 5000);
     }
 
+    #[test]
+    fn test_identity_oracle_migration_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        let did_uri = String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
+
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = 42;
+        let vc_hash = BytesN::from_array(&env, &hash_bytes);
+        let vc_record = identity_oracle::VCRecord {
+            vc_hash: vc_hash.clone(),
+            issuer: issuer.clone(),
+            anchored_at: env.ledger().timestamp(),
+            revoked: false,
+        };
+
+        // Simulate a V1 deployment by manually writing storage entries without StorageVersion.
+        env.as_contract(&contract_id, || {
+            // Instance storage: Admin set, StorageVersion NOT set (simulating V1)
+            env.storage()
+                .instance()
+                .set(&identity_oracle::DataKey::Admin, &admin);
+            assert!(!env
+                .storage()
+                .instance()
+                .has(&identity_oracle::DataKey::StorageVersion));
+
+            // Persistent storage: simulate pre-migration identity records
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::TrustedIssuer(issuer.clone()), &true);
+            let mut issuers = soroban_sdk::Vec::new(&env);
+            issuers.push_back(issuer.clone());
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::IssuersIndex, &issuers);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::DIDDocument(subject.clone()), &did_uri);
+
+            let mut vcs = soroban_sdk::Vec::new(&env);
+            vcs.push_back(vc_record);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::VCAnchors(subject.clone()), &vcs);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::ActiveVCCount(subject.clone()), &1u32);
+        });
+
+        // Verify StorageVersion is absent before migration
+        let version_before: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_before, None);
+
+        // Verify pre-migration state is readable
+        let issuers_before = client.list_issuers();
+        assert_eq!(issuers_before.len(), 1);
+        assert_eq!(issuers_before.get(0).unwrap(), issuer);
+        assert_eq!(client.has_anchored_did(&subject), true);
+        assert_eq!(client.get_did_document(&subject), Some(did_uri.clone()));
+        assert_eq!(client.is_verified(&subject), true);
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+        assert_eq!(client.get_vc_count(&subject), 1);
+        assert_eq!(client.verify_vc(&subject, &vc_hash), true);
+
+        // Execute migration
+        client.migrate();
+
+        // Verify StorageVersion is now set to 2
+        let version_after: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_after, Some(2u32));
+
+        // Verify reads still work properly after migration
+        let issuers_list = client.list_issuers();
+        assert_eq!(issuers_list.len(), 1);
+        assert_eq!(issuers_list.get(0).unwrap(), issuer);
+        assert_eq!(client.has_anchored_did(&subject), true);
+        assert_eq!(client.get_did_document(&subject), Some(did_uri));
+        assert_eq!(client.is_verified(&subject), true);
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+        assert_eq!(client.get_vc_count(&subject), 1);
+        assert_eq!(client.verify_vc(&subject, &vc_hash), true);
+        let vc_records = client.get_vc_details(&subject);
+        assert_eq!(vc_records.len(), 1);
+        assert_eq!(vc_records.get(0).unwrap().vc_hash, vc_hash);
+
+        // Verify new operations continue to succeed after migration
+        let subject2 = soroban_sdk::Address::generate(&env);
+        let did_uri2 = String::from_str(&env, "ipfs://QmSecondSubjectDIDDocumentHash123456789012");
+        client.anchor_did(&subject2, &did_uri2);
+        assert_eq!(client.get_did_document(&subject2), Some(did_uri2));
+
+        // Verify migrate is idempotent
+        client.migrate();
+        let version_idempotent: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_idempotent, Some(2u32));
+    }
+
     // ── Compute-score cooldown tests ──────────────────────────────────────
 
     /// cooldown = 1 (default): second call within the same ledger is rejected.
