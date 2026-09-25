@@ -160,6 +160,12 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Data:** `canceller: Address`
 * **Emitted When:** A governance proposal is cancelled.
 
+#### WeightsApplied
+
+- **Topic:** `[Symbol("WtApplied")]`
+- **Data:** `ledger_sequence: u32`
+- **Emitted When:** The credit-oracle's pending weights have reached their effective ledger and are successfully applied.
+
 ---
 
 ## Subscribing to Events with the SDK
