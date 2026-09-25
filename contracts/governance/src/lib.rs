@@ -1,4 +1,4 @@
-﻿#![no_std]
+#![no_std]
 //! Governance contract for the Stellar DID Credit protocol.
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
@@ -48,6 +48,8 @@ pub enum GovernanceError {
     VoteTallyOverflow = 17,
     /// Proposal did not receive more for-votes than against-votes.
     ProposalRejected = 18,
+    /// Voting period cannot be zero.
+    InvalidVotingPeriod = 19,
 }
 
 /// Storage keys for the governance contract.
@@ -260,6 +262,9 @@ impl Governance {
         proposer.require_auth();
         if !weights.is_valid() {
             return Err(GovernanceError::InvalidWeights);
+        }
+        if voting_period_ledgers == 0 {
+            return Err(GovernanceError::InvalidVotingPeriod);
         }
 
         let id: u64 = env
@@ -1932,5 +1937,33 @@ mod tests {
             &10,
         );
         assert_eq!(prop_id, 1);
+    }
+
+    #[test]
+    fn test_create_proposal_zero_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+
+        let res = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &0,
+            &10,
+        );
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidVotingPeriod)));
     }
 }
