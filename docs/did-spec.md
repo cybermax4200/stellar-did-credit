@@ -219,9 +219,79 @@ DID document at any time by calling `anchor_did` again.
    via event streams. However, consumers SHOULD read the current CID from storage rather
    than relying solely on historical events, since multiple updates are possible.
 
-### 3.4 Deactivate
+### 3.4 DID Deactivation
 
-1. The subject calls `deactivate_did(subject)`. This removes the anchored DID Document CID from storage and revokes all active verifiable credentials for the subject. A `DIDDeact` event is emitted.
+The Stellar DID protocol provides two distinct on-chain deactivation entry points on the `identity-oracle` contract: [`deactivate_did`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L734) and [`deactivate_identity`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L939). Both functions enforce subject signature authorization (`subject.require_auth()`) and share foundational revocation logic, but they differ in storage retention of the DID document, event emission, return types, and intended operational lifecycles.
+
+#### 3.4.1 Shared Deactivation Core (`deactivate_core`)
+
+When either `deactivate_did` or `deactivate_identity` is invoked, the contract executes [`deactivate_core`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L398), which enforces the following state transitions:
+
+1. **Sets Deactivation Flag**: Writes `true` to `DataKey::Deactivated(subject)` in persistent storage. As a result, [`is_deactivated(subject)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L907) returns `true`, and [`is_verified(subject)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L978) immediately returns `false`.
+2. **Revokes All Anchored Verifiable Credentials**: Iterates over all active credential anchors (`DataKey::VCAnchors(subject)`) and transitions each record to `revoked = true`.
+3. **Clears Active VC Count**: Resets `DataKey::ActiveVCCount(subject)` to `0`, ensuring [`get_vc_count(subject)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L998) returns `0`.
+4. **Bumps Protocol Revocation Counter**: Increments the protocol-wide `total_vcs_revoked` metric by the count of active VCs transitioned to revoked.
+5. **Records State Change Timestamp**: Updates `DataKey::LastStateChange(subject)` with the current ledger sequence (`env.ledger().sequence()`). Downstream contracts such as `credit-oracle` rely on this timestamp to invalidate cached credit scores.
+
+#### 3.4.2 Behavioral Differences: `deactivate_did` vs `deactivate_identity`
+
+The two entry points diverge in DID Document storage retention, return values, and event notifications:
+
+| Dimension | `deactivate_did(subject)` | `deactivate_identity(subject)` |
+| :--- | :--- | :--- |
+| **Primary Purpose** | Canonical, permanent-style DID deactivation conforming to W3C DID Core | Operational / temporary identity suspension and credential flush |
+| **DID Document CID in Storage** | **Removed** (`DataKey::DIDDocument` deleted) | **Preserved** (`DataKey::DIDDocument` untouched) |
+| **DID Resolution (`get_did_document`)** | Returns `None` (unanchored / 404) | Returns `Some(CID)` (still resolvable on-chain) |
+| **Verifiable Credentials** | All active anchored VCs marked `revoked = true` | All active anchored VCs marked `revoked = true` |
+| **`is_deactivated` Flag** | Set to `true` | Set to `true` |
+| **`is_verified` Result** | Returns `false` | Returns `false` |
+| **Credit Scoring Impact** | Suppressed in `credit-oracle` | Suppressed in `credit-oracle` |
+| **Return Type** | `Result<(), IdentityOracleError>` | `u32` (count of VCs revoked) |
+| **Emitted Event Topic** | `[Symbol("DIDDeact")]` | `[Symbol("IdDeact")]` |
+| **Emitted Event Data** | `subject: Address` | `(subject: Address, revoked_count: u32)` |
+| **Reactivation Restoration** | Must re-anchor DID document + reissue VCs | Only reissue VCs (DID document already present) |
+
+#### 3.4.3 When to Use Each Function
+
+- **Use `deactivate_did` when:**
+  - **Full DID Lifecycle Termination:** The subject is permanently decommissioning their decentralized identifier or keypair.
+  - **W3C DID Deactivation Compliance:** Off-chain resolvers must receive `None` / deactivated status when resolving `did:stellar:<network>:<address>`.
+  - **Key Compromise or Complete Teardown:** The private key or DID document is compromised and the document pointer must be purged from on-chain state immediately.
+
+- **Use `deactivate_identity` when:**
+  - **Temporary Suspension:** The subject wants to pause credential verification and suppress credit score computation without deleting their published DID Document pointer.
+  - **Credential Flush / Reset:** The subject needs to invalidate all active credentials in one atomic call while keeping the DID document resolvable for public identity queries, history, or auditing.
+  - **Programmatic Revocation Feedback:** Integrators need immediate on-chain return values or event payloads containing the exact count of credentials revoked (`revoked_count`).
+
+#### 3.4.4 State Restoration via `reactivate_identity`
+
+A subject who previously deactivated their identity can restore active status by calling [`reactivate_identity(subject)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L961) with valid subject authorization (`subject.require_auth()`).
+
+```
+[ Active Identity ]
+       │
+       ├──── deactivate_did ────────► [ DID Deactivated: Doc Removed, VCs Revoked, Flag=True ]
+       │                                     │
+       ├──── deactivate_identity ───► [ Identity Suspended: Doc Kept, VCs Revoked, Flag=True ]
+       │                                     │
+       ▼                                     │
+ reactivate_identity ◄───────────────────────┘
+       │
+       ▼
+ [ Reactivated: Flag Cleared ]
+       ├── If deactivate_identity was used: DID Doc is intact; VCs must be re-anchored by issuers
+       └── If deactivate_did was used: Subject must call anchor_did; VCs must be re-anchored by issuers
+```
+
+**State semantics of `reactivate_identity`:**
+1. **What is restored:**
+   - Clears `DataKey::Deactivated(subject)`, causing [`is_deactivated(subject)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L907) to return `false`.
+   - Records the state change ledger sequence in `DataKey::LastStateChange(subject)`.
+   - Emits `IdReact` event (`topic: [Symbol("IdReact")], data: subject`).
+   - If the identity was deactivated via `deactivate_identity`, the DID document CID remained in storage throughout and is immediately resolvable.
+2. **What is NOT restored (Critical for Integrators):**
+   - **Verifiable Credentials Remain Revoked:** Calling `reactivate_identity` does **not** un-revoke previously revoked VCs. All historical records remain `revoked = true` to prevent replaying stale or invalidated credentials. Issuers must explicitly issue and anchor new credentials via `anchor_vc` or `anchor_vc_typed`.
+   - **DID Document after `deactivate_did`:** If the subject was deactivated using `deactivate_did`, the DID document CID was removed from persistent storage. `reactivate_identity` does **not** restore the document CID; the subject must call [`anchor_did(subject, did_doc_cid)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L702) to re-anchor their DID document.
 
 ## 4. Security Considerations
 
