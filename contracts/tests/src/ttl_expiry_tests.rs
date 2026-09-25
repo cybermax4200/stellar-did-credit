@@ -61,7 +61,10 @@
 
 #[cfg(test)]
 mod tests {
-    use credit_oracle::{CreditOracle, CreditOracleClient, DataKey as CreditKey, TxStats};
+    use credit_oracle::{
+        CreditOracle, CreditOracleClient, DataKey as CreditKey, ScoringWeights, TxStats,
+    };
+    use governance::{DataKey as GovernanceKey, Governance, GovernanceClient};
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use soroban_sdk::testutils::storage::{Instance as _, Persistent as _};
     use soroban_sdk::testutils::{Address as _, Ledger as _};
@@ -485,6 +488,47 @@ mod tests {
             identity.is_verified(&subject),
             "identity-oracle bumps its instance TTL, so it survives this jump",
         );
+    }
+
+    /// Governance bumps its instance TTL during initialization, so proposal
+    /// lookup remains available after the contract sits idle past the default
+    /// instance TTL window.
+    #[test]
+    fn test_governance_instance_ttl_survives_idle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let governance_id = env.register_contract(None, Governance);
+        let governance = GovernanceClient::new(&env, &governance_id);
+        let admin = Address::generate(&env);
+        let proposer = Address::generate(&env);
+        let credit_oracle = Address::generate(&env);
+
+        governance.initialize(&admin, &credit_oracle, &100);
+        let proposal_id = governance.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 20,
+                repayment_weight: 30,
+            },
+            &100,
+            &0,
+        );
+        assert_eq!(proposal_id, 1);
+
+        // Keep the proposal record alive so this test isolates instance TTL.
+        env.as_contract(&governance_id, || {
+            env.storage().persistent().extend_ttl(
+                &GovernanceKey::Proposal(proposal_id),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        });
+
+        advance(&env, 5_001);
+
+        assert!(governance.get_proposal(&proposal_id).is_some());
     }
 
     /// Guards the assumption the whole module rests on: if a future SDK ever
