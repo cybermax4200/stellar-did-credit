@@ -19,6 +19,7 @@ fi
 IDENTITY_ORACLE_ID=$(jq -r '.contracts["identity-oracle"] // .["identity-oracle"] | if type == "string" then . elif type == "object" and has("id") then .id elif type == "object" and has("address") then .address else empty end' "$DEPLOYMENTS_FILE")
 CREDIT_ORACLE_ID=$(jq -r '.contracts["credit-oracle"] // .["credit-oracle"] | if type == "string" then . elif type == "object" and has("id") then .id elif type == "object" and has("address") then .address else empty end' "$DEPLOYMENTS_FILE")
 REVOCATION_REGISTRY_ID=$(jq -r '.contracts["revocation-registry"] // .["revocation-registry"] | if type == "string" then . elif type == "object" and has("id") then .id elif type == "object" and has("address") then .address else empty end' "$DEPLOYMENTS_FILE")
+GOVERNANCE_ID=$(jq -r '.contracts["governance"] // .["governance"] | if type == "string" then . elif type == "object" and has("id") then .id elif type == "object" and has("address") then .address else empty end' "$DEPLOYMENTS_FILE")
 
 if [ -z "$IDENTITY_ORACLE_ID" ] || [ "$IDENTITY_ORACLE_ID" == "null" ]; then
     echo "Error: identity-oracle ID not found in $DEPLOYMENTS_FILE."
@@ -58,6 +59,32 @@ if [ -n "$CREDIT_ORACLE_ID" ] && [ "$CREDIT_ORACLE_ID" != "null" ]; then
     if [ "$IDENTITY_ADDR" == "null" ] || [ -z "$IDENTITY_ADDR" ]; then
         echo "Warning: identity-oracle is not linked to credit-oracle!"
         exit 1
+    fi
+    
+    # Verify governance is the credit-oracle admin
+    CREDIT_ORACLE_ADMIN=$(stellar contract invoke \
+      --id "$CREDIT_ORACLE_ID" \
+      --network "$NETWORK" \
+      -- get_admin 2>/dev/null || echo "error")
+    
+    if [ "$CREDIT_ORACLE_ADMIN" == "error" ]; then
+        echo "Error: failed to invoke get_admin on credit-oracle."
+        exit 1
+    fi
+    
+    echo "Credit-oracle admin: $CREDIT_ORACLE_ADMIN"
+    
+    if [ -n "$GOVERNANCE_ID" ] && [ "$GOVERNANCE_ID" != "null" ]; then
+        echo "Governance contract: $GOVERNANCE_ID"
+        if [ "$CREDIT_ORACLE_ADMIN" == "$GOVERNANCE_ID" ]; then
+            echo "PASS: Governance is correctly set as credit-oracle admin"
+        else
+            echo "FAIL: Credit-oracle admin ($CREDIT_ORACLE_ADMIN) does not match governance contract ($GOVERNANCE_ID)"
+            echo "Error: Governance votes will have no effect - admin mismatch detected"
+            exit 1
+        fi
+    else
+        echo "Warning: governance contract ID not found in $DEPLOYMENTS_FILE - cannot verify admin relationship"
     fi
 fi
 
