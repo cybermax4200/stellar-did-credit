@@ -9,7 +9,7 @@
  * @packageDocumentation
  */
 
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import {
   Account,
   Address,
@@ -1208,6 +1208,149 @@ governance
         console.error("Failed:", err instanceof Error ? err.message : err);
         process.exit(1);
       }
+    },
+  );
+
+/**
+ * Parses a voter weight into a bigint. Weights must be non-negative integers;
+ * when `allowZero` is false, zero is rejected too.
+ */
+function parseVoterWeight(value: string, allowZero: boolean): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidArgumentError("weight must be a non-negative integer.");
+  }
+  const weight = BigInt(value);
+  if (!allowZero && weight === 0n) {
+    throw new InvalidArgumentError(
+      "weight must be greater than 0 (use update-voter-weight with 0 to deregister).",
+    );
+  }
+  return weight;
+}
+
+function parseRegisterWeight(value: string): bigint {
+  return parseVoterWeight(value, false);
+}
+
+function parseUpdateWeight(value: string): bigint {
+  return parseVoterWeight(value, true);
+}
+
+/**
+ * Shared implementation for the voter-admin governance commands.
+ */
+async function runVoterAdminCommand(params: {
+  method: "registerVoter" | "updateVoterWeight";
+  contractFn: "register_voter" | "update_voter_weight";
+  label: string;
+  progress: string;
+  adminSecret: string;
+  voter: string;
+  weight: bigint;
+  dryRun?: boolean;
+}): Promise<void> {
+  const { method, contractFn, label, progress, adminSecret, voter, weight } = params;
+  const network = program.opts().network as NetworkType;
+  const config = loadConfig(network);
+  validateConfig(config, ['governanceId']);
+  const keypair = parseSecret(adminSecret);
+  assertStellarAddress("voter", voter);
+
+  if (params.dryRun) {
+    const contract = new Contract(config.governanceId!);
+    const operation = contract.call(
+      contractFn,
+      new Address(keypair.publicKey()).toScVal(),
+      new Address(voter).toScVal(),
+      nativeToScVal(weight, { type: "i128" }),
+    );
+    await simulateDryRun({
+      rpcUrl: config.rpcUrl,
+      networkPassphrase: config.networkPassphrase,
+      sourceKeypair: keypair,
+      contractId: config.governanceId!,
+      operation,
+      label,
+    });
+    return;
+  }
+
+  const sdk = new StellarDIDCreditSDK(config);
+  console.log(`${progress} on ${network}...`);
+  console.log(`  Admin:  ${keypair.publicKey()}`);
+  console.log(`  Voter:  ${voter}`);
+  console.log(`  Weight: ${weight.toString()}`);
+
+  try {
+    const txHash = await sdk.governance[method](keypair, voter, weight);
+    const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+    console.log();
+    console.log("Success!");
+    console.log(`  Transaction: ${txHash}`);
+    console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
+  } catch (err) {
+    console.error("Failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+
+governance
+  .command("register-voter")
+  .description(
+    "Register a new governance voter with a voting weight (admin only). " +
+      "Voters must be registered before proposals can reach quorum.",
+  )
+  .argument("<admin-secret>", "Stellar secret key of the governance admin (starts with S)")
+  .argument("<voter-address>", "Stellar address of the voter (G...)")
+  .argument("<weight>", "Voting weight to assign (positive integer)", parseRegisterWeight)
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      adminSecret: string,
+      voter: string,
+      weight: bigint,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      await runVoterAdminCommand({
+        method: "registerVoter",
+        contractFn: "register_voter",
+        label: "governance register-voter",
+        progress: "Registering governance voter",
+        adminSecret,
+        voter,
+        weight,
+        dryRun: cmdOptions.dryRun,
+      });
+    },
+  );
+
+governance
+  .command("update-voter-weight")
+  .description(
+    "Update the voting weight of a registered voter (admin only). " +
+      "Set weight to 0 to deregister the voter.",
+  )
+  .argument("<admin-secret>", "Stellar secret key of the governance admin (starts with S)")
+  .argument("<voter-address>", "Stellar address of the voter (G...)")
+  .argument("<weight>", "New voting weight (non-negative integer; 0 deregisters)", parseUpdateWeight)
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      adminSecret: string,
+      voter: string,
+      weight: bigint,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      await runVoterAdminCommand({
+        method: "updateVoterWeight",
+        contractFn: "update_voter_weight",
+        label: "governance update-voter-weight",
+        progress: "Updating governance voter weight",
+        adminSecret,
+        voter,
+        weight,
+        dryRun: cmdOptions.dryRun,
+      });
     },
   );
 
