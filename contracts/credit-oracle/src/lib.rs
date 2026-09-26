@@ -340,6 +340,8 @@ pub struct DisputeRecord {
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
+/// Longest supported compute-score cooldown (approximately five days).
+pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 /// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
@@ -396,6 +398,7 @@ fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
     } else {
         Ok(())
     }
+
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -445,6 +448,30 @@ impl CreditOracle {
             .set(&DataKey::StorageVersion, &2u32);
         env.events()
             .publish((Symbol::new(&env, "Initialized"),), admin.clone());
+        Ok(())
+    }
+
+    /// Return the number of ledgers a subject must wait between score computations.
+    pub fn get_compute_cooldown_ledgers(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(DEFAULT_COMPUTE_COOLDOWN_LEDGERS)
+    }
+
+    /// Update the compute-score cooldown. Admin only.
+    ///
+    /// `ledgers` must be in `1..=86_400`, allowing up to approximately five days.
+    pub fn set_compute_cooldown_ledgers(env: Env, admin: Address, ledgers: u32) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if ledgers == 0 || ledgers > MAX_COMPUTE_COOLDOWN_LEDGERS {
+            return Err(CreditOracleError::InvalidComputeCooldown);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
+        env.events().publish((Symbol::new(&env, "CooldownUpdated"),), ledgers);
         Ok(())
     }
 
@@ -3456,6 +3483,31 @@ mod tests {
         assert!(!cfg.enabled, "decay must be opt-in");
         assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
         assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
+    }
+
+    #[test]
+    fn test_compute_cooldown_getter_and_setter() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_compute_cooldown_ledgers(), 1);
+        client.set_compute_cooldown_ledgers(&admin, &100);
+        assert_eq!(client.get_compute_cooldown_ledgers(), 100);
+    }
+
+    #[test]
+    fn test_compute_cooldown_setter_rejects_invalid_values() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &0), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
+        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &(MAX_COMPUTE_COOLDOWN_LEDGERS + 1)), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
     }
 
     #[test]
