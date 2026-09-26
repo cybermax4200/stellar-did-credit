@@ -57,6 +57,8 @@ pub enum CreditOracleError {
     NotInitialized = 16,
     /// Repayment amount must be positive.
     InvalidAmount = 17,
+    /// Compute-score cooldown must be between one ledger and the supported maximum.
+    InvalidComputeCooldown = 18,
 }
 
 /// Weights used in credit score calculation.

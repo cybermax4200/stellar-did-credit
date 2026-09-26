@@ -436,7 +436,8 @@ Successful recomputations are rate-limited per subject by the configured
 `ComputeCooldownLedgers` value. The default interval is one ledger, which
 prevents same-ledger timestamp grinding while preserving the open-call design.
 The last successful computation ledger is stored as `LastComputed(Address)`, and
-admin/governance can update the interval with `update_compute_cooldown`.
+the contract admin can update the interval with
+`set_compute_cooldown_ledgers` (between 1 and 86,400 ledgers).
 
 ---
 
