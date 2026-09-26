@@ -106,6 +106,7 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | `get_vc_count(subject)`                     | Returns the number of anchored VCs              |
 | `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
+| `list_revoked_for_subject(subject)`         | Returns the VC hashes revoked for a subject     |
 | `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
 
 ### credit-oracle
@@ -150,12 +151,12 @@ On-chain proposal creation, weighted voting, and multi-step execution for updati
 
 ### revocation-registry
 
-Maintains an on-chain list of revoked credential hashes.
+Maintains an on-chain list of revoked credential hashes. Revocation status is keyed only by `vc_hash`; the `subject` parameter of `revoke` is forwarded to the linked identity-oracle (`mark_vc_revoked`) so per-subject revocations can be queried via `list_revoked_for_subject(subject)` on the identity-oracle contract.
 
 | Function                          | Description                                     |
 | --------------------------------- | ----------------------------------------------- |
 | `initialize(admin)`               | Sets the contract admin                         |
-| `revoke(issuer, vc_hash)`         | Revokes a credential by hash                    |
+| `revoke(issuer, subject, vc_hash)` | Revokes a credential by hash; `subject` updates the linked identity-oracle's per-subject record |
 | `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
 | `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
 | `list_revoked_for_issuer(issuer)` | Returns all VC hashes revoked by the issuer    |

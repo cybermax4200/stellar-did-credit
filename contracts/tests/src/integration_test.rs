@@ -442,6 +442,12 @@ mod tests {
         // Also verify that is_verified and get_active_vc_count correctly reflect the revocation
         assert!(!identity.is_verified(&subject));
         assert_eq!(identity.get_active_vc_count(&subject), 0);
+
+        // The subject forwarded to revoke() enables the per-subject revoked list
+        assert_eq!(
+            identity.list_revoked_for_subject(&subject),
+            soroban_sdk::vec![&env, vc_hash.clone()]
+        );
     }
 
     #[test]

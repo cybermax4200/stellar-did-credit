@@ -191,6 +191,15 @@ impl RevocationRegistry {
         Ok(())
     }
 
+    /// Revoke a single verifiable credential by its hash.
+    ///
+    /// Revocation status is stored globally keyed by `vc_hash`
+    /// (`Status` / `IssuerOfVC` / `RegisteredVCIssuer`); no subject entry is
+    /// persisted in this contract. `subject` is still required: when an
+    /// identity oracle is linked via `set_identity_oracle`, `revoke` forwards
+    /// `(issuer, subject, vc_hash)` to its `mark_vc_revoked`, which flags the
+    /// subject's anchor record. The resulting per-subject view is queryable
+    /// through `IdentityOracle::list_revoked_for_subject`.
     pub fn revoke(
         env: Env,
         issuer: Address,

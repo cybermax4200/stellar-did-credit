@@ -58,6 +58,7 @@ The protocol admin must register each trusted issuer before that address can cal
 | `anchor_did(subject, did_doc_cid)`          | subject  | Stores an IPFS CID pointing to the subject's DID document   |
 | `anchor_vc(issuer, subject, vc_hash)`       | issuer   | Records a SHA-256 hash of an off-chain VC                   |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | issuer   | Marks a specific VC as revoked                              |
+| `list_revoked_for_subject(subject)`         | anyone   | Returns the VC hashes revoked for a subject (local flags + linked registry) |
 | `is_verified(subject)`                      | anyone   | Returns true if the subject has at least one non-revoked VC |
 | `get_active_vc_count(subject)`              | anyone   | Returns the cached active VC count; seeded lazily from existing anchors and then maintained on `anchor_vc` / `mark_vc_revoked` |
 | `verify_vc(subject, vc_hash)`               | anyone   | Returns true if a specific VC exists and is not revoked     |
@@ -117,14 +118,14 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 
 ### revocation-registry
 
-A minimal, standalone registry that maps VC hashes to their revocation status. It is intentionally separate from identity-oracle so that revocation can be checked by any party without needing to traverse the full VC anchor list.
+A minimal, standalone registry that maps VC hashes to their revocation status. It is intentionally separate from identity-oracle so that revocation can be checked by any party without needing to traverse the full VC anchor list. Revocation status itself is keyed only by `vc_hash` — no subject entry is stored here. `revoke`'s `subject` parameter exists because the registry forwards `(issuer, subject, vc_hash)` to the linked identity-oracle's `mark_vc_revoked`, which maintains the per-subject view queryable via `list_revoked_for_subject`.
 
 **Key functions**
 
 | Function                          | Caller   | Description                                   |
 | --------------------------------- | -------- | --------------------------------------------- |
 | `initialize(admin)`               | deployer | Sets the contract administrator               |
-| `revoke(issuer, vc_hash)`         | issuer   | Marks a VC hash as revoked (issuer authority enforced per `vc_hash`) |
+| `revoke(issuer, subject, vc_hash)` | issuer   | Marks a VC hash as revoked (issuer authority enforced per `vc_hash`); forwards `subject` to the linked identity-oracle |
 | `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction (issuer authority enforced per `vc_hash`) |
 
 | `is_revoked(vc_hash)`             | anyone   | Returns true if the hash has been revoked     |

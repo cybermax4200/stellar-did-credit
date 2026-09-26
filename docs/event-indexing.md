@@ -71,6 +71,7 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Topic:** `[Symbol("Revoked")]`
 - **Data:** `(issuer: Address, vc_hash: BytesN<32>)`
 - **Emitted When:** An issuer revokes a single VC hash, or for each individual VC hash revoked during `batch_revoke`.
+- **Note:** The payload carries no `subject` — the registry stores revocations keyed only by `vc_hash`. The subject forwarded to `revoke` is recorded through the identity-oracle's `mark_vc_revoked`; indexers can resolve per-subject revocations with `IdentityOracle::list_revoked_for_subject(subject)`.
 - **feeder Action:** Map the `vc_hash` to the subject, decrement their VC count, and submit `set_vc_count` to the credit oracle.
 
 #### BatchRev
