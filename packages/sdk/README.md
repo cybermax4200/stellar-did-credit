@@ -72,7 +72,10 @@ The `compute_score` contract method is protected by a configurable cooldown peri
 
 #### Recommended Cooldown Settings
 
-The cooldown can be configured by the contract admin using `update_compute_cooldown`. The ideal setting depends on the environment:
+The cooldown can be read with `getComputeCooldownLedgers()` and configured by
+the contract admin using `setComputeCooldownLedgers(adminKeypair, ledgers)`.
+The contract accepts values from 1 through 86,400 ledgers; the ideal setting
+depends on the environment:
 
 | Environment | Recommended Cooldown (Ledgers) | Rationale |
 |-------------|--------------------------------|-----------|

@@ -289,7 +289,11 @@ if cooldown > 0 {
 storage.set(&DataKey::LastComputed(subject), &current_ledger);
 ```
 
-**Admin control:** The admin can change the cooldown via `update_compute_cooldown`. Setting it to `0` disables cooldown entirely.
+**Admin control:** The admin can inspect the interval with
+`get_compute_cooldown_ledgers` and update it with
+`set_compute_cooldown_ledgers(admin, ledgers)`. The interval must be between
+1 and 86,400 ledgers (approximately five days), so the cooldown cannot be
+disabled.
 
 ### 5.2 Weight proposal timelock
 
@@ -415,4 +419,3 @@ If a governance contract is deployed in Phase 5, the governance address can also
 - `contracts/tests/src/ttl_expiry_tests.rs` — the TTL expiry harness backing [§4.4](#44-measured-ttl-behaviour-test-harness); run it with `cargo test -p integration-tests ttl_expiry`
 - [Soroban documentation — storage](https://developers.stellar.org/docs/smart-contracts/concepts/data-storage)
 - [Soroban documentation — TTL and archival](https://developers.stellar.org/docs/smart-contracts/concepts/lifecycle)
-

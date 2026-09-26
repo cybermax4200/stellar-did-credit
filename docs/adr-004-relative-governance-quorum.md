@@ -16,6 +16,11 @@ later voter registrations, deregistrations, or weight changes affect only
 future proposals. `set_quorum` remains available for deployments that need an
 explicit absolute quorum; calling it disables percentage-based quorum mode.
 
+Voter registration is an upsert. Re-registering an address replaces its
+previous weight, and `TotalRegisteredWeight` is adjusted by the difference.
+This prevents duplicate registration from inflating the denominator used for a
+relative quorum.
+
 ## Consequences
 
 The aggregate weight storage entry is actively read in quorum calculation and
