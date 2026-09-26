@@ -21,6 +21,7 @@ import {
   VCRecord,
   GovernanceProposal,
   BatchResult,
+  DisputeEvent,
 } from "./index";
 import { xdr, Keypair } from "@stellar/stellar-sdk";
 
@@ -620,6 +621,155 @@ describe("StellarDIDCreditSDK", () => {
 
       stopScore();
       stopRevoke();
+    });
+
+    describe("subscribeToDisputeEvents", () => {
+      const otherSubject =
+        "GOTHERSUBJECTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+      const disputeEvent = (
+        eventType: string,
+        eventSubject: string,
+        inputKey: string,
+      ) => ({
+        ledger: 100,
+        topic: [{ value: eventType }],
+        value: { value: [eventSubject, inputKey] },
+      });
+
+      it("fires the callback for all three dispute event types", async () => {
+        mockGetEvents.mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", subjectAddress, "repayment"),
+            disputeEvent("DsptRjct", subjectAddress, "vc_count"),
+          ],
+        });
+
+        const sdk = new StellarDIDCreditSDK({
+          ...mockConfig,
+          pollIntervalMs: 10,
+        });
+        const received: DisputeEvent[] = [];
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, (event) =>
+          received.push(event),
+        );
+
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(received).toEqual([
+          {
+            eventType: "DsptFild",
+            subject: subjectAddress,
+            inputKey: "tx_stats",
+            status: "Pending",
+          },
+          {
+            eventType: "DsptRslv",
+            subject: subjectAddress,
+            inputKey: "repayment",
+            status: "Resolved",
+          },
+          {
+            eventType: "DsptRjct",
+            subject: subjectAddress,
+            inputKey: "vc_count",
+            status: "Rejected",
+          },
+        ]);
+
+        unsubscribe();
+      });
+
+      it("queries all three dispute topics on the credit-oracle in one poll", async () => {
+        mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
+
+        const sdk = new StellarDIDCreditSDK({
+          ...mockConfig,
+          pollIntervalMs: 10,
+        });
+        const unsubscribe = sdk.subscribeToDisputeEvents(
+          subjectAddress,
+          jest.fn(),
+        );
+
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(mockGetEvents).toHaveBeenCalledWith(
+          expect.objectContaining({
+            startLedger: 100,
+            filters: [
+              {
+                type: "contract",
+                contractIds: [mockConfig.creditOracleId],
+                topics: [
+                  ["symbol:DsptFild"],
+                  ["symbol:DsptRslv"],
+                  ["symbol:DsptRjct"],
+                ],
+              },
+            ],
+          }),
+        );
+
+        unsubscribe();
+      });
+
+      it("ignores disputes from other subjects and unrelated topics", async () => {
+        mockGetEvents.mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", otherSubject, "tx_stats"),
+            disputeEvent("Score", subjectAddress, "tx_stats"),
+            disputeEvent("DsptFild", subjectAddress, "vc_count"),
+          ],
+        });
+
+        const sdk = new StellarDIDCreditSDK({
+          ...mockConfig,
+          pollIntervalMs: 10,
+        });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await Promise.resolve();
+        await Promise.resolve();
+
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenCalledWith({
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "vc_count",
+          status: "Pending",
+        });
+
+        unsubscribe();
+      });
+
+      it("stops polling after unsubscribe", async () => {
+        mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
+
+        const sdk = new StellarDIDCreditSDK({
+          ...mockConfig,
+          pollIntervalMs: 10,
+        });
+        const unsubscribe = sdk.subscribeToDisputeEvents(
+          subjectAddress,
+          jest.fn(),
+        );
+
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+
+        unsubscribe();
+        await jest.advanceTimersByTimeAsync(30);
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+      });
     });
 
     it("rejects an invalid polling interval", () => {

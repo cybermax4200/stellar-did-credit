@@ -122,6 +122,39 @@ export interface ProtocolConfig {
 
 export type Unsubscribe = () => void;
 
+/** Credit-oracle event topics of the dispute lifecycle. */
+export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct";
+
+/** `DisputeStatus` stored by the credit-oracle once a dispute event fires. */
+export type DisputeStatus = "Pending" | "Resolved" | "Rejected";
+
+/**
+ * A dispute-lifecycle event read from the credit-oracle, as delivered by
+ * {@link StellarDIDCreditSDK.subscribeToDisputeEvents}.
+ */
+export interface DisputeEvent {
+  /** Lifecycle transition: DsptFild, DsptRslv or DsptRjct. */
+  eventType: DisputeEventType;
+  /** Subject address the dispute was filed against. */
+  subject: string;
+  /** Score input the dispute names: tx_stats, repayment or vc_count. */
+  inputKey: string;
+  /** Status implied by {@link eventType}. */
+  status: DisputeStatus;
+}
+
+const DISPUTE_EVENT_STATUS: Record<DisputeEventType, DisputeStatus> = {
+  DsptFild: "Pending",
+  DsptRslv: "Resolved",
+  DsptRjct: "Rejected",
+};
+
+const DISPUTE_EVENT_TOPICS: DisputeEventType[] = [
+  "DsptFild",
+  "DsptRslv",
+  "DsptRjct",
+];
+
 export type SDKErrorCode =
   | "INVALID_VC_HASH"
   | "MISSING_REVOCATION_REGISTRY"
@@ -2876,6 +2909,49 @@ export class StellarDIDCreditSDK {
     });
   }
 
+  /**
+   * Poll for the credit-oracle's dispute events (`DsptFild`, `DsptRslv`,
+   * `DsptRjct`) for a single subject.
+   *
+   * A dispute is raised by `flag_score_input` and closed by `resolve_dispute`,
+   * which emits `DsptRslv` when the admin accepts the flag and `DsptRjct` when
+   * they reject it. All three events carry `(subject, input_key)`, so the
+   * subscription filters on `subject` locally and derives `status` from the
+   * event topic. Events from before the subscription started are skipped, and
+   * the three topics share one poll per interval.
+   *
+   * @param subject - Subject address whose disputes to watch
+   * @param callback - Called with each matching {@link DisputeEvent}
+   * @returns A function that stops future polls for this subscription
+   */
+  subscribeToDisputeEvents(
+    subject: string,
+    callback: (event: DisputeEvent) => void,
+  ): Unsubscribe {
+    return this.subscribeToEvents(
+      this.config.creditOracleId,
+      DISPUTE_EVENT_TOPICS,
+      (value, eventName) => {
+        const status = DISPUTE_EVENT_STATUS[eventName as DisputeEventType];
+        if (status === undefined) {
+          return;
+        }
+
+        const [eventSubject, inputKey] = parseEventTuple(value, eventName, 2);
+        if (String(eventSubject) !== subject) {
+          return;
+        }
+
+        callback({
+          eventType: eventName as DisputeEventType,
+          subject: String(eventSubject),
+          inputKey: String(inputKey),
+          status,
+        });
+      },
+    );
+  }
+
   private async submitBatchRevokeChunk(
     issuerKeypair: KeypairLike,
     vcHashes: Buffer[],
@@ -3026,9 +3102,10 @@ export class StellarDIDCreditSDK {
 
   private subscribeToEvents(
     contractId: string,
-    eventName: string,
-    handleValue: (value: xdr.ScVal) => void,
+    eventName: string | readonly string[],
+    handleValue: (value: xdr.ScVal, eventName: string) => void,
   ): Unsubscribe {
+    const eventNames = typeof eventName === "string" ? [eventName] : eventName;
     const pollIntervalMs = this.config.pollIntervalMs ?? 1000;
     if (!Number.isFinite(pollIntervalMs) || pollIntervalMs <= 0) {
       throw new Error("pollIntervalMs must be a positive number");
@@ -3061,7 +3138,9 @@ export class StellarDIDCreditSDK {
             {
               type: "contract",
               contractIds: [contractId],
-              topics: [[xdr.ScVal.scvSymbol(eventName).toXDR("base64")]],
+              topics: eventNames.map((name) => [
+                xdr.ScVal.scvSymbol(name).toXDR("base64"),
+              ]),
             },
           ],
           limit: 100,
@@ -3077,7 +3156,7 @@ export class StellarDIDCreditSDK {
           if (!active) {
             break;
           }
-          handleValue(event.value);
+          handleValue(event.value, resolveEventName(event, eventNames));
         }
       } catch {
         // Keep polling after transient RPC failures. The ledger cursor is only
@@ -3674,6 +3753,27 @@ function parseEventTuple(
     );
   }
   return native;
+}
+
+/**
+ * Names the event a polled record belongs to. A single-topic subscription can
+ * answer without decoding; multi-topic subscriptions read the event topic.
+ */
+function resolveEventName(
+  event: { topic?: xdr.ScVal[] },
+  eventNames: readonly string[],
+): string {
+  if (eventNames.length === 1) {
+    return eventNames[0];
+  }
+
+  const topic = event.topic?.[0];
+  if (topic === undefined) {
+    return "";
+  }
+
+  const decoded = String(scValToNative(topic));
+  return eventNames.includes(decoded) ? decoded : "";
 }
 
 function toBuffer(value: unknown): Buffer {
