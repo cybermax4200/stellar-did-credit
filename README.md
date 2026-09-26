@@ -96,6 +96,11 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                        |
 | `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
 | `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
+| `get_did_document(subject)`                 | Returns the anchored DID document CID           |
+| `deactivate_did(subject)`                   | Deactivates DID, removes DID doc CID, and revokes VCs (`DIDDeact`) |
+| `deactivate_identity(subject)`              | Suspends identity & revokes VCs, retaining DID doc CID (`IdDeact`) |
+| `reactivate_identity(subject)`              | Restores active identity status (clears deactivation flag; `IdReact`) |
+| `is_deactivated(subject)`                   | Returns true if subject identity is deactivated |
 | `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
 | `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
 | `get_vc_count(subject)`                     | Returns the number of anchored VCs              |

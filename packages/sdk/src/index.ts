@@ -239,6 +239,9 @@ const GOVERNANCE_ERROR_CODES: Record<number, string> = {
   12: "VoterNotRegistered",
   13: "InsufficientVoteWeight",
   14: "ProposalAlreadyCancelled",
+  15: "NoPendingWeights",
+  16: "ContractPaused",
+  17: "VoteTallyOverflow",
   18: "ProposalRejected",
   19: "InvalidVotingPeriod",
 };

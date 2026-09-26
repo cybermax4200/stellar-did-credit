@@ -351,6 +351,51 @@ describe("StellarDIDCreditSDK", () => {
       await expect(sdk.governance.getProposal(999n)).resolves.toBeNull();
     });
 
+    it("decodes a cancelled proposal with its proposer address", async () => {
+      const proposerAddress =
+        "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM";
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              id: 12n,
+              proposer: proposerAddress,
+              proposed_weights: {
+                vc_weight: 50,
+                tx_weight: 25,
+                repayment_weight: 25,
+              },
+              votes_for: 80n,
+              votes_against: 40n,
+              expiry_ledger: 200,
+              execution_delay_ledgers: 50,
+              executed: false,
+              cancelled: true,
+              quorum_required: 100n,
+            },
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposal = await sdk.governance.getProposal(12n);
+
+      expect(proposal).toEqual<GovernanceProposal>({
+        id: 12n,
+        proposer: proposerAddress,
+        proposedWeights: governanceWeights,
+        votesFor: 80n,
+        votesAgainst: 40n,
+        expiryLedger: 200,
+        executionDelayLedgers: 50,
+        executed: false,
+        cancelled: true,
+        quorumRequired: 100n,
+      });
+      expect(proposal?.cancelled).toBe(true);
+      expect(proposal?.proposer).toBe(proposerAddress);
+    });
+
     it("executes and applies weights through signed governance calls", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
 
@@ -2873,6 +2918,58 @@ describe("parseContractErrorCode", () => {
     expect(() =>
       throwContractError("Error(Contract, #19)", "governance"),
     ).toThrow(new GovernanceError(19, "InvalidVotingPeriod (code 19)"));
+  });
+
+  it("maps NoPendingWeights governance errors to their variant name", () => {
+    expect(() =>
+      throwContractError("Error(Contract, #15)", "governance"),
+    ).toThrow(new GovernanceError(15, "NoPendingWeights (code 15)"));
+  });
+
+  it("maps ContractPaused governance errors to their variant name", () => {
+    expect(() =>
+      throwContractError("Error(Contract, #16)", "governance"),
+    ).toThrow(new GovernanceError(16, "ContractPaused (code 16)"));
+  });
+
+  it("maps VoteTallyOverflow governance errors to their variant name", () => {
+    expect(() =>
+      throwContractError("Error(Contract, #17)", "governance"),
+    ).toThrow(new GovernanceError(17, "VoteTallyOverflow (code 17)"));
+  });
+
+  it("maps ProposalRejected governance errors to their variant name", () => {
+    expect(() =>
+      throwContractError("Error(Contract, #18)", "governance"),
+    ).toThrow(new GovernanceError(18, "ProposalRejected (code 18)"));
+  });
+
+  it("maps every governance error code 1-18 to its human-readable variant name", () => {
+    const expectedNames: Record<number, string> = {
+      1: "AlreadyInitialized",
+      2: "NotAuthorized",
+      3: "ProposalNotFound",
+      4: "ProposalExpired",
+      5: "ProposalNotExpired",
+      6: "ProposalAlreadyExecuted",
+      7: "InvalidWeights",
+      8: "InvalidQuorum",
+      9: "InvalidVoteWeight",
+      10: "QuorumNotMet",
+      11: "TimelockNotExpired",
+      12: "VoterNotRegistered",
+      13: "InsufficientVoteWeight",
+      14: "ProposalAlreadyCancelled",
+      15: "NoPendingWeights",
+      16: "ContractPaused",
+      17: "VoteTallyOverflow",
+      18: "ProposalRejected",
+    };
+    for (const [code, name] of Object.entries(expectedNames)) {
+      expect(() =>
+        throwContractError(`Error(Contract, #${code})`, "governance"),
+      ).toThrow(new GovernanceError(Number(code), `${name} (code ${code})`));
+    }
   });
 
   it("maps InvalidAmount credit-oracle errors to their variant name", () => {
