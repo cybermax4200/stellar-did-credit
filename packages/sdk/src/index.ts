@@ -21,16 +21,6 @@ const BATCH_ANCHOR_MAX_SIZE = 10;
 import * as ZkWasm from "@stellar-did-credit/zk-wasm";
 
 
-// Need to import WASM prover
-// In a real env, we'd import this properly, assuming it's available as @stellar-did-credit/zk-wasm
-import * as ZkWasm from "@stellar-did-credit/zk-wasm";
-
-
-// Need to import WASM prover
-// In a real env, we'd import this properly, assuming it's available as @stellar-did-credit/zk-wasm
-import * as ZkWasm from "@stellar-did-credit/zk-wasm";
-
-
 export type NetworkType = "testnet" | "mainnet" | "futurenet" | "custom";
 
 export interface ScoreRecord {
@@ -523,7 +513,7 @@ export class GovernanceClient {
     weight: bigint,
   ): Promise<string> {
     const publicKey = getPublicKey(adminKeypair);
-    const contract = new Contract(this.config.governanceId);
+    const contract = this.governanceContract();
     const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
 
@@ -588,7 +578,7 @@ export class GovernanceClient {
     weight: bigint,
   ): Promise<string> {
     const publicKey = getPublicKey(adminKeypair);
-    const contract = new Contract(this.config.governanceId);
+    const contract = this.governanceContract();
     const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
 
@@ -651,7 +641,7 @@ export class GovernanceClient {
     quorum: bigint,
   ): Promise<string> {
     const publicKey = getPublicKey(adminKeypair);
-    const contract = new Contract(this.config.governanceId);
+    const contract = this.governanceContract();
     const accountData = await this.server.getAccount(publicKey);
     const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
 
@@ -825,28 +815,142 @@ export class GovernanceClient {
   }
 
   /**
-   * Fetch proposals by scanning the contract's monotonically increasing IDs.
-   * Proposal IDs start at 1; pass `1` or `1n` as `fromId` to include the first
-   * proposal.
+   * Read `NextProposalId` counter from the governance contract's instance storage.
    *
-   * The governance contract exposes `get_proposal`, but no list endpoint, so
-   * this helper performs up to `limit` read-only RPC simulations starting at
-   * `fromId` and omits IDs that no longer have stored proposals.
-   * Proposal execution state does not imply active weights until the
-   * credit-oracle timelock has elapsed and `applyWeights` succeeds.
+   * @returns The next proposal ID as a `bigint`, or `1n` if uninitialized / not found.
+   */
+  async getNextProposalId(): Promise<bigint> {
+    if (!this.config.governanceId?.trim()) {
+      throw new Error("governanceId is required to use the governance client");
+    }
+
+    try {
+      const contract = this.governanceContract();
+      const address =
+        typeof contract.address === "function"
+          ? contract.address()
+          : new Address(this.config.governanceId);
+      const scAddress =
+        typeof address.toScAddress === "function"
+          ? address.toScAddress()
+          : address.toScVal();
+
+      if (
+        typeof this.server.getLedgerEntries === "function" &&
+        xdr?.LedgerKey?.contractData &&
+        xdr?.LedgerKeyContractData &&
+        xdr?.ScVal?.scvLedgerKeyContractInstance &&
+        xdr?.ContractDataDurability?.persistent
+      ) {
+        const ledgerKey = xdr.LedgerKey.contractData(
+          new xdr.LedgerKeyContractData({
+            contract: scAddress as unknown as xdr.ScAddress,
+            key: xdr.ScVal.scvLedgerKeyContractInstance(),
+            durability: xdr.ContractDataDurability.persistent(),
+          }),
+        );
+        const response = await this.server.getLedgerEntries(ledgerKey);
+        if (response && response.entries && response.entries.length > 0) {
+          const entry = response.entries[0] as unknown as { val: unknown };
+          const entryVal = entry.val as Record<string, unknown>;
+          const contractData =
+            typeof entryVal.contractData === "function"
+              ? (entryVal.contractData as () => unknown)()
+              : entryVal.contractData;
+          const contractDataRecord = contractData as Record<string, unknown>;
+          const instanceVal =
+            typeof contractDataRecord?.val === "function"
+              ? (contractDataRecord.val as () => unknown)()
+              : contractDataRecord?.val;
+          const instanceRecord = instanceVal as Record<string, unknown>;
+          const instance =
+            typeof instanceRecord?.instance === "function"
+              ? (instanceRecord.instance as () => unknown)()
+              : instanceVal;
+          const instRec = instance as Record<string, unknown>;
+          const storage =
+            typeof instRec?.storage === "function"
+              ? (instRec.storage as () => unknown)()
+              : instRec?.storage;
+          if (Array.isArray(storage)) {
+            for (const mapEntry of storage) {
+              const mapEntryRecord = mapEntry as Record<string, unknown>;
+              const keyScVal =
+                typeof mapEntryRecord.key === "function"
+                  ? (mapEntryRecord.key as () => unknown)()
+                  : mapEntryRecord.key;
+              const valScVal =
+                typeof mapEntryRecord.val === "function"
+                  ? (mapEntryRecord.val as () => unknown)()
+                  : mapEntryRecord.val;
+              const nativeKey = scValToNative(keyScVal as xdr.ScVal);
+              if (
+                nativeKey === "NextProposalId" ||
+                (Array.isArray(nativeKey) && nativeKey[0] === "NextProposalId") ||
+                (typeof nativeKey === "object" &&
+                  nativeKey !== null &&
+                  "NextProposalId" in nativeKey)
+              ) {
+                return BigInt(
+                  scValToNative(valScVal as xdr.ScVal) as bigint | number | string,
+                );
+              }
+            }
+          }
+        }
+      }
+    } catch {
+      // Fallback if ledger entry query is unsupported or fails
+    }
+
+    return 1n;
+  }
+
+  /**
+   * Fetch proposals by scanning the contract's monotonically increasing IDs.
+   *
+   * Reads `NextProposalId` from contract instance storage and iterates proposals
+   * starting from `from` (default: 1n) up to `min(NextProposalId, from + limit)`.
+   * When called without arguments, enumerates all proposals on-chain.
+   *
+   * Note: Gas and compute cost scales linearly with proposal count as each proposal
+   * is retrieved via read-only simulation.
+   *
+   * @param from - Optional starting proposal ID (inclusive, default: 1n)
+   * @param limit - Optional maximum number of proposals to fetch
+   * @returns Array of fetched `GovernanceProposal` records
    */
   async listProposals(
-    fromId: GovernanceInteger,
-    limit: number,
+    from?: GovernanceInteger,
+    limit?: number,
   ): Promise<GovernanceProposal[]> {
-    if (!Number.isInteger(limit) || limit < 0) {
+    if (limit !== undefined && (!Number.isInteger(limit) || limit < 0)) {
       throw new Error("limit must be a non-negative integer");
     }
 
-    const firstId = toUnsignedBigInt(fromId);
+    if (limit === 0) {
+      return [];
+    }
+
+    const startId = from !== undefined ? toUnsignedBigInt(from) : 1n;
+    const nextProposalId = await this.getNextProposalId();
+
+    let endId: bigint;
+    if (limit !== undefined) {
+      const targetEnd = startId + BigInt(limit);
+      endId =
+        nextProposalId > startId
+          ? targetEnd < nextProposalId
+            ? targetEnd
+            : nextProposalId
+          : targetEnd;
+    } else {
+      endId = nextProposalId > startId ? nextProposalId : startId;
+    }
+
     const proposals: GovernanceProposal[] = [];
-    for (let offset = 0n; offset < BigInt(limit); offset += 1n) {
-      const proposal = await this.getProposal(firstId + offset);
+    for (let id = startId; id < endId; id += 1n) {
+      const proposal = await this.getProposal(id);
       if (proposal) {
         proposals.push(proposal);
       }
@@ -886,7 +990,7 @@ export class GovernanceClient {
   }
 
   private async submitSignedTransaction(
-    keypair: Keypair,
+    keypair: KeypairLike,
     operation: xdr.Operation,
     operationName: string,
   ): Promise<{ hash: string; retval?: xdr.ScVal }> {
@@ -913,7 +1017,7 @@ export class GovernanceClient {
 
     const retval = sim.result?.retval;
     const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
-    preparedTx.sign(keypair);
+    preparedTx.sign(keypair as Keypair);
     const response = await this.server.sendTransaction(preparedTx);
     if (response.status !== "PENDING") {
       throw new Error(

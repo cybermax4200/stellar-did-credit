@@ -1,6 +1,5 @@
 import { Keypair } from "@stellar/stellar-sdk";
 import StellarDIDCreditSDK from "../index";
-import * as ZkWasm from "@stellar-did-credit/zk-wasm";
 
 describe("Phase 4 End-to-End: ZK Score Proof generation and verification", () => {
   let sdk: StellarDIDCreditSDK;

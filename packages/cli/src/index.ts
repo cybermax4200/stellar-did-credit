@@ -887,7 +887,6 @@ Example:
     }
 
     try {
-      // @ts-ignore
       const txHash = await sdk.issueVC(keypair, upperAddr, vcHash, cmdOptions.type);
 
       console.log();
@@ -1046,6 +1045,59 @@ const governance = program
   .description("Protocol governance commands.");
 
 governance
+  .command("list")
+  .description("List governance proposals.")
+  .option("--from <id>", "Starting proposal ID (default: 1)", (val) => BigInt(val))
+  .option("--limit <n>", "Maximum number of proposals to fetch", parseInt)
+  .action(
+    async (cmdOptions: { from?: bigint; limit?: number }) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['governanceId']);
+
+      const sdk = new StellarDIDCreditSDK(config);
+      console.log(`Fetching governance proposals on ${network}...`);
+
+      try {
+        const proposals = await sdk.governance.listProposals(
+          cmdOptions.from,
+          cmdOptions.limit,
+        );
+
+        console.log();
+        if (proposals.length === 0) {
+          console.log("No proposals found.");
+          return;
+        }
+
+        for (const p of proposals) {
+          const status = p.executed
+            ? "EXECUTED"
+            : p.cancelled
+            ? "CANCELLED"
+            : "ACTIVE";
+          console.log(`Proposal #${p.id.toString()} [${status}]`);
+          console.log(`  Proposer:        ${p.proposer}`);
+          console.log(
+            `  Weights:         VC: ${p.proposedWeights.vcWeight}%, TX: ${p.proposedWeights.txWeight}%, Repayment: ${p.proposedWeights.repaymentWeight}%`,
+          );
+          console.log(
+            `  Votes:           For: ${p.votesFor.toString()} | Against: ${p.votesAgainst.toString()} | Quorum: ${p.quorumRequired.toString()}`,
+          );
+          console.log(
+            `  Expiry Ledger:   ${p.expiryLedger} (Delay: ${p.executionDelayLedgers} ledgers)`,
+          );
+          console.log();
+        }
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+governance
   .command("create-proposal")
   .description("Create a scoring-weight proposal.")
   .argument("<proposer-secret>", "Stellar secret key of the proposer (starts with S)")
@@ -1155,7 +1207,7 @@ governance
       console.log(`Executing governance proposal ${proposalId} on ${network}...`);
 
       try {
-        const txHash = await sdk.governance.execute(keypair, proposalId);
+        const txHash = await sdk.governance.execute(keypair, BigInt(proposalId));
         console.log();
         console.log("Success!");
         console.log(`  Transaction: ${txHash}`);

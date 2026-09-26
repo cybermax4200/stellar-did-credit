@@ -1,6 +1,6 @@
 import { program } from "./index";
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
-import { Keypair, SorobanRpc, nativeToScVal } from "@stellar/stellar-sdk";
+import { Keypair, nativeToScVal } from "@stellar/stellar-sdk";
 
 const mockSimulateTransaction = jest.fn();
 const mockGetAccount = jest.fn();
