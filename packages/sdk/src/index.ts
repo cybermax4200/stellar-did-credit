@@ -210,6 +210,7 @@ const CREDIT_ORACLE_ERROR_CODES: Record<number, string> = {
   15: "NoPendingWeights",
   16: "NotInitialized",
   17: "InvalidAmount",
+  18: "InvalidComputeCooldown",
 };
 
 const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {
@@ -2132,6 +2133,48 @@ export class StellarDIDCreditSDK {
     }
 
     return parseRecencyDecayConfig(resultScVal);
+  }
+
+  /** Get the current compute-score cooldown in ledgers. */
+  async getComputeCooldownLedgers(): Promise<number> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const tx = new TransactionBuilder(new Account(this.config.simAccount, "0"), {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_compute_cooldown_ledgers"))
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) throwContractError(sim.error, "credit-oracle");
+    if (!SorobanRpc.Api.isSimulationSuccess(sim) || !sim.result?.retval) {
+      throw new Error("Simulation returned unexpected response");
+    }
+    return Number(scValToNative(sim.result.retval));
+  }
+
+  /** Set the compute-score cooldown in ledgers. Requires the admin keypair. */
+  async setComputeCooldownLedgers(adminKeypair: KeypairLike, ledgers: number): Promise<string> {
+    const server = this.server;
+    const contract = new Contract(this.config.creditOracleId);
+    const publicKey = getPublicKey(adminKeypair);
+    const accountData = await server.getAccount(publicKey);
+    const tx = new TransactionBuilder(new Account(publicKey, accountData.sequenceNumber()), {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("set_compute_cooldown_ledgers", new Address(publicKey).toScVal(), nativeToScVal(ledgers, { type: "u32" })))
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+    const sim = await server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) throwContractError(sim.error, "credit-oracle");
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) throw new Error("Simulation returned unexpected response");
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+    const txHash = await sendTransactionWithRetry(server, preparedTx, this.config.maxRetries, (response) => new Error(`Transaction submission failed: ${response.errorResult}`));
+    await waitForTransactionConfirmation(server, txHash, "setComputeCooldownLedgers", getConfirmationTimeoutMs(this.config), getTransactionPollIntervalMs(this.config));
+    return txHash;
   }
 
   /**
