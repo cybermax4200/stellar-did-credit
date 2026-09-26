@@ -31,6 +31,7 @@ const mockSendTransaction = jest.fn();
 const mockGetTransaction = jest.fn();
 const mockGetEvents = jest.fn();
 const mockGetLatestLedger = jest.fn();
+const mockGetLedgerEntries = jest.fn();
 const mockContractCalls: Array<{
   contractId: string;
   method: string;
@@ -53,12 +54,21 @@ jest.mock("@stellar/stellar-sdk", () => ({
     ScValType: {
       scvVoid: () => "scvVoid",
     },
+    LedgerKey: {
+      contractData: (data: unknown) => ({ data }),
+    },
+    LedgerKeyContractData: jest.fn().mockImplementation((data: unknown) => data),
+    ContractDataDurability: {
+      persistent: () => "persistent",
+      temporary: () => "temporary",
+    },
     ScVal: {
       scvVoid: () => ({ switch: () => "scvVoid" }),
       scvSymbol: (symbol: string) => ({
         toXDR: () => `symbol:${symbol}`,
       }),
       scvVec: (elements: unknown[]) => elements,
+      scvLedgerKeyContractInstance: () => ({ value: "ContractInstance" }),
     },
   },
   Keypair: {},
@@ -70,6 +80,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
     })),
   Address: jest.fn().mockImplementation((address: string) => ({
     toScVal: () => ({ address }),
+    toScAddress: () => ({ address }),
   })),
   Contract: jest.fn().mockImplementation((contractId: string) => ({
     contractId,
@@ -79,6 +90,9 @@ jest.mock("@stellar/stellar-sdk", () => ({
       mockContractCalls.push(call);
       return { method, args };
     },
+    address: () => ({
+      toScAddress: () => ({ address: contractId }),
+    }),
   })),
   TransactionBuilder: jest.fn().mockImplementation(() => ({
     addOperation: jest.fn().mockReturnThis(),
@@ -102,6 +116,7 @@ jest.mock("@stellar/stellar-sdk", () => ({
       getTransaction: mockGetTransaction,
       getEvents: mockGetEvents,
       getLatestLedger: mockGetLatestLedger,
+      getLedgerEntries: mockGetLedgerEntries,
     })),
     assembleTransaction: jest.fn().mockReturnValue({
       build: jest.fn().mockReturnValue({
@@ -448,6 +463,152 @@ describe("StellarDIDCreditSDK", () => {
         "get_proposal",
         "get_proposal",
       ]);
+    });
+
+    it("returns all proposals when listProposals() is called without args", async () => {
+      mockContractCalls.length = 0;
+      mockGetLedgerEntries.mockResolvedValueOnce({
+        entries: [
+          {
+            val: {
+              contractData: {
+                val: {
+                  storage: [
+                    {
+                      key: { value: "NextProposalId" },
+                      val: { value: 4n },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      });
+
+      const makeMockProposal = (id: bigint) => ({
+        result: {
+          retval: {
+            value: {
+              id,
+              proposer: subjectAddress,
+              proposed_weights: {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+              },
+              votes_for: 10n,
+              votes_against: 0n,
+              expiry_ledger: 100,
+              execution_delay_ledgers: 0,
+              executed: false,
+              cancelled: false,
+              quorum_required: 10n,
+            },
+          },
+        },
+      });
+
+      mockSimulateTransaction
+        .mockResolvedValueOnce(makeMockProposal(1n))
+        .mockResolvedValueOnce(makeMockProposal(2n))
+        .mockResolvedValueOnce(makeMockProposal(3n));
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposals = await sdk.governance.listProposals();
+
+      expect(proposals).toHaveLength(3);
+      expect(proposals.map((p) => p.id)).toEqual([1n, 2n, 3n]);
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "get_proposal",
+        "get_proposal",
+        "get_proposal",
+      ]);
+    });
+
+    it("returns proposals 2-6 when listProposals(2n, 5) is called", async () => {
+      mockContractCalls.length = 0;
+      mockGetLedgerEntries.mockResolvedValueOnce({
+        entries: [
+          {
+            val: {
+              contractData: {
+                val: {
+                  storage: [
+                    {
+                      key: { value: "NextProposalId" },
+                      val: { value: 10n },
+                    },
+                  ],
+                },
+              },
+            },
+          },
+        ],
+      });
+
+      const makeMockProposal = (id: bigint) => ({
+        result: {
+          retval: {
+            value: {
+              id,
+              proposer: subjectAddress,
+              proposed_weights: {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+              },
+              votes_for: 10n,
+              votes_against: 0n,
+              expiry_ledger: 100,
+              execution_delay_ledgers: 0,
+              executed: false,
+              cancelled: false,
+              quorum_required: 10n,
+            },
+          },
+        },
+      });
+
+      mockSimulateTransaction
+        .mockResolvedValueOnce(makeMockProposal(2n))
+        .mockResolvedValueOnce(makeMockProposal(3n))
+        .mockResolvedValueOnce(makeMockProposal(4n))
+        .mockResolvedValueOnce(makeMockProposal(5n))
+        .mockResolvedValueOnce(makeMockProposal(6n));
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const proposals = await sdk.governance.listProposals(2n, 5);
+
+      expect(proposals).toHaveLength(5);
+      expect(proposals.map((p) => p.id)).toEqual([2n, 3n, 4n, 5n, 6n]);
+      expect(mockContractCalls.map((call) => call.method)).toEqual([
+        "get_proposal",
+        "get_proposal",
+        "get_proposal",
+        "get_proposal",
+        "get_proposal",
+      ]);
+    });
+
+    it("handles limit 0 and validates invalid limit in listProposals", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const emptyProposals = await sdk.governance.listProposals(1n, 0);
+      expect(emptyProposals).toEqual([]);
+
+      await expect(sdk.governance.listProposals(1n, -1)).rejects.toThrow(
+        "limit must be a non-negative integer",
+      );
+      await expect(sdk.governance.listProposals(1n, 1.5)).rejects.toThrow(
+        "limit must be a non-negative integer",
+      );
+    });
+
+    it("handles getNextProposalId fallback gracefully", async () => {
+      mockGetLedgerEntries.mockRejectedValueOnce(new Error("RPC failure"));
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const nextId = await sdk.governance.getNextProposalId();
+      expect(nextId).toBe(1n);
     });
 
     it("exports GovernanceClient and requires governanceId", async () => {
@@ -2605,11 +2766,9 @@ describe("StellarDIDCreditSDK", () => {
       });
 
       // We just expect it to attempt generating a proof without throwing on missing stats
-      // Since ZkWasm might not be loaded in Jest node environment without proper wasm support,
-      // we mock ZkWasm.generate_score_proof or just let it try and if it fails on WASM, 
-      // that's fine, we just want to cover the `|| { default }` lines before it.
-      const ZkWasm = require("@stellar-did-credit/zk-wasm");
-      jest.spyOn(ZkWasm, "generate_score_proof").mockReturnValueOnce(new Uint8Array());
+      // eslint-disable-next-line @typescript-eslint/no-var-requires
+      const zkWasm = require("@stellar-did-credit/zk-wasm");
+      jest.spyOn(zkWasm, "generate_score_proof").mockReturnValueOnce(new Uint8Array());
       
       const proof = await sdk.generateScoreProof(subjectAddress, 600);
       expect(proof).toBeInstanceOf(Uint8Array);
