@@ -3094,6 +3094,44 @@ describe("batchRevokeVC", () => {
     });
   });
 
+  describe("compute cooldown", () => {
+    const adminKeypair = { publicKey: () => "GADMIN" };
+
+    it("gets the configured cooldown in ledgers", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: 100 } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(sdk.getComputeCooldownLedgers()).resolves.toBe(100);
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_compute_cooldown_ledgers",
+        args: [],
+      });
+    });
+
+    it("sets the configured cooldown with the admin signer", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.setComputeCooldownLedgers(adminKeypair as never, 100),
+      ).resolves.toBe("mock-tx-hash");
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "set_compute_cooldown_ledgers",
+      });
+      expect(mockContractCalls[0]?.args[1]).toMatchObject({
+        value: 100,
+        type: "u32",
+      });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe("pause and upgrade helpers", () => {
     const adminKeypair = { publicKey: () => "GADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" };
     const validWasmHash = Buffer.alloc(32, 1);
