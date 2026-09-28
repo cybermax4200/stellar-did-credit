@@ -390,6 +390,30 @@ impl ScoreRangeVerifier {
 
 ---
 
+## Phase 4 implementation checklist
+
+Single tracking view for Phase 4 completion. Each deliverable links to the GitHub issue that owns it; maintainers tick boxes as work lands.
+
+> **Numbering note:** earlier Phase 4 issue bodies (#741, #748, #780) refer to deliverables by an internal numbering that predates this repository's issue numbering, and a code comment in `contracts/score-range-verifier/src/lib.rs` still says "Issue 59". The checklist below cites the current issue numbers first, with the legacy number in parentheses.
+
+| Legacy # | Deliverable | Current issue(s) |
+| -------- | ----------- | ---------------- |
+| 69 | Trusted setup ceremony + real verification key | #744, #732 |
+| 77 | WASM prover build pipeline | #740 |
+| 78 | SDK methods | #741 |
+| 79 | CLI command | #742 |
+| 85 | End-to-end integration test | #748 |
+
+- [ ] **Trusted setup ceremony + real verification key** — write `docs/zk-trusted-setup.md` and replace the placeholder VK embedded in `contracts/score-range-verifier` (key generation currently uses a fixed-seed dev RNG in `zk/circuit/src/bin/generate_vk.rs`). (#744, #732 — legacy #69)
+- [x] **WASM prover build pipeline** — `packages/zk-wasm` compiles `zk/circuit` with `wasm-pack`; the build runs in CI (`.github/workflows/ci.yml`). (#740 — legacy #77)
+- [x] **SDK methods** — `generateScoreProof()` and `verifyScoreProof()` in `packages/sdk/src/index.ts`. (#741 — legacy #78)
+- [x] **CLI command** — `stellar-did prove-score` in `packages/cli/src/index.ts`. (#742 — legacy #79)
+- [ ] **End-to-end integration test** — on-chain proof flow covering `compute_score` → generate proof → submit to `score-range-verifier` → replay rejection. `packages/sdk/src/__tests__/e2e-phase4.test.ts` exists but mocks RPC calls; no ZK coverage in `contracts/tests`. (#748 — legacy #85)
+
+Checkboxes reflect implementation state at time of writing; open issues remain the source of truth for what is still outstanding.
+
+---
+
 ## User Journey: CLI and SDK
 
 Users and applications interact with the ZK proof layer using either the `stellar-did` CLI or the `@stellar-did-credit/sdk`.
