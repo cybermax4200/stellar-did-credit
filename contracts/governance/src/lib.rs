@@ -2048,4 +2048,126 @@ mod tests {
         );
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVotingPeriod)));
     }
+
+    /// Issue #763: Proposals where `votes_against > votes_for` must fail execution
+    /// with `ProposalRejected`, even when total votes meet the required quorum (100).
+    #[test]
+    fn test_governance_majority_check() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let voting_period = 100;
+        let execution_delay = 10;
+        let proposal_id = gov_client.create_proposal(
+            &proposer,
+            &proposed_weights,
+            &voting_period,
+            &execution_delay,
+        );
+
+        let voter_for = Address::generate(&env);
+        let voter_against = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter_for, &40);
+        gov_client.register_voter(&admin, &voter_against, &60);
+        gov_client.vote(&voter_for, &proposal_id, &true, &40);
+        gov_client.vote(&voter_against, &proposal_id, &false, &60);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.votes_for, 40);
+        assert_eq!(proposal.votes_against, 60);
+        assert_eq!(proposal.quorum_required, 100);
+        assert_eq!(proposal.votes_for + proposal.votes_against, 100);
+        assert!(!proposal.executed);
+
+        // Advance ledger past voting expiry + execution delay
+        env.ledger().with_mut(|l| {
+            l.sequence_number += voting_period + execution_delay + 1;
+        });
+
+        // Attempt execution: must be rejected because votes_against > votes_for
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalRejected)));
+
+        // Verify proposal state was not marked as executed
+        let proposal_after = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(
+            !proposal_after.executed,
+            "rejected proposal must not be marked as executed"
+        );
+    }
+
+    /// Issue #763: Proposals where `votes_for == votes_against` (tie) must fail
+    /// execution with `ProposalRejected`, even when total votes meet the required quorum (100).
+    #[test]
+    fn test_governance_tie_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let voting_period = 100;
+        let execution_delay = 10;
+        let proposal_id = gov_client.create_proposal(
+            &proposer,
+            &proposed_weights,
+            &voting_period,
+            &execution_delay,
+        );
+
+        let voter_for = Address::generate(&env);
+        let voter_against = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter_for, &50);
+        gov_client.register_voter(&admin, &voter_against, &50);
+        gov_client.vote(&voter_for, &proposal_id, &true, &50);
+        gov_client.vote(&voter_against, &proposal_id, &false, &50);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.votes_for, 50);
+        assert_eq!(proposal.votes_against, 50);
+        assert_eq!(proposal.quorum_required, 100);
+        assert_eq!(proposal.votes_for + proposal.votes_against, 100);
+        assert!(!proposal.executed);
+
+        // Advance ledger past voting expiry + execution delay
+        env.ledger().with_mut(|l| {
+            l.sequence_number += voting_period + execution_delay + 1;
+        });
+
+        // Attempt execution: must be rejected because votes_for == votes_against
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalRejected)));
+
+        // Verify proposal state was not marked as executed
+        let proposal_after = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(
+            !proposal_after.executed,
+            "tied proposal must not be marked as executed"
+        );
+    }
 }
