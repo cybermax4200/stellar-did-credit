@@ -48,6 +48,9 @@
       "ts-jest": {
         "diagnostics": false
       }
+    },
+    "moduleNameMapper": {
+      "^@stellar-did-credit/zk-wasm$": "<rootDir>/__mocks__/zk-wasm.mock.ts"
     }
   },
   "types": "dist/index.d.ts"
