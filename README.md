@@ -98,10 +98,13 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
 | `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
 | `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
-| `get_vc_count(subject)`                     | Returns the number of anchored VCs              |
+| `get_vc_count(subject)`                     | Returns the total number of anchored VCs, including revoked ones |
+| `get_active_vc_count(subject)`              | Returns the number of non-revoked VCs — the count used internally by `compute_score` |
 | `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
 | `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
+
+> **Note for feeders and lenders:** Use `get_active_vc_count` when you need the VC count used for scoring. `get_vc_count` includes revoked VCs and will return a higher number than what `compute_score` actually uses.
 
 ### credit-oracle
 
