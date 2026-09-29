@@ -130,6 +130,10 @@ jest.mock("@stellar/stellar-sdk", () => ({
   },
 }));
 
+jest.mock("@stellar-did-credit/zk-wasm", () => ({
+  generate_score_proof: jest.fn().mockReturnValue(new Uint8Array(0)),
+}));
+
 const mockConfig = {
   identityOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
   creditOracleId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
@@ -621,6 +625,104 @@ describe("StellarDIDCreditSDK", () => {
       await expect(sdk.governance.getProposal(1n)).rejects.toThrow(
         "governanceId is required",
       );
+    });
+
+    describe("proposeNewAdmin and acceptAdmin two-step flow", () => {
+      const newAdminAddress = "GNEWADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+      beforeEach(() => {
+        mockGetTransaction.mockResolvedValue({ status: "SUCCESS" });
+      });
+
+      it("proposes a new admin and then accepts it", async () => {
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+
+        // Propose new admin from current admin
+        await sdk.governance.proposeNewAdmin(
+          { publicKey: () => newAdminAddress } as never,
+        );
+
+        // Verify pending admin is set by checking the contract call
+        expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
+          contractId: mockConfig.governanceId,
+          method: "propose_new_admin",
+        });
+        expect(mockContractCalls[mockContractCalls.length - 1]?.args).toHaveLength(1);
+
+        // Accept the pending admin
+        await sdk.governance.acceptAdmin(
+          { publicKey: () => newAdminAddress } as never,
+        );
+
+        // Verify accept_admin was called
+        expect(mockContractCalls[mockContractCalls.length - 1]).toMatchObject({
+          contractId: mockConfig.governanceId,
+          method: "accept_admin",
+        });
+        expect(mockContractCalls[mockContractCalls.length - 1]?.args).toHaveLength(1);
+      });
+
+      it("rejects acceptAdmin when no pending admin exists", async () => {
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+
+        // Mock simulation to return no-pending-admin error
+        mockSimulateTransaction.mockResolvedValueOnce({
+          error: "Error(Contract, #20)",
+        });
+
+        // Try to accept without first proposing
+        await expect(
+          sdk.governance.acceptAdmin(
+            { publicKey: () => newAdminAddress } as never,
+          ),
+        ).rejects.toMatchObject({
+          name: "GovernanceError",
+          code: 20,
+        });
+      });
+
+      it("rejects acceptAdmin when proposed admin does not match pending", async () => {
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const wrongAdminAddress = "GWRONGADMINAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+
+        // First propose a new admin
+        await sdk.governance.proposeNewAdmin(
+          { publicKey: () => newAdminAddress } as never,
+        );
+
+        // Mock simulation to return not-authorized error
+        mockSimulateTransaction.mockResolvedValueOnce({
+          error: "Error(Contract, #2)",
+        });
+
+        // Try to accept with a different admin
+        await expect(
+          sdk.governance.acceptAdmin(
+            { publicKey: () => wrongAdminAddress } as never,
+          ),
+        ).rejects.toMatchObject({
+          name: "GovernanceError",
+          code: 2,
+        });
+      });
+
+      it("tracks contract method calls in order", async () => {
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+
+        // Propose new admin
+        await sdk.governance.proposeNewAdmin(
+          { publicKey: () => newAdminAddress } as never,
+        );
+
+        // Accept pending admin
+        await sdk.governance.acceptAdmin(
+          { publicKey: () => newAdminAddress } as never,
+        );
+
+        // Verify the sequence of methods called
+        const methods = mockContractCalls.map((call) => call.method);
+        expect(methods).toEqual(["propose_new_admin", "accept_admin"]);
+      });
     });
   });
 

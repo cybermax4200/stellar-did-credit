@@ -1,0 +1,1 @@
+export const generate_score_proof = jest.fn().mockReturnValue(new Uint8Array(0));

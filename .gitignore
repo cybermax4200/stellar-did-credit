@@ -27,3 +27,6 @@ Thumbs.db
 # Generated API documentation (produced by cargo doc / typedoc)
 target/doc/
 docs/api/
+branch_structure.json
+temp_auto_push.bat
+temp_interactive_push.bat

@@ -50,6 +50,8 @@ pub enum GovernanceError {
     ProposalRejected = 18,
     /// Voting period cannot be zero.
     InvalidVotingPeriod = 19,
+    /// No pending admin proposal exists.
+    NoPendingAdmin = 20,
 }
 
 /// Storage keys for the governance contract.
@@ -59,6 +61,8 @@ pub enum DataKey {
     Admin,
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
+    /// Pending contract admin address for two-step transfer.
+    PendingAdmin,
     /// Monotonically increasing counter used to assign proposal IDs.
     /// IDs start at 1; ID 0 is intentionally unused.
     NextProposalId,
@@ -622,6 +626,61 @@ impl Governance {
             &credit_oracle_addr,
             &env.current_contract_address(),
         );
+        Ok(())
+    }
+
+    /// Propose a new contract admin (step 1 of two-step admin transfer).
+    ///
+    /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
+    /// The transfer only completes once `new_admin` calls `accept_admin`.
+    ///
+    /// Auth: current admin only — verified via `require_admin`.
+    pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if new_admin == stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        stored_admin.require_auth();
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage()
+            .instance()
+            .set(&DataKey::PendingAdmin, &new_admin);
+        env.events()
+            .publish((symbol_short!("AdmProp"),), (stored_admin, new_admin));
+        Ok(())
+    }
+
+    /// Accept a pending admin proposal (step 2 of two-step admin transfer).
+    ///
+    /// Reads `DataKey::PendingAdmin` from instance storage and verifies that
+    /// `new_admin` matches, then promotes `new_admin` to `DataKey::Admin` and
+    /// clears the pending entry.
+    ///
+    /// Auth: the proposed `new_admin` address must sign the transaction.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), GovernanceError> {
+        let pending: Option<Address> = env.storage().instance().get(&DataKey::PendingAdmin);
+        match pending {
+            Some(p) => {
+                if p != new_admin {
+                    return Err(GovernanceError::NotAuthorized);
+                }
+            }
+            None => return Err(GovernanceError::NoPendingAdmin),
+        }
+        new_admin.require_auth();
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&DataKey::Admin, &new_admin);
+        env.storage().instance().remove(&DataKey::PendingAdmin);
+        env.events()
+            .publish((symbol_short!("AdmAccept"),), new_admin);
         Ok(())
     }
 
