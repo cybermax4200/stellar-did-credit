@@ -204,46 +204,83 @@ Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`
 
 ## Cross-contract interaction
 
-The `credit-oracle` supports a dual-path mechanism for resolving a subject's VC count during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
+The `credit-oracle` supports a dual-path mechanism for resolving a subject's verifiable credentials and weighting during score computation. The active path depends on whether an `IdentityOracleId` is configured in the contract's instance storage.
 
-### Cross-Contract Path (Live)
+### Cross-Contract Call Flow
 
-If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract:
+The sequence diagram below illustrates the end-to-end `compute_score` flow across both the live cross-contract weighted VC scoring chain and the legacy fallback path:
 
 ```mermaid
 sequenceDiagram
     participant Caller
-    participant CreditOracle
-    participant IdentityOracle
+    participant CreditOracle as credit-oracle
+    participant IdentityOracle as identity-oracle
 
     Caller->>CreditOracle: compute_score(subject)
-    CreditOracle->>IdentityOracle: get_active_vc_count(subject)
-    IdentityOracle-->>CreditOracle: u32
-
-    CreditOracle->>CreditOracle: run scoring formula
-    CreditOracle-->>Caller: score: u32
+    alt IdentityOracle configured (Live Weighted Scoring Path)
+        CreditOracle->>IdentityOracle: is_deactivated(subject)
+        IdentityOracle-->>CreditOracle: is_deactivated: bool
+        CreditOracle->>IdentityOracle: get_vc_details(subject)
+        IdentityOracle-->>CreditOracle: Vec<VCRecord> (active only)
+        loop each active VC
+            CreditOracle->>IdentityOracle: verify_vc(subject, record.vc_hash)
+            IdentityOracle-->>CreditOracle: is_verified: bool
+            CreditOracle->>IdentityOracle: get_issuer_tier(record.issuer)
+            IdentityOracle-->>CreditOracle: issuer_tier_bps (default 100)
+            CreditOracle->>IdentityOracle: get_vc_credential_type(subject, record.vc_hash)
+            IdentityOracle-->>CreditOracle: credential_type: Symbol
+            CreditOracle->>CreditOracle: lookup get_credential_type_weight(credential_type)
+            opt Recency decay enabled
+                CreditOracle->>CreditOracle: apply decay multiplier (record.anchored_at)
+            end
+        end
+        CreditOracle->>CreditOracle: vc_score = min(Σ weighted points, 100)
+    else IdentityOracle NOT configured (Legacy Fallback Path)
+        alt Stored VC List exists
+            CreditOracle->>CreditOracle: read VcList(subject) (persistent storage)
+            CreditOracle->>CreditOracle: calculate weighted points locally
+        else Fallback to cached count
+            CreditOracle->>CreditOracle: read cached VcCount (persistent storage)
+            CreditOracle->>CreditOracle: vc_score = min(vc_count × 20, 100)
+        end
+    end
+    CreditOracle->>CreditOracle: compute composite score (VC + Tx History + Repayment)
+    CreditOracle-->>Caller: score: u32 (300-850)
 ```
 
-In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+### Cross-Contract Path (Live Weighted VC Scoring)
 
-To keep that count path cheap, `identity-oracle` no longer re-checks the revocation registry for every anchored VC on every read. Instead, it caches the active count per subject, seeds the cache lazily from existing anchors on the first touch after upgrade, and then updates the counter incrementally when `anchor_vc` or `mark_vc_revoked` succeeds. The revocation-registry cross-contract lookup remains in the verification helpers and on new anchors so the cache stays aligned with the registry-backed revoke flow.
+If `IdentityOracleId` is configured, `compute_score` dynamically queries the target contract via `env.invoke_contract`:
 
-Benchmarking the cached read path in unit tests produced roughly flat CPU usage across 5, 10, and 20 VCs: 23,808, 23,520, and 25,470 instructions respectively. That is several orders of magnitude below Soroban's current mainnet per-invocation instruction ceiling (600,000,000), so the cached counter keeps `get_active_vc_count(subject)` comfortably within budget even for larger subjects.
+1. **Deactivation Check**: `is_deactivated(subject)` is called first. If the subject's identity has been deactivated, score computation immediately terminates and returns `MIN_SCORE` (300).
+2. **VC Details Retrieval**: `get_vc_details(subject)` retrieves all active `VCRecord` items for the subject.
+3. **Verification & Weight Resolution**:
+   - `verify_vc(subject, vc_hash)` verifies non-revocation against the active registry.
+   - `get_issuer_tier(record.issuer)` fetches the issuer tier basis points (`issuer_tier_bps`).
+   - `get_vc_credential_type(subject, vc_hash)` resolves the credential type symbol (e.g., `kyc`, `generic`).
+   - `credit-oracle` looks up `get_credential_type_weight(credential_type)` from its own local instance storage.
+   - If recency decay is enabled, age decay is applied based on `record.anchored_at`.
+4. **Point Aggregation**: Weighted VC points are summed and clamped to the 100-point VC ceiling before combining with transaction and repayment history.
 
-### Fallback Path (Cached)
+This ensures real-time accuracy and fine-grained credential weighting while leveraging cached active counters and efficient batch reads.
 
-If `IdentityOracleId` is **not** set, `compute_score` falls back to reading a cached `VcCount` from persistent storage. This value is updated asynchronously by an off-chain trusted feeder calling `set_vc_count`.
+### Fallback Path (Cached / Legacy)
 
-While this avoids cross-contract overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+If `IdentityOracleId` is **not** set, `compute_score` falls back to reading either a locally stored `VcList` or a cached `VcCount` from persistent storage:
 
-### Migration to Cross-Contract VC Count
+- If `VcList` exists for the subject, type weights are resolved from local storage.
+- Otherwise, the contract reads the cached `VcCount` (updated asynchronously by an off-chain trusted feeder calling `set_vc_count`) and applies `min(vc_count × 20, 100)`.
+
+While this avoids cross-contract call overhead, the cached `VcCount` can become stale if the off-chain feeder halts or falls behind.
+
+### Migration to Cross-Contract VC Scoring
 
 To migrate a deployment from the cached fallback path to the live cross-contract path:
 
 1. **Configure the Oracle ID**: The admin calls `set_identity_oracle(identity_oracle_id)` on `credit-oracle`.
-2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls will automatically use the cross-contract lookup.
+2. **Path Switch**: Once the ID is set, all subsequent `compute_score` calls automatically execute the live cross-contract verification and weighting call chain.
 3. **Deprecate Feeder Input**: The trusted feeder should stop calling `set_vc_count`. Any further updates via `set_vc_count` will be successfully written to persistent storage but entirely ignored by `compute_score`.
-4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement `get_active_vc_count`, the `compute_score` transaction will unconditionally fail.
+4. **Failure Caveat**: There is no automatic fallback if the cross-contract call fails. If the configured `IdentityOracleId` points to an invalid contract or one that doesn't implement the required interface, the `compute_score` transaction will unconditionally fail.
 
 ---
 
