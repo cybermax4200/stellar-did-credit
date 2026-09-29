@@ -85,6 +85,21 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Topic:** `[Symbol("Score")]`
 * **Data:** `(subject: Address, score: u32)`
 * **Emitted When:** A subject's credit score is recomputed and updated.
+* **Note:** Always emitted by `compute_score`, regardless of the `verbose_events` flag.
+
+#### ScoreDtl _(verbose only)_
+* **Topic:** `[Symbol("ScoreDtl")]`
+* **Data:** `ScoreDetail { subject: Address, vc_score: u32, tx_score: u32, repay_score: u32, composite: u32, score: u32, weights: ScoringWeights }`
+* **Emitted When:** `compute_score` is called **and** the admin has enabled verbose events via `set_verbose_events(admin, true)`.
+* **Purpose:** Provides the full intermediate scoring breakdown so analytics platforms can build issuer and feeder quality dashboards without re-running the scoring formula. The `weights` field captures the active `ScoringWeights` at compute time, which is critical because weights can be updated via the timelock mechanism.
+* **feeder Action:** Index the component scores alongside the `Score` event to populate per-subject scoring timelines. The `composite` field can be used to detect which component is dragging a subject's score.
+* **Default state:** Disabled (`false`). No `ScoreDtl` events are emitted until an admin call enables them.
+
+#### VbsEvt
+* **Topic:** `[Symbol("VbsEvt")]`
+* **Data:** `enabled: bool`
+* **Emitted When:** The admin calls `set_verbose_events`.
+* **feeder Action:** Update your local flag so you know whether to expect `ScoreDtl` events alongside each `Score` event.
 
 #### FdrReg / FdrDeReg
 * **Topic:** `[Symbol("FdrReg")]` / `[Symbol("FdrDeReg")]`
@@ -135,6 +150,99 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Topic:** `[Symbol("PropCanc"), proposal_id: u64]`
 * **Data:** `(canceller: Address, reason: Option<String>)`
 * **Emitted When:** A governance proposal is cancelled.
+
+---
+
+---
+
+## Verbose Scoring Events
+
+### Overview
+
+By default `compute_score` emits only the `Score` event (subject + final score). When verbose events are enabled the contract additionally emits a `ScoreDtl` event containing every intermediate component and the weights that were active at compute time.
+
+| Flag state | Events emitted by `compute_score` |
+|---|---|
+| `verbose_events = false` (default) | `Score` |
+| `verbose_events = true` | `Score` + `ScoreDtl` |
+
+### Enabling verbose events
+
+Only the contract admin can toggle this flag:
+
+```bash
+stellar contract invoke \
+  --id <CREDIT_ORACLE_CONTRACT_ID> \
+  --source <ADMIN_SECRET_KEY> \
+  -- set_verbose_events \
+  --admin <ADMIN_ADDRESS> \
+  --enabled true
+```
+
+To disable again, pass `--enabled false`.
+
+### ScoreDetail fields
+
+| Field | Type | Description |
+|---|---|---|
+| `subject` | `Address` | The subject whose score was computed. |
+| `vc_score` | `u32` | VC component score (0–100) before weighting. |
+| `tx_score` | `u32` | Transaction component score (0–100) before weighting. |
+| `repay_score` | `u32` | Repayment component score (0–100) before weighting. |
+| `composite` | `u32` | Weighted composite (0–100): `(vc_score × vc_weight + tx_score × tx_weight + repay_score × repayment_weight) / 100`. |
+| `score` | `u32` | Final clamped score ([300, 850]). Matches the value in the `Score` event. |
+| `weights` | `ScoringWeights` | Active weights at compute time (`vc_weight`, `tx_weight`, `repayment_weight`). |
+
+### Indexer guidance
+
+When `VbsEvt` fires with `enabled = true`, start correlating `ScoreDtl` events with `Score` events (same ledger, same contract, same `subject`).
+
+**Dashboard use-cases enabled by `ScoreDtl`:**
+
+* **Feeder quality:** Track `tx_score` trends per feeder to detect stale or missing `update_tx_stats` calls.
+* **Issuer quality:** Track `vc_score` to see whether new VC issuances are lifting subject scores.
+* **Repayment health:** Monitor `repay_score` across a lender's portfolio without re-running the formula.
+* **Weight-change impact analysis:** Because `weights` is captured at compute time you can retroactively compare scores computed under different weight regimes.
+
+### Node.js example — consuming ScoreDtl
+
+```typescript
+import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
+
+const rpcUrl = "https://soroban-testnet.stellar.org";
+const server = new SorobanRpc.Server(rpcUrl);
+const contractId = "<CREDIT_ORACLE_CONTRACT_ID>";
+
+async function indexScoreDetails(startLedger: number) {
+  const response = await server.getEvents({
+    startLedger,
+    filters: [
+      {
+        type: "contract",
+        contractIds: [contractId],
+        topics: [[xdr.ScVal.scvSymbol("ScoreDtl").toXDR("base64")]],
+      },
+    ],
+    limit: 100,
+  });
+
+  for (const event of response.events) {
+    const detail = scValToNative(event.value);
+    // detail is a ScoreDetail struct — fields match the order in the contract type
+    const { subject, vc_score, tx_score, repay_score, composite, score, weights } = detail;
+
+    console.log(
+      `[ScoreDtl] subject=${subject} ` +
+      `vc=${vc_score} tx=${tx_score} repay=${repay_score} ` +
+      `composite=${composite} final=${score} ` +
+      `weights=${weights.vc_weight}/${weights.tx_weight}/${weights.repayment_weight}`
+    );
+
+    // Store in your analytics database:
+    // await db.upsertScoreBreakdown({ subject, vc_score, tx_score, repay_score, composite, score, weights, ledger: event.ledger });
+  }
+}
+```
 
 ---
 

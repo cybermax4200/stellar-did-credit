@@ -94,15 +94,30 @@ pub enum DataKey {
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
+    /// Whether verbose ScoreDetail events are emitted on compute_score (default false)
+    VerboseEvents,
 }
 
-/// Pure scoring function that computes a credit score from input parameters.
+/// Scoring components returned by [`compute_score_components`].
+///
+/// All component fields are in the 0–100 range (before final clamping to
+/// [`MIN_SCORE`]–[`MAX_SCORE`]).  The `score` field is the final clamped value.
+pub struct ScoreComponents {
+    pub vc_score: u32,
+    pub tx_score: u32,
+    pub repay_score: u32,
+    pub composite: u32,
+    pub score: u32,
+}
+
+/// Pure scoring function that computes all intermediate components from
+/// input parameters.
 ///
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
-/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+/// The final score is always clamped to [`MIN_SCORE`]–[`MAX_SCORE`].
 #[allow(clippy::too_many_arguments)]
-pub fn compute_score_pure(
+pub fn compute_score_components(
     vc_points: u32,
     volume_30d: i128,
     avg_counterparties: u32,
@@ -112,7 +127,7 @@ pub fn compute_score_pure(
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
-) -> u32 {
+) -> ScoreComponents {
     let vc_score = (vc_points).min(100) as u128;
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
     let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
@@ -128,8 +143,46 @@ pub fn compute_score_pure(
         + tx_score * tx_weight as u128
         + repay_score * repayment_weight as u128)
         / 100;
-    let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let raw = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
+    let score = raw.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
+    ScoreComponents {
+        vc_score: vc_score as u32,
+        tx_score: tx_score as u32,
+        repay_score: repay_score as u32,
+        composite: composite as u32,
+        score,
+    }
+}
+
+/// Pure scoring function that computes a credit score from input parameters.
+///
+/// This is a thin wrapper around [`compute_score_components`] kept for
+/// backwards compatibility with fuzz targets and external callers.
+/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_score_pure(
+    vc_points: u32,
+    volume_30d: i128,
+    avg_counterparties: u32,
+    on_time_count: u32,
+    total_count: u32,
+    total_repaid: i128,
+    vc_weight: u32,
+    tx_weight: u32,
+    repayment_weight: u32,
+) -> u32 {
+    compute_score_components(
+        vc_points,
+        volume_30d,
+        avg_counterparties,
+        on_time_count,
+        total_count,
+        total_repaid,
+        vc_weight,
+        tx_weight,
+        repayment_weight,
+    )
+    .score
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -181,6 +234,31 @@ pub struct ScoreRecord {
     /// comparing `computed_at_ledger` against the current ledger
     /// sequence. Always `false` for a freshly computed score.
     pub stale: bool,
+}
+
+/// Detailed breakdown of scoring components emitted as an optional verbose event.
+///
+/// Only emitted when `verbose_events` is `true` (set via `set_verbose_events`).
+/// Consumers can use these fields to reconstruct how the final score was derived
+/// without having to re-run the scoring formula with the weights active at
+/// compute time.
+#[contracttype]
+#[derive(Clone)]
+pub struct ScoreDetail {
+    /// Subject whose score was computed.
+    pub subject: Address,
+    /// VC component score (0–100), before weighting.
+    pub vc_score: u32,
+    /// Transaction component score (0–100), before weighting.
+    pub tx_score: u32,
+    /// Repayment component score (0–100), before weighting.
+    pub repay_score: u32,
+    /// Weighted composite score (0–100) used to derive the final score.
+    pub composite: u32,
+    /// Final clamped credit score ([MIN_SCORE, MAX_SCORE]).
+    pub score: u32,
+    /// Scoring weights that were active at compute time.
+    pub weights: ScoringWeights,
 }
 
 /// Transaction statistics for a user
@@ -865,7 +943,7 @@ impl CreditOracle {
 
         let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
 
-        let score = compute_score_pure(
+        let components = compute_score_components(
             vc_points,
             tx_stats.volume_30d,
             tx_stats.avg_counterparties,
@@ -876,6 +954,7 @@ impl CreditOracle {
             weights.tx_weight,
             weights.repayment_weight,
         );
+        let score = components.score;
 
         // Compute the repayment rate in basis points. The counters are u32, so
         // the product must be widened to u64: `on_time_count * 10000` overflows
@@ -934,6 +1013,27 @@ impl CreditOracle {
 
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
+
+        // Emit ScoreDetail when verbose events are enabled.
+        let verbose: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerboseEvents)
+            .unwrap_or(false);
+        if verbose {
+            env.events().publish(
+                (symbol_short!("ScoreDtl"),),
+                ScoreDetail {
+                    subject: subject.clone(),
+                    vc_score: components.vc_score,
+                    tx_score: components.tx_score,
+                    repay_score: components.repay_score,
+                    composite: components.composite,
+                    score,
+                    weights,
+                },
+            );
+        }
 
         Ok(score)
     }
@@ -1090,6 +1190,46 @@ impl CreditOracle {
     /// Returns `None` if cross-contract VC count lookup is not configured.
     pub fn get_identity_oracle(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::IdentityOracleId)
+    }
+
+    /// Enable or disable verbose `ScoreDetail` events on `compute_score`.
+    ///
+    /// When `enabled` is `true`, every successful call to `compute_score`
+    /// emits an additional `ScoreDetail` event containing the intermediate
+    /// component scores (`vc_score`, `tx_score`, `repay_score`, `composite`)
+    /// and the active [`ScoringWeights`] at compute time.
+    ///
+    /// Default: `false` (no `ScoreDetail` events emitted).
+    ///
+    /// Auth: admin only.
+    pub fn set_verbose_events(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VerboseEvents, &enabled);
+        env.events()
+            .publish((symbol_short!("VbsEvt"),), enabled);
+        Ok(())
+    }
+
+    /// Returns whether verbose `ScoreDetail` events are currently enabled.
+    pub fn get_verbose_events(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerboseEvents)
+            .unwrap_or(false)
     }
 
     /// Get pending weights (if any)
@@ -2539,6 +2679,158 @@ mod tests {
 
         let record = client.get_score(&user).unwrap();
         assert_eq!(record.vc_count, 4);
+    }
+
+    // ── verbose events ────────────────────────────────────────────────────────
+
+    /// When verbose_events is disabled (the default) compute_score must emit
+    /// exactly one event: the existing `Score` event.  No `ScoreDtl` event
+    /// should appear.
+    #[test]
+    fn test_verbose_events_disabled_emits_no_score_detail() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Confirm the default is false
+        assert!(!client.get_verbose_events());
+
+        client.compute_score(&subject);
+
+        let events = env.events().all();
+
+        // Only the Score event from compute_score (Init event is cleared by
+        // mock harness between calls, but let's be defensive and just assert
+        // no ScoreDtl topic exists anywhere).
+        let score_dtl_sym = Symbol::new(&env, "ScoreDtl");
+        for (_, topics, _) in events.iter() {
+            if topics.len() > 0 {
+                let first: Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(Symbol::new(&env, "__none__"));
+                assert_ne!(
+                    first, score_dtl_sym,
+                    "ScoreDtl must NOT be emitted when verbose_events=false"
+                );
+            }
+        }
+    }
+
+    /// When verbose_events is enabled, compute_score must emit both the `Score`
+    /// event and a `ScoreDtl` event whose component fields are consistent with
+    /// the final score and the active weights.
+    #[test]
+    fn test_verbose_events_enabled_emits_score_detail() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        // Give the subject some data so component scores are non-trivial.
+        client.update_tx_stats(
+            &feeder,
+            &subject,
+            &TxStats {
+                volume_30d: 500_000_000i128,
+                tx_count_30d: 5,
+                avg_counterparties: 3,
+            },
+        );
+        client.record_repayment(&lender, &subject, &1_000_000_000i128, &true);
+
+        // Enable verbose events
+        client.set_verbose_events(&admin, &true);
+        assert!(client.get_verbose_events());
+
+        let score = client.compute_score(&subject);
+
+        // Collect all events and locate Score / ScoreDtl
+        let events = env.events().all();
+
+        let score_sym = symbol_short!("Score");
+        let score_dtl_sym = Symbol::new(&env, "ScoreDtl");
+
+        let mut found_score = false;
+        let mut found_detail = false;
+
+        for (emitting_contract, topics, data) in events.iter() {
+            if emitting_contract != contract_id || topics.len() == 0 {
+                continue;
+            }
+            let first: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+
+            if first == score_sym {
+                found_score = true;
+                let (ev_subject, ev_score): (Address, u32) = data
+                    .try_into_val(&env)
+                    .expect("Score data should be (Address, u32)");
+                assert_eq!(ev_subject, subject, "Score event subject mismatch");
+                assert_eq!(ev_score, score, "Score event score mismatch");
+            }
+
+            if first == score_dtl_sym {
+                found_detail = true;
+                let detail: ScoreDetail = data
+                    .try_into_val(&env)
+                    .expect("ScoreDtl data should be ScoreDetail");
+
+                // Subject must match
+                assert_eq!(detail.subject, subject, "ScoreDetail subject mismatch");
+
+                // Final score must agree with the Score event
+                assert_eq!(detail.score, score, "ScoreDetail.score mismatch");
+
+                // Components must be in valid ranges
+                assert!(detail.vc_score <= 100, "vc_score out of range");
+                assert!(detail.tx_score <= 100, "tx_score out of range");
+                assert!(detail.repay_score <= 100, "repay_score out of range");
+                assert!(detail.composite <= 100, "composite out of range");
+
+                // Weights must sum to 100 (default 40/30/30)
+                assert_eq!(
+                    detail.weights.vc_weight
+                        + detail.weights.tx_weight
+                        + detail.weights.repayment_weight,
+                    100,
+                    "weights must sum to 100"
+                );
+
+                // Composite must be consistent with components and weights
+                let expected_composite = (detail.vc_score as u128 * detail.weights.vc_weight as u128
+                    + detail.tx_score as u128 * detail.weights.tx_weight as u128
+                    + detail.repay_score as u128 * detail.weights.repayment_weight as u128)
+                    / 100;
+                assert_eq!(
+                    detail.composite as u128, expected_composite,
+                    "composite does not match component×weight calculation"
+                );
+            }
+        }
+
+        assert!(found_score, "Score event must always be emitted");
+        assert!(
+            found_detail,
+            "ScoreDtl event must be emitted when verbose_events=true"
+        );
     }
 
 }
