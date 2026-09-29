@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- TypeScript SDK: pause, unpause, and upgrade helpers for contracts (#701)
+- TypeScript SDK (`@stellar-did-credit/sdk`): added polling subscriptions for `VCAnch`, `Score`, and `Revoked` events with typed callbacks and unsubscribe support (#502)
+- TypeScript SDK (`@stellar-did-credit/sdk`): `revokeVC(issuerKeypair, vcHash)` now submits issuer-signed revocations through the revocation registry, validates 32-byte hashes and registry configuration with typed `SDKError` codes, and polls pending transactions with configurable confirmation timeouts. The issuer example can demonstrate the flow with `--revoke` (#499)
 - `governance`: `cancel_proposal(canceller, proposal_id)` — replaces the previous no-op `cancel()` stub with a real on-chain cancellation function. Only the original proposer or the contract admin may cancel; any other caller receives `NotAuthorized`. Cancelled proposals cannot be executed (`ProposalAlreadyCancelled` is returned on any `execute` attempt). Emits a `PropCanc` event with `(proposal_id)` as topics and the canceller address as data. Votes already cast are preserved in storage but have no effect — registered voter weight is not consumed globally and remains available for other proposals. `GovernanceProposal` struct gains a `cancelled: bool` field and a `proposer: Address` field. New `ProposalAlreadyCancelled = 14` error variant added. New `DataKey::Proposer(u64)` persistent storage key stores the proposer address at creation time. Integration tests: `test_cancel_proposal_create_cancel_execute_fails`, `test_admin_can_cancel_proposal`, `test_unauthorized_cancel_is_rejected`, `test_double_cancel_is_rejected` (#issue)
 
 - `credit-oracle`: on-chain dispute mechanism for score inputs. Subjects can call `flag_score_input(subject, input_key, reason)` to flag a `tx_stats`, `repayment`, or `vc_count` input as incorrect; admins resolve disputes via `resolve_dispute(subject, input_key, accepted)`. Anti-griefing enforced: only one `Pending` dispute per `(subject, input_key)` pair at a time. Emits `DsptFild`, `DsptRslv`, and `DsptRjct` events for off-chain feeder indexing. Read helpers: `get_dispute` and `list_disputes`. Dispute records stored with 30-day TTL (#244)
@@ -16,8 +19,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `packages/cli` (`@stellar-did-credit/cli`): handle unscored subjects in `get-score` command by printing a helpful message and outputting `{ "score": null }` in JSON mode (#700)
+- TypeScript SDK (`@stellar-did-credit/sdk`): `anchorDID`, `issueVC`,
+  `revokeVC`, and `computeScore` now retry transient transaction submissions
+  with exponential backoff and wait for final transaction status. Confirmation
+  respects `ProtocolConfig.timeoutSeconds` and reports timeouts as `SDKError`
+  with code `TRANSACTION_TIMEOUT` (#501)
 - SDK (`@stellar-did-credit/sdk`): removed duplicate `revokeVC` method that referenced undefined helpers; added missing `SorobanRpc.Server` instance property to the class constructor; fixed `computeScore` to use the class-level server and inline helpers; resolved type error in `waitForTransactionConfirmation` where `GetTransactionStatus` union was compared against string literals (#161)
 - `credit-oracle`: `record_repayment` now records the public `amount` parameter in `RepaymentRecord.total_repaid` and includes capped repayment volume in the repayment score component (#221)
+- `credit-oracle`: `set_identity_oracle` now emits `IdOSet` with the new identity-oracle address (replaces `IdOracle`); documented in `docs/event-indexing.md` (#670)
 
 ### Added
 
@@ -47,6 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `identity-oracle`: `deregister_issuer` no longer rebuilds the full `IssuersIndex` vector on every call. `TrustedIssuer(Address)` is now a tombstone flag (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `IssuersIndex` becomes an append-only record of every address ever registered. Deregistration is now a single storage write instead of an O(n) scan + rewrite. `list_issuers()` keeps its public signature and still returns only currently-registered issuers, now by filtering `IssuersIndex` against each entry's `TrustedIssuer` flag. No storage migration is required — both storage keys keep their original value types (#224)
 - TypeScript SDK (`@stellar-did-credit/sdk`): reuse a single `SorobanRpc.Server` instance created in the constructor instead of creating a new server on every method call (#231)
 - `credit-oracle`: `RepaymentRecord` struct layout modified to add `total_repaid` field (#255)
+- `credit-oracle`: `deregister_feeder` and `deregister_lender` no longer rebuild `FeedersIndex`/`LendersIndex` on every call (issue #668). `TrustedFeeder(Address)`/`TrustedLender(Address)` are now tombstone flags (`true` while trusted, `false` once deregistered, absent if never registered) instead of being removed on deregistration; `FeedersIndex`/`LendersIndex` become append-only records of every address ever registered, so deregistration is a single storage write instead of an O(n) scan + rewrite. `list_feeders()` and `list_lenders()` keep their signatures and still return only currently-registered addresses, now by filtering each index against its flag. Feeder/lender authorization checks (`update_tx_stats`, `set_vc_count`, `anchor_vc`, `record_repayment`) read the flag value rather than key presence so a deregistered address can no longer write. Registration only appends an address that is not already in the index, so deregister → re-register never duplicates entries. Documented `list_feeders`/`list_lenders` in the README function table. No storage migration is required (#668)
 
 ### Added
 

@@ -21,26 +21,27 @@ This guide covers the planning, security, and operational requirements for deplo
 
 ## Required deployment order
 
-Deploying the protocol requires **exactly this order** to avoid silent misconfiguration:
+The deployment script (`scripts/deploy.sh`) now strictly enforces the deployment and wiring order natively. You no longer need to run configuration steps separately. The script guarantees the following sequence:
 
-1. **Deploy CreditOracle** â€” The credit scoring contract. Sets admin and default scoring weights.
-2. **Deploy IdentityOracle** â€” The identity/credential contract. Sets admin only.
-3. **Deploy RevocationRegistry** â€” The global revocation registry. Sets admin only.
-4. **Call `set_revocation_registry` on IdentityOracle** â€” Pass the deployed RevocationRegistry contract address. **Without this step, the identity oracle will silently ignore all revocations performed through the revocation registry.**
-5. **Call `set_identity_oracle` on CreditOracle** (optional) â€” Pass the deployed IdentityOracle contract address to enable live cross-contract VC count lookups. Without this, CreditOracle falls back to cached VC counts set by a trusted feeder.
-6. **Register issuers, feeders, and lenders** â€” After the admin path has been verified.
+1. **Deploy CreditOracle** — The credit scoring contract. Sets admin and default scoring weights.
+2. **Deploy IdentityOracle** — The identity/credential contract. Sets admin only.
+3. **Deploy RevocationRegistry** — The global revocation registry. Sets admin only.
+4. **Initialize Contracts** — Calls `initialize` on all three contracts to securely set the admin state.
+5. **Call `set_revocation_registry` on IdentityOracle** — Passes the deployed RevocationRegistry contract address. The script validates that this step completes successfully. **Without this step, the protocol would silently ignore all global revocations and produce broken state.**
+6. **Call `set_identity_oracle` on CreditOracle** — Passes the deployed IdentityOracle contract address to enable live cross-contract VC count lookups.
+7. **Verify Deployment** — Automatically runs `scripts/verify-deployment.sh` to confirm proper network links.
 
 ### Failure modes when registry is missing
 
 | Scenario | Behavior | Severity |
 |----------|----------|----------|
-| RevocationRegistry deployed but NOT linked via `set_revocation_registry` | `is_verified`, `get_active_vc_count`, and `verify_vc` silently skip cross-contract revocation checks. Registry revocations are **ignored**. | High â€” silent data inconsistency |
-| IdentityOracle used without any revocation mechanism | `mark_vc_revoked` still works for local revocations, but global registry revocations are not checked. | Medium â€” partial revocation support |
-| `set_revocation_registry` called with wrong address | Cross-contract calls fail, causing `is_verified`/`get_active_vc_count`/`verify_vc` to panic on invocation. Call `set_revocation_registry` again with the correct address to fix. | High â€” runtime failures |
+| RevocationRegistry deployed but NOT linked via `set_revocation_registry` | `is_verified`, `get_active_vc_count`, and `verify_vc` silently skip cross-contract revocation checks. Registry revocations are **ignored**. | High — silent data inconsistency |
+| IdentityOracle used without any revocation mechanism | `mark_vc_revoked` still works for local revocations, but global registry revocations are not checked. | Medium — partial revocation support |
+| `set_revocation_registry` called with wrong address | Cross-contract calls fail, causing `is_verified`/`get_active_vc_count`/`verify_vc` to panic on invocation. Call `set_revocation_registry` again with the correct address to fix. | High — runtime failures |
 
 ### Verification after configuration
 
-After completing the deployment order, verify the configuration:
+After completing the deployment process, you can manually verify the configuration:
 
 ```bash
 # Check that revocation registry is linked
@@ -50,15 +51,13 @@ stellar contract invoke \
   -- get_revocation_registry
 # Should return the revocation-registry contract address, not "null"
 
-# Check that identity oracle is linked (optional)
+# Check that identity oracle is linked
 stellar contract invoke \
   --id <CREDIT_ORACLE_ID> \
   --network mainnet \
   -- get_identity_oracle
 # Should return the identity-oracle contract address, or "null" if not configured
 ```
-
-
 
 ## Mainnet deployment workflow
 
@@ -71,11 +70,12 @@ Treat mainnet deployment as a controlled operations exercise. The deployment ord
 2. Complete the pre-deployment checklist.
    - Confirm the security audit is complete, the code is pinned, and the deployment artifact is reproducible.
    - Review the initial scoring weights and the timelock window before deployment.
-3. Deploy the contracts.
+3. Deploy and wire the contracts.
    - Run the deployment script with the target network set explicitly:
-     `NETWORK=mainnet bash scripts/deploy.sh --resume`
-   - The script writes the deployment addresses to `deployments.mainnet.json` and preserves previously deployed contracts when resumed.
-4. Configure the live deployment.
+     `ADMIN=your_admin_key NETWORK=mainnet bash scripts/deploy.sh --resume`
+   - The script is idempotent; it automatically skips already-deployed contracts and successfully-wired links if interrupted. If a wiring step fails, the script will exit immediately and print the failed step.
+   - The script writes intermediate deployment addresses to `deployments.mainnet.json`.
+4. Monitor the live deployment.
    - Record the three contract addresses, the admin account, and the WASM hashes in a protected runbook.
    - Register the initial issuers, feeders, and lenders only after the admin approval path has been verified.
 5. Verify the deployment.
@@ -147,12 +147,54 @@ If deployment or initialization produces the wrong state:
 - [ ] Issuer registration, VC anchoring, and score computation work end-to-end on testnet
 - [ ] Cross-contract calls (if Phase 3 is deployed) are tested under load
 - [ ] Rollback or emergency pause procedures are documented
+- [ ] The `smoke-test` CI job (see below) is passing on `main` against the recorded testnet addresses
+
+#### Automated testnet smoke test (CI)
+
+Every push to `main` runs a `smoke-test` job in `.github/workflows/ci.yml` that
+guards against a stale `deployments.testnet.json`. The job:
+
+1. Reads the `identity-oracle`, `credit-oracle`, and `revocation-registry`
+   addresses from `deployments.testnet.json`.
+2. Skips automatically if every address is still the `CXXXXXXX...`
+   placeholder (i.e. nothing has been deployed yet).
+3. Otherwise invokes a cheap, read-only, argument-free view function on each
+   deployed contract via `stellar contract invoke --network testnet`
+   (`get_revocation_registry`, `get_scoring_weights`, and `get_batch_limit`
+   respectively) to confirm it is actually live on testnet.
+4. Reports a PASS/FAIL/SKIP line per contract.
+
+Because the Stellar testnet RPC can be rate-limited or briefly unavailable,
+each invocation has a timeout (`INVOKE_TIMEOUT_SECS`, default 30s) and the job
+itself is marked `continue-on-error: true` so a transient testnet outage never
+blocks the main CI pipeline. A red `smoke-test` run should still be treated as
+a signal to double-check `deployments.testnet.json` before relying on it â€”
+see `scripts/smoke-test-testnet.sh` for the underlying logic, which can also
+be run locally:
+
+```bash
+NETWORK=testnet bash scripts/smoke-test-testnet.sh deployments.testnet.json
+```
 
 ---
 
 ## Admin key ceremony
 
 The admin key is the single point of control for both contract upgrades and operational configuration (weight changes, issuer registration). Compromising it allows an attacker to steal all VC data, inject false scores, or lock legitimate users out of the protocol. Protecting the admin key is critical.
+
+### Key Management Asymmetry (Deployer vs. Admin)
+
+Because the deployment script now handles both deployment and cross-contract configuration natively, you must be aware of the key management asymmetry:
+- Deployment uses the `SOURCE` key (the deployer) to pay for the transaction and upload the WASM to the network.
+- Wiring calls (e.g., `set_revocation_registry`, `set_identity_oracle`) require the Admin key to authorize the transaction.
+
+If these keys differ according to your security posture, you must provide both to the script:
+```bash
+export SOURCE="deployer_key_alias"
+export ADMIN="admin_key_alias"
+./scripts/deploy.sh --network mainnet
+```
+If `ADMIN` is not explicitly set in the environment, the script will default to passing your `SOURCE` key to fulfill wiring authorizations.
 
 ### Admin key generation
 

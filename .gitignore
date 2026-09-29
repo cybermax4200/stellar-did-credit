@@ -9,6 +9,7 @@ contracts/**/test_snapshots/tests/proptest_*.json
 node_modules/
 dist/
 coverage/
+**/pkg/
 .env
 .env.local
 .env.*.local

@@ -84,7 +84,7 @@ graph TB
 
 ## Contracts
 
-The protocol is composed of four Soroban smart contracts deployed on the Stellar network.
+The protocol is composed of five Soroban smart contracts deployed on the Stellar network.
 
 ### identity-oracle
 
@@ -96,12 +96,18 @@ Manages decentralized identifiers and verifiable credential anchoring.
 | `register_issuer(admin, issuer)`            | Adds a trusted VC issuer                        |
 | `deregister_issuer(admin, issuer)`          | Revokes a trusted issuer (existing VCs persist) |
 | `anchor_did(subject, did_doc_cid)`          | Stores the IPFS CID of a DID document           |
+| `get_did_document(subject)`                 | Returns the anchored DID document CID           |
+| `deactivate_did(subject)`                   | Deactivates DID, removes DID doc CID, and revokes VCs (`DIDDeact`) |
+| `deactivate_identity(subject)`              | Suspends identity & revokes VCs, retaining DID doc CID (`IdDeact`) |
+| `reactivate_identity(subject)`              | Restores active identity status (clears deactivation flag; `IdReact`) |
+| `is_deactivated(subject)`                   | Returns true if subject identity is deactivated |
 | `anchor_vc(issuer, subject, vc_hash)`       | Anchors a VC hash from a trusted issuer         |
 | `is_verified(subject)`                      | Returns true if subject has ≥ 1 non-revoked VC  |
 | `get_vc_count(subject)`                     | Returns the total number of anchored VCs, including revoked ones |
 | `get_active_vc_count(subject)`              | Returns the number of non-revoked VCs — the count used internally by `compute_score` |
 | `verify_vc(subject, vc_hash)`               | Checks if a specific VC hash is valid           |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | Marks a VC as revoked                           |
+| `list_revoked_for_subject(subject)`         | Returns the VC hashes revoked for a subject     |
 | `upgrade(admin, new_wasm_hash)`             | Upgrades the contract WASM in-place             |
 
 > **Note for feeders and lenders:** Use `get_active_vc_count` when you need the VC count used for scoring. `get_vc_count` includes revoked VCs and will return a higher number than what `compute_score` actually uses.
@@ -117,8 +123,10 @@ Computes and stores credit scores based on on-chain data.
 | `deregister_feeder(admin, feeder)`                   | Revokes a trusted feeder (no retroactive effect)   |
 | `register_lender(admin, lender)`                     | Registers a trusted lender for repayment recording |
 | `deregister_lender(admin, lender)`                   | Revokes a trusted lender (no retroactive effect)   |
+| `list_feeders()`                                     | Returns all currently registered feeders           |
+| `list_lenders()`                                     | Returns all currently registered lenders           |
 | `update_tx_stats(feeder, subject, stats)`            | Updates 30-day transaction statistics              |
-| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome                   |
+| `record_repayment(lender, subject, amount, on_time)` | Records a loan repayment outcome. Returns InvalidAmount if amount ≤ 0. |
 | `compute_score(subject)`                             | Computes and persists the credit score             |
 | `get_score(subject)`                                 | Returns the latest ScoreRecord                     |
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
@@ -129,31 +137,42 @@ Computes and stores credit scores based on on-chain data.
 
 On-chain proposal creation, weighted voting, and multi-step execution for updating credit-oracle scoring weights. Voting power is assigned by the contract admin (admin-registered voters, not token-weighted). Full documentation: [docs/governance.md](docs/governance.md).
 
-| Function                                                     | Description                                              |
-| ------------------------------------------------------------ | -------------------------------------------------------- |
-| `initialize(admin, credit_oracle, quorum_required)`          | Sets admin, oracle address, and default quorum           |
-| `accept_oracle_admin()`                                       | Accepts credit-oracle admin role (two-step transfer)     |
-| `create_proposal(proposer, weights, voting_period, delay)`   | Creates a weight-update proposal; returns proposal ID    |
-| `vote(voter, proposal_id, vote_for, vote_weight)`            | Casts a weighted vote on an open proposal                |
-| `execute(proposal_id)`                                        | After expiry + delay, queues weights in credit-oracle    |
-| `apply_weights()`                                             | Finalizes queued weights after credit-oracle timelock    |
-| `register_voter(admin, voter, weight)`                       | Admin registers a voter with a weight                    |
-| `update_voter_weight(admin, voter, weight)`                  | Admin updates or deregisters a voter (weight = 0)        |
-| `set_quorum(admin, quorum_required)`                         | Admin sets the default quorum for future proposals       |
-| `get_proposal(proposal_id)`                                  | Returns a proposal by ID                                 |
-| `cancel(canceller, proposal_id, reason)`                     | Emits a cancellation event (stub — no on-chain effect)   |
+| Function                                                   | Description                                            |
+| ---------------------------------------------------------- | ------------------------------------------------------ |
+| `initialize(admin, credit_oracle, quorum_required)`        | Sets admin, oracle address, and default quorum         |
+| `accept_oracle_admin()`                                    | Accepts credit-oracle admin role (two-step transfer)   |
+| `create_proposal(proposer, weights, voting_period, delay)` | Creates a weight-update proposal; returns proposal ID  |
+| `vote(voter, proposal_id, vote_for, vote_weight)`          | Casts a weighted vote on an open proposal              |
+| `execute(proposal_id)`                                     | After expiry + delay, queues weights in credit-oracle  |
+| `apply_weights()`                                          | Finalizes queued weights after credit-oracle timelock  |
+| `register_voter(admin, voter, weight)`                     | Admin registers a voter with a weight                  |
+| `update_voter_weight(admin, voter, weight)`                | Admin updates or deregisters a voter (weight = 0)      |
+| `set_quorum(admin, quorum_required)`                       | Admin sets the default quorum for future proposals     |
+| `get_proposal(proposal_id)`                                | Returns a proposal by ID                               |
+| `list_voters()`                                            | Returns all registered voters with their current weights. |
+| `cancel_proposal(canceller, proposal_id)`                  | Proposer/admin cancels; sets `cancelled: bool`, blocks further voting/execution |
 
 ### revocation-registry
 
-Maintains an on-chain list of revoked credential hashes.
+Maintains an on-chain list of revoked credential hashes. Revocation status is keyed only by `vc_hash`; the `subject` parameter of `revoke` is forwarded to the linked identity-oracle (`mark_vc_revoked`) so per-subject revocations can be queried via `list_revoked_for_subject(subject)` on the identity-oracle contract.
 
 | Function                          | Description                                     |
 | --------------------------------- | ----------------------------------------------- |
 | `initialize(admin)`               | Sets the contract admin                         |
-| `revoke(issuer, vc_hash)`         | Revokes a credential by hash                    |
+| `revoke(issuer, subject, vc_hash)` | Revokes a credential by hash; `subject` updates the linked identity-oracle's per-subject record |
 | `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
 | `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
+| `list_revoked_for_issuer(issuer)` | Returns all VC hashes revoked by the issuer    |
 | `upgrade(admin, new_wasm_hash)`   | Upgrades the contract WASM in-place             |
+
+### score-range-verifier
+
+Verifies zero-knowledge proofs that a committed credit score falls within a specified range without revealing the exact score. The embedded verification key is currently a placeholder until the trusted setup is complete; it must be replaced before mainnet deployment.
+
+| Function                             | Description                  |
+| ------------------------------------ | ---------------------------- |
+| `initialize(admin)`                  | Initializes the verifier     |
+| `verify_proof(proof, public_inputs)` | Verifies a score-range proof |
 
 ---
 
@@ -173,12 +192,19 @@ Full deployment record: [deployments.testnet.json](deployments.testnet.json). Ru
 
 ## Scoring formula
 
-The credit score ranges from 300 (no history) to 850 (exceptional). It is computed from three weighted components:
+The credit score ranges from 300 (no history) to 850 (exceptional). It is computed from three weighted components, exactly as implemented by `compute_score_pure` in `contracts/credit-oracle/src/lib.rs` (all arithmetic uses integer division with truncation):
 
 ```
-vc_score    = min(vc_count × 20, 100)
-tx_score    = min(volume_30d_stroops ÷ 100_000_000, 100)   # 1 point per XLM, cap 100
-repay_score = (on_time_count × 10000 ÷ total_count) ÷ 100  # 0–100, integer division
+vc_points            = vc_count × 20                          # 20 points per verified VC
+vc_score             = min(vc_points, 100)
+
+volume_score         = clamp(volume_30d_stroops ÷ 100_000_000, 0, 80)   # 1 point per XLM, cap 80
+counterparty_bonus   = min(avg_counterparties ÷ 5, 20)                  # 1 point per 5 counterparties, cap 20
+tx_score             = min(volume_score + counterparty_bonus, 100)
+
+repayment_rate_score   = (on_time_count × 10000 ÷ total_count) ÷ 100   # 0–100; 0 when total_count = 0
+repayment_volume_score = clamp(total_repaid_stroops ÷ 100_000_000, 0, 100)  # 1 point per XLM, cap 100
+repay_score            = (repayment_rate_score + repayment_volume_score) ÷ 2
 
 composite   = (vc_score × vc_weight
              + tx_score × tx_weight
@@ -187,17 +213,17 @@ composite   = (vc_score × vc_weight
 final_score = clamp(300 + composite × 550 ÷ 100, 300, 850)
 ```
 
-Default weights: `vc_weight = 40`, `tx_weight = 30`, `repayment_weight = 30`
+Default weights: `vc_weight = 40`, `tx_weight = 30`, `repayment_weight = 30` (governed on-chain via `docs/governance.md`)
 
 **Example scores** (all arithmetic uses integer division, matching the contract):
 
-| Profile     | VCs | 30d Volume | Repayment rate | Score |
-| ----------- | --- | ---------- | -------------- | ----- |
-| New user    | 0   | 0 XLM      | —              | 300   |
-| Early stage | 1   | 5 XLM      | 70%            | 465   |
-| Established | 2   | 20 XLM     | 85%            | 558   |
-| Strong      | 3   | 50 XLM     | 95%            | 668   |
-| Exceptional | 5   | 100+ XLM   | 100%           | 850   |
+| Profile     | VCs | 30d Volume | Total repaid | Counterparties | Repayment rate | Score |
+| ----------- | --- | ---------- | ------------ | -------------- | -------------- | ----- |
+| New user    | 0   | 0 XLM      | 0 XLM        | 0              | —              | 300   |
+| Early stage | 1   | 5 XLM      | 5 XLM        | 0              | 70%            | 410   |
+| Established | 2   | 20 XLM     | 20 XLM       | 0              | 85%            | 503   |
+| Strong      | 3   | 50 XLM     | 50 XLM       | 5              | 95%            | 630   |
+| Exceptional | ≥5  | 100+ XLM   | 100+ XLM     | 100+           | 100%           | 850   |
 
 Full formula documentation with worked examples: [docs/scoring-spec.md](docs/scoring-spec.md)
 
@@ -318,7 +344,7 @@ stellar-did-credit/
 
 ## TypeScript SDK
 
-The `@stellar-did-credit/sdk` package provides a typed client for interacting with the core protocol contracts from a TypeScript application. The governance contract can be called through the same generic Soroban RPC client using the function signatures in [docs/governance.md](docs/governance.md).
+The `@stellar-did-credit/sdk` package provides a typed client for interacting with the core protocol contracts from a TypeScript application. Configure `governanceId` to use the proposal, voting, execution, and weight-application helpers through `sdk.governance`.
 
 ````typescript
 import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
@@ -348,11 +374,11 @@ if (score) {
 | Method                           | Status         |
 | -------------------------------- | -------------- |
 | `getScore(address)`              | ✅ Implemented |
-| `isVerified(address)`            | 🚧 Open        |
-| `anchorDID(keypair, cid)`        | 🚧 Open        |
-| `issueVC(issuer, subject, hash)` | 🚧 Open        |
+| `isVerified(address)`            | ✅ Implemented |
+| `anchorDID(keypair, cid)`        | ✅ Implemented |
+| `issueVC(issuer, subject, hash)` | ✅ Implemented |
 | `verifyVC(subject, hash)`        | ✅ Implemented |
-| `revokeVC(issuer, hash)`         | 📋 Planned     |
+| `revokeVC(issuer, hash)`         | ✅ Implemented |
 
 ---
 
@@ -366,6 +392,33 @@ A feeder is a registered off-chain service that periodically calls two credit-or
 | ---- | ------------ |
 | `set_vc_count(feeder, subject, count)` | **Deprecated**: Caches the active VC count. Use cross-contract lookup via `set_identity_oracle` instead. |
 | `update_tx_stats(feeder, subject, stats)` | Pushes 30-day Horizon payment stats (volume, tx count, counterparties) |
+
+### Migration path for set_vc_count deprecation
+
+The `set_vc_count` function is deprecated in favor of cross-contract VC count lookup via the identity-oracle. When the credit-oracle has an identity-oracle configured via `set_identity_oracle`, the feeder will automatically skip `set_vc_count` calls and a deprecation warning event (`VcCntDep`) will be emitted if the function is still called.
+
+#### For feeder operators:
+
+1. **No immediate action required** — The feeder automatically detects when cross-contract lookup is configured and skips `set_vc_count` calls.
+
+2. **Optional explicit configuration** — Add `skipLegacyVcCount: true` to your `FeederConfig` to explicitly disable `set_vc_count` calls regardless of identity-oracle configuration:
+
+```typescript
+const config: FeederConfig = {
+  // ... other config
+  skipLegacyVcCount: true,  // Explicitly skip set_vc_count calls
+};
+```
+
+3. **Monitor deprecation events** — Watch for `VcCntDep` events if you're still calling `set_vc_count` on an oracle with identity-oracle configured. These indicate redundant calls that should be eliminated.
+
+#### For credit-oracle operators:
+
+1. **Phase 1** — Deploy and configure identity-oracle via `set_identity_oracle`
+2. **Phase 2** — Feeders automatically stop calling `set_vc_count`
+3. **Phase 3** — Future contract version will remove `set_vc_count` entirely
+
+The migration is backward-compatible — existing feeders continue to work without modification.
 
 ### Prerequisites
 
@@ -436,6 +489,7 @@ await feeder.runCycle();
 | identity-oracle         | ✅ Complete    | All functions implemented and tested |
 | credit-oracle           | ✅ Complete    | Scoring formula live on testnet      |
 | revocation-registry     | ✅ Complete    | Batch revocation supported           |
+| score-range-verifier    | 🚧 In progress | Placeholder VK; real trusted setup required before testnet use. |
 | TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
 | Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
 | CLI tool                | ✅ Complete    | `packages/cli`                       |
@@ -448,12 +502,36 @@ await feeder.runCycle();
 | credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                      |
 | revocation-registry     | ✅ Complete    | Batch revocation supported                                           |
 | governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
-| TypeScript SDK          | 🚧 In progress | `getScore` done, governance helpers and rest open                    |
+| score-range-verifier    | 🚧 In progress | Placeholder VK; real trusted setup required before testnet use.     |
+| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available |
 | Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                  |
 | CLI tool                | 📋 Planned     |                                                                      |
 | Cross-contract vc_count | 📋 Planned     |                                                                      |
 | ZK proof layer          | 📋 Research    |                                                                      |
 | Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future |
+| Component               | Status         | Notes                                                                                         |
+| ----------------------- | -------------- | --------------------------------------------------------------------------------------------- |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
+| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open                                                                    |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
+| CLI tool                | ✅ Complete    | `packages/cli`                                                                                |
+| Cross-contract vc_count | 📋 Planned     |                                                                                               |
+| ZK proof layer          | 📋 Research    |                                                                                               |
+| Governance contract     | 📋 Planned     |                                                                                               |
+| Component               | Status         | Notes                                                                                         |
+| ----------------------- | -------------- | --------------------------------------------------------------------                          |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
+| governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
+| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available                           |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
+| CLI tool                | 📋 Planned     |                                                                                               |
+| Cross-contract vc_count | 📋 Planned     |                                                                                               |
+| ZK proof layer          | 📋 Research    |                                                                                               |
+| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future                         |
 
 ---
 
@@ -490,14 +568,15 @@ Contract IDs are loaded from (in order of precedence):
 
 #### Environment variables
 
-| Variable                 | Description                              |
-| ------------------------ | ---------------------------------------- |
-| `IDENTITY_ORACLE_ID`     | identity-oracle contract address         |
-| `CREDIT_ORACLE_ID`       | credit-oracle contract address           |
-| `REVOCATION_REGISTRY_ID` | revocation-registry contract address     |
+| Variable                 | Description                                   |
+| ------------------------ | --------------------------------------------- |
+| `IDENTITY_ORACLE_ID`     | identity-oracle contract address              |
+| `CREDIT_ORACLE_ID`       | credit-oracle contract address                |
+| `REVOCATION_REGISTRY_ID` | revocation-registry contract address          |
+| `GOVERNANCE_ID`          | governance contract address                   |
 | `NETWORK_PASSPHRASE`     | Stellar network passphrase (default: testnet) |
-| `RPC_URL`                | Soroban RPC endpoint (default: testnet)  |
-| `SIM_ACCOUNT`            | Funded account for read-only simulations |
+| `RPC_URL`                | Soroban RPC endpoint (default: testnet)       |
+| `SIM_ACCOUNT`            | Funded account for read-only simulations      |
 
 #### Config file
 
@@ -508,6 +587,7 @@ Create a `stellar-did-config.json` file:
   "identityOracleId": "C...",
   "creditOracleId": "C...",
   "revocationRegistryId": "C...",
+  "governanceId": "C...",
   "networkPassphrase": "Test SDF Network ; September 2015",
   "rpcUrl": "https://soroban-testnet.stellar.org"
 }
@@ -520,7 +600,8 @@ You can also use a `deployments.testnet.json`-style file with a `contracts` bloc
   "contracts": {
     "identity-oracle": "C...",
     "credit-oracle": "C...",
-    "revocation-registry": "C..."
+    "revocation-registry": "C...",
+    "governance": "C..."
   }
 }
 ```
@@ -539,9 +620,34 @@ stellar-did anchor-did YOUR_STELLAR_SECRET_KEY QmExampleCid123
 ```
 
 **Output:**
+
 ```
 Anchoring DID for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
   DID Doc CID: QmExampleCid123
+
+Success!
+  Transaction: abc123def456...
+  Explorer:    https://stellar.expert/explorer/testnet/tx/abc123def456...
+```
+
+#### `anchor-vc` — Anchor a Verifiable Credential
+
+Anchors a verifiable credential hash on-chain. Must be executed by a registered trusted issuer.
+
+```bash
+stellar-did anchor-vc <issuer-secret> <subject-address> <vc-hash> [--type <type>]
+
+# Example
+stellar-did anchor-vc YOUR_STELLAR_SECRET_KEY GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2 --type kyc
+```
+
+**Output:**
+
+```
+Anchoring VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX on testnet...
+  Issuer:  GYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY
+  VC Hash: a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2
+  Type:    kyc
 
 Success!
   Transaction: abc123def456...
@@ -563,6 +669,7 @@ stellar-did get-score --json GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 **Output:**
+
 ```
 Fetching credit score for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
 
@@ -572,7 +679,7 @@ Fetching credit score for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 │  VC Count:                       3  │
 │  Repayment Rate:            8000 bps│
 │  TX Volume (30d):    1000.0000000 XLM│
-│  Previous Score:               558  │
+│  Previous Score:               503  │
 │  Computed at Ledger:       1234567  │
 │  Last Updated:      2026-07-01T00...│
 │  Stale:                      false  │
@@ -591,6 +698,7 @@ stellar-did verify-vc GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 ```
 
 **Output:**
+
 ```
 Verifying VC for GXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX...
   VC Hash: a1b2c3d4...
@@ -675,6 +783,57 @@ stellar-did compute-score --json YOUR_STELLAR_SECRET_KEY G...
 ```
 
 **Output:** (same format as `get-score`)
+
+#### `governance` — Protocol Governance
+
+Provides subcommands to create proposals, vote, execute, and apply weight changes. Requires `GOVERNANCE_ID` to be configured.
+
+**Create a proposal**
+
+```bash
+stellar-did governance create-proposal <proposer-secret> <vc-weight> <tx-weight> <repay-weight> [--voting-period <ledgers>] [--delay <ledgers>]
+
+# Example
+stellar-did governance create-proposal YOUR_STELLAR_SECRET_KEY 40 30 30
+```
+
+**Vote on a proposal**
+
+```bash
+stellar-did governance vote <voter-secret> <proposal-id> <for|against> <weight>
+
+# Example
+stellar-did governance vote YOUR_STELLAR_SECRET_KEY 1 for 100
+```
+
+**Execute a proposal**
+Queues a passing proposal's weights in the credit-oracle.
+
+```bash
+stellar-did governance execute <payer-secret> <proposal-id>
+```
+
+**Apply weights**
+Applies queued weights after the credit-oracle timelock expires (~24 hours).
+
+```bash
+stellar-did governance apply-weights <payer-secret>
+```
+
+**Show a proposal**
+
+```bash
+stellar-did governance show <proposal-id>
+
+# Example
+stellar-did governance show 1
+```
+
+**List proposals**
+
+```bash
+stellar-did governance list [--from <id>] [--limit <n>]
+```
 
 ---
 

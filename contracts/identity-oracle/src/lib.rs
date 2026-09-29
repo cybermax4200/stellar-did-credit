@@ -102,7 +102,15 @@ pub enum IdentityOracleError {
     ContractPaused = 8,
     /// The provided revocation registry contract is invalid or did not respond.
     InvalidRevocationRegistry = 9,
+    /// The subject has reached the maximum number of active VCs allowed.
+    VCLimitReached = 10,
+    /// The issuer tier weight is not within the valid range.
+    InvalidIssuerTier = 11,
 }
+
+/// Maximum number of active (non-revoked) VCs a subject can have anchored.
+/// Prevents unbounded Vec growth and gas exhaustion on read paths.
+const MAX_VCS_PER_SUBJECT: u32 = 100;
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -165,6 +173,12 @@ pub enum DataKey {
     /// When set to `true`, `is_verified` returns `false` and credit scores
     /// are suppressed. Reversible via `reactivate_identity`.
     Deactivated(Address),
+    /// Ledger sequence number when the subject's on-chain identity state last
+    /// changed (DID anchored/updated, VC anchored or revoked, or identity
+    /// deactivated/reactivated). Written on every identity mutation so the
+    /// credit-oracle can stamp cached scores stale when
+    /// `ScoreRecord.computed_at_ledger < get_last_state_change_ledger`.
+    LastStateChange(Address),
 }
 
 /// An on-chain anchor record for a verifiable credential.
@@ -188,6 +202,9 @@ const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
+
+/// Maximum allowed CID length in bytes.
+pub const MAX_CID_LENGTH: u32 = 128;
 
 fn generic_credential_type(_env: &Env) -> Symbol {
     symbol_short!("generic")
@@ -214,18 +231,23 @@ fn store_credential_type(
         .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
-/// Returns true if `s` starts with `prefix` by comparing their leading bytes on the stack.
-/// `prefix` must be ≤ 32 bytes.
+/// Returns true if `s` starts with `prefix`.
+///
+/// Uses `copy_into_slice` — the only byte-level accessor on
+/// `soroban_sdk::String` in SDK v22 — to extract the relevant bytes into a
+/// fixed-size stack buffer before comparing.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
     let plen = prefix.len() as usize;
-    if (s.len() as usize) < plen {
+    let slen = s.len() as usize;
+    if slen < plen {
         return false;
     }
-    let mut sbuf = [0u8; 64];
-    let mut pbuf = [0u8; 32];
-    s.copy_into_slice(&mut sbuf[..s.len() as usize]);
-    prefix.copy_into_slice(&mut pbuf[..plen]);
-    sbuf[..plen] == pbuf[..plen]
+    // Stack buffers sized to the maximum CID length we ever accept.
+    let mut s_buf = [0u8; MAX_CID_LENGTH as usize];
+    let mut p_buf = [0u8; MAX_CID_LENGTH as usize];
+    s.copy_into_slice(&mut s_buf[..slen]);
+    prefix.copy_into_slice(&mut p_buf[..plen]);
+    s_buf[..plen] == p_buf[..plen]
 }
 
 #[contract]
@@ -329,9 +351,11 @@ fn compute_active_vc_count(env: &Env, subject: &Address) -> u32 {
 
 fn seed_active_vc_count(env: &Env, subject: &Address) -> u32 {
     let count = compute_active_vc_count(env, subject);
+    let key = DataKey::ActiveVCCount(subject.clone());
+    env.storage().persistent().set(&key, &count);
     env.storage()
         .persistent()
-        .set(&DataKey::ActiveVCCount(subject.clone()), &count);
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
     count
 }
 
@@ -339,6 +363,85 @@ fn load_active_vc_count(env: &Env, subject: &Address) -> Option<u32> {
     env.storage()
         .persistent()
         .get(&DataKey::ActiveVCCount(subject.clone()))
+}
+
+/// Record the current ledger sequence as the last identity-state change for
+/// `subject`.
+///
+/// Called by every mutating path (`anchor_did`, `anchor_vc_typed`,
+/// `mark_vc_revoked`, `deactivate_core`, `reactivate_identity`) so consumers
+/// such as the credit-oracle's `get_score` can detect cached scores computed
+/// before the most recent identity mutation.
+fn record_last_state_change(env: &Env, subject: &Address) {
+    let ledger = env.ledger().sequence();
+    let key = DataKey::LastStateChange(subject.clone());
+    env.storage().persistent().set(&key, &ledger);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+}
+
+/// Shared core logic for both `deactivate_did` and `deactivate_identity`.
+///
+/// 1. Sets the `Deactivated` flag so `is_deactivated` returns `true` and
+///    `is_verified` / credit scoring are suppressed, regardless of which
+///    of the two public entry points was used.
+/// 2. Marks every anchored VC for the subject as revoked.
+/// 3. Zeroes the cached active-VC count.
+/// 4. Bumps the `total_vcs_revoked` protocol stat.
+///
+/// Does **not** touch the DID document CID or emit any event — callers are
+/// responsible for those two pieces, since that's the only place the two
+/// public functions actually differ.
+///
+/// Returns the number of VCs that transitioned from active to revoked.
+fn deactivate_core(env: &Env, subject: &Address) -> u32 {
+    // 1. Set the Deactivated flag
+    let flag_key = DataKey::Deactivated(subject.clone());
+    env.storage().persistent().set(&flag_key, &true);
+    env.storage()
+        .persistent()
+        .extend_ttl(&flag_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+    // 2. Revoke all VCs anchored for this subject
+    let key = DataKey::VCAnchors(subject.clone());
+    let anchors: Vec<VCRecord> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+
+    let mut updated = Vec::new(env);
+    let mut revoked_count: u32 = 0;
+    for mut record in anchors.iter() {
+        if !record.revoked {
+            revoked_count += 1;
+        }
+        record.revoked = true;
+        updated.push_back(record);
+    }
+
+    if !anchors.is_empty() {
+        env.storage().persistent().set(&key, &updated);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    }
+
+    if revoked_count > 0 {
+        increment_vcs_revoked(env, revoked_count as u64);
+    }
+
+    // 3. Clear cached active VC count
+    let active_key = DataKey::ActiveVCCount(subject.clone());
+    env.storage().persistent().set(&active_key, &0u32);
+    env.storage()
+        .persistent()
+        .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+    record_last_state_change(env, subject);
+
+    revoked_count
 }
 
 #[contractimpl]
@@ -355,7 +458,7 @@ impl IdentityOracle {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events()
-            .publish((symbol_short!("Init"),), admin.clone());
+            .publish((Symbol::new(&env, "Initialized"),), admin.clone());
         Ok(())
     }
 
@@ -488,10 +591,8 @@ impl IdentityOracle {
     ///
     /// Does NOT retroactively revoke existing VCs anchored by this issuer.
     ///
-    /// This is a single tombstone write (`TrustedIssuer(issuer) = false`) —
-    /// it does not touch `IssuersIndex`, so cost does not scale with the
-    /// number of registered issuers. `list_issuers` is what hides
-    /// deregistered issuers from the returned set.
+    /// The issuer is tombstoned and removed from `IssuersIndex` by rebuilding
+    /// the index from the remaining trusted issuer flags.
     ///
     /// Auth: admin only — verified via `require_admin`.
     pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
@@ -536,6 +637,11 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .set(&DataKey::IssuersIndex, &compacted);
+        env.storage().persistent().extend_ttl(
+            &DataKey::IssuersIndex,
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         env.events().publish((symbol_short!("IssDeReg"),), issuer);
         Ok(())
@@ -567,7 +673,7 @@ impl IdentityOracle {
         subject.require_auth();
 
         let len = did_doc_cid.len();
-        if len < 7 {
+        if !(7..=MAX_CID_LENGTH).contains(&len) {
             return Err(IdentityOracleError::InvalidCID);
         }
 
@@ -592,6 +698,7 @@ impl IdentityOracle {
             PERS_TTL_THRESHOLD,
             PERS_TTL_EXTEND,
         );
+        record_last_state_change(&env, &subject);
         increment_dids_anchored(&env);
         env.events()
             .publish((symbol_short!("DIDAnch"),), (subject, did_doc_cid));
@@ -605,49 +712,38 @@ impl IdentityOracle {
             .get(&DataKey::DIDDocument(subject))
     }
 
-    /// Deactivate the subject's DID.
+    /// Deactivate the subject's DID. This is the **canonical, full**
+    /// deactivation path — prefer this over `deactivate_identity`
+    /// unless you specifically need to keep the DID document resolvable
+    /// (see that function's doc comment for when that applies).
     ///
-    /// 1. Revokes all active verifiable credentials anchored for the subject.
-    /// 2. Removes the anchored DID Document CID.
-    /// 3. Emits a `DIDDeact` event.
+    /// 1. Sets the same `Deactivated` flag used by `deactivate_identity`,
+    ///    so `is_deactivated` returns `true` and `is_verified` /
+    ///    credit scoring are suppressed for this subject via `credit-oracle`.
+    /// 2. Revokes all active verifiable credentials anchored for the subject.
+    /// 3. Removes the anchored DID Document CID entirely — after this call,
+    ///    `get_did_document` returns `None`.
+    /// 4. Emits a `DIDDeact` event.
+    ///
+    /// Reversible via `reactivate_identity`, which clears the `Deactivated`
+    /// flag but does **not** restore the removed DID document CID or any
+    /// revoked VCs — the subject must re-anchor a DID document (and their
+    /// issuers must re-anchor VCs) after reactivating.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
-        // 1. Revoke all VCs
-        let key = DataKey::VCAnchors(subject.clone());
-        let anchors: Vec<VCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+        // 1 & 2: shared with `deactivate_identity` — sets the Deactivated
+        // flag and revokes all anchored VCs.
+        deactivate_core(&env, &subject);
 
-        if !anchors.is_empty() {
-            let mut updated = Vec::new(&env);
-            let mut revoked_count: u64 = 0;
-            for mut record in anchors.iter() {
-                if !record.revoked {
-                    revoked_count += 1;
-                }
-                record.revoked = true;
-                updated.push_back(record);
-            }
-            env.storage().persistent().set(&key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-            if revoked_count > 0 {
-                increment_vcs_revoked(&env, revoked_count);
-            }
-        }
-
-        // 2. Remove DID Document
+        // 3. Remove DID Document
         env.storage()
             .persistent()
             .remove(&DataKey::DIDDocument(subject.clone()));
 
-        // 3. Emit event
+        // 4. Emit event
         env.events().publish((symbol_short!("DIDDeact"),), subject);
 
         Ok(())
@@ -698,6 +794,15 @@ impl IdentityOracle {
             }
         }
 
+        // Enforce active VC cap: revoked VCs do not count toward the limit.
+        let active_count: u32 = anchors
+            .iter()
+            .filter(|r| !r.revoked && !is_record_revoked(&env, r))
+            .count() as u32;
+        if active_count >= MAX_VCS_PER_SUBJECT {
+            return Err(IdentityOracleError::VCLimitReached);
+        }
+
         let record = VCRecord {
             vc_hash: vc_hash.clone(),
             issuer: issuer.clone(),
@@ -713,6 +818,7 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        record_last_state_change(&env, &subject);
 
         if let Some(mut active_count) = load_active_vc_count(&env, &subject) {
             if is_active {
@@ -720,9 +826,11 @@ impl IdentityOracle {
                     .checked_add(1)
                     .expect("active VC count overflow");
             }
+            let active_key = DataKey::ActiveVCCount(subject.clone());
+            env.storage().persistent().set(&active_key, &active_count);
             env.storage()
                 .persistent()
-                .set(&DataKey::ActiveVCCount(subject.clone()), &active_count);
+                .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         } else {
             seed_active_vc_count(&env, &subject);
         }
@@ -769,6 +877,7 @@ impl IdentityOracle {
 
         env.storage().persistent().set(&key, &updated);
         if transitioned_to_revoked {
+            record_last_state_change(&env, &subject);
             increment_vcs_revoked(&env, 1);
             if let Some(mut active_count) = load_active_vc_count(&env, &subject) {
                 active_count = active_count
@@ -802,13 +911,26 @@ impl IdentityOracle {
             .unwrap_or(false)
     }
 
-    /// Voluntarily deactivate a subject's identity.
+    /// Voluntarily deactivate a subject's identity **without** touching
+    /// their DID document.
     ///
-    /// 1. Sets a `Deactivated` flag in storage so `is_verified` returns
-    ///    `false` and credit scoring is suppressed.
+    /// Use this instead of `deactivate_did` only when the subject
+    /// wants to suppress verification and credit scoring while keeping
+    /// their DID document CID resolvable (e.g. `get_did_document` still
+    /// returns a value) — for example, a temporary suspension where the
+    /// document itself should remain publicly retrievable. For a full,
+    /// permanent-style deactivation, prefer `deactivate_did`.
+    ///
+    /// Shares its core logic with `deactivate_did` (see `deactivate_core`):
+    ///
+    /// 1. Sets the `Deactivated` flag in storage so `is_deactivated`
+    ///    returns `true` and `is_verified` / credit scoring are suppressed.
     /// 2. Marks **all** active VC anchors as revoked, making revocation
     ///    visible to query functions that check the on-chain revoked flag.
     /// 3. Returns the number of VCs that were transitioned to revoked.
+    ///
+    /// The only difference from `deactivate_did` is that the DID document
+    /// CID is left untouched.
     ///
     /// This is **reversible** via `reactivate_identity` (which clears the
     /// flag but does not restore previously-revoked VCs).
@@ -817,53 +939,9 @@ impl IdentityOracle {
     pub fn deactivate_identity(env: Env, subject: Address) -> u32 {
         subject.require_auth();
 
-        // 1. Set the Deactivated flag
-        env.storage()
-            .persistent()
-            .set(&DataKey::Deactivated(subject.clone()), &true);
-        env.storage()
-            .persistent()
-            .extend_ttl(&DataKey::Deactivated(subject.clone()), PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        let revoked_count = deactivate_core(&env, &subject);
 
-        // 2. Revoke all VCs anchored for this subject
-        let key = DataKey::VCAnchors(subject.clone());
-        let anchors: Vec<VCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        let mut updated = Vec::new(&env);
-        let mut revoked_count: u32 = 0;
-        for mut record in anchors.iter() {
-            if !record.revoked {
-                revoked_count += 1;
-            }
-            record.revoked = true;
-            updated.push_back(record);
-        }
-
-        if !anchors.is_empty() {
-            env.storage().persistent().set(&key, &updated);
-            env.storage()
-                .persistent()
-                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
-
-        if revoked_count > 0 {
-            increment_vcs_revoked(&env, revoked_count as u64);
-        }
-
-        // 3. Clear cached active VC count
-        let active_key = DataKey::ActiveVCCount(subject.clone());
-        env.storage()
-            .persistent()
-            .set(&active_key, &0u32);
-        env.storage()
-            .persistent()
-            .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-
-        // 4. Emit event
+        // Emit event
         env.events()
             .publish((symbol_short!("IdDeact"),), (subject, revoked_count));
 
@@ -872,9 +950,12 @@ impl IdentityOracle {
 
     /// Re-activate a previously deactivated identity.
     ///
-    /// Clears the `Deactivated` flag set by `deactivate_identity`. Does
-    /// **not** restore previously-revoked VCs — those remain revoked and
-    /// must be re-anchored by their original issuers.
+    /// Clears the `Deactivated` flag set by either `deactivate_did` or
+    /// `deactivate_identity`. Does **not** restore previously-revoked VCs
+    /// (those remain revoked and must be re-anchored by their original
+    /// issuers) and does **not** restore a DID document CID that was
+    /// removed by `deactivate_did` (the subject must call `anchor_did`
+    /// again). On-chain DID recovery is out of scope for this function.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn reactivate_identity(env: Env, subject: Address) {
@@ -883,6 +964,8 @@ impl IdentityOracle {
         env.storage()
             .persistent()
             .remove(&DataKey::Deactivated(subject.clone()));
+
+        record_last_state_change(&env, &subject);
 
         env.events()
             .publish((symbol_short!("IdReact"),), subject);
@@ -930,11 +1013,15 @@ impl IdentityOracle {
     }
 
     pub fn get_active_vc_count(env: Env, subject: Address) -> u32 {
-        if env.storage().instance().has(&DataKey::RevocationRegistryId) {
-            compute_active_vc_count(&env, &subject)
-        } else {
-            load_active_vc_count(&env, &subject).unwrap_or_else(|| seed_active_vc_count(&env, &subject))
+        let key = DataKey::ActiveVCCount(subject.clone());
+        if let Some(count) = env.storage().persistent().get(&key) {
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            return count;
         }
+
+        seed_active_vc_count(&env, &subject)
     }
 
     /// Returns active (non-revoked) VC anchor records for `subject`.
@@ -958,6 +1045,30 @@ impl IdentityOracle {
         active
     }
 
+    /// Returns the VC hashes of revoked VC anchor records for `subject`.
+    ///
+    /// A record counts as revoked if it was locally marked via
+    /// `mark_vc_revoked` (which the revocation registry calls from
+    /// `revoke(issuer, subject, vc_hash)`) or if the linked revocation
+    /// registry reports its hash as revoked. Complements `get_vc_details`,
+    /// which returns only the active records.
+    pub fn list_revoked_for_subject(env: Env, subject: Address) -> Vec<BytesN<32>> {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<VCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut revoked = Vec::new(&env);
+        for record in anchors.iter() {
+            if is_record_revoked(&env, &record) {
+                revoked.push_back(record.vc_hash);
+            }
+        }
+        revoked
+    }
+
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
     pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> Symbol {
         get_stored_credential_type(&env, &subject, &vc_hash)
@@ -978,7 +1089,7 @@ impl IdentityOracle {
             return Err(IdentityOracleError::NotAuthorized);
         }
         if weight_bps == 0 || weight_bps > MAX_ISSUER_TIER_BPS {
-            panic!("invalid issuer tier");
+            return Err(IdentityOracleError::InvalidIssuerTier);
         }
         env.storage()
             .instance()
@@ -1130,8 +1241,8 @@ impl IdentityOracle {
 
     /// Returns the currently registered (non-deregistered) trusted issuers.
     ///
-    /// `IssuersIndex` is append-only and may contain deregistered addresses,
-    /// so this filters it against each entry's live `TrustedIssuer` flag.
+    /// The index contains currently trusted issuers after deregistration
+    /// compaction; the flag check also keeps this safe for legacy indexes.
     pub fn list_issuers(env: Env) -> Vec<Address> {
         let ever_registered: Vec<Address> = env
             .storage()
@@ -1160,13 +1271,27 @@ impl IdentityOracle {
     pub fn get_protocol_stats(env: Env) -> ProtocolStats {
         load_protocol_stats(&env)
     }
+
+    /// Returns the ledger sequence number when the subject's on-chain identity
+    /// state last changed, or `None` if no change has ever been recorded.
+    ///
+    /// Tracked on every identity mutation (`anchor_did`, `anchor_vc`,
+    /// `mark_vc_revoked`, deactivation, reactivation). The credit-oracle uses
+    /// this to mark a cached score stale when
+    /// `ScoreRecord.computed_at_ledger < get_last_state_change_ledger(subject)`.
+    pub fn get_last_state_change_ledger(env: Env, subject: Address) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::LastStateChange(subject))
+    }
 }
 
 #[cfg(test)]
 #[allow(deprecated)]
 mod tests {
     use super::*;
-    use soroban_sdk::{testutils::{Address as _, Events}, TryIntoVal};
+    use soroban_sdk::testutils::storage::Persistent;
+    use soroban_sdk::testutils::{Address as _, Ledger};
 
     #[contract]
     pub struct MockRevocationRegistry;
@@ -1252,18 +1377,31 @@ mod tests {
 
         let issuer = Address::generate(&env);
         client.register_issuer(&issuer);
+
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number += PERS_TTL_EXTEND - PERS_TTL_THRESHOLD + 1;
+        });
+
         client.deregister_issuer(&issuer);
 
-        // Deregistration tombstones the flag (sets it false) rather than
-        // removing the key, so `deregister_issuer` never has to rewrite
-        // IssuersIndex.
-        let is_trusted: bool = env.as_contract(&contract_id, || {
-            env.storage()
-                .persistent()
-                .get(&DataKey::TrustedIssuer(issuer.clone()))
-                .unwrap_or(true)
-        });
+        let (is_trusted, index_ttl, index): (bool, u32, Vec<Address>) =
+            env.as_contract(&contract_id, || {
+            let index_key = DataKey::IssuersIndex;
+            (
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::TrustedIssuer(issuer.clone()))
+                    .unwrap_or(true),
+                env.storage().persistent().get_ttl(&index_key),
+                env.storage()
+                    .persistent()
+                    .get(&index_key)
+                    .unwrap_or(Vec::new(&env)),
+            )
+                    });
         assert!(!is_trusted);
+        assert!(index.is_empty());
+        assert!(index_ttl > PERS_TTL_THRESHOLD);
     }
 
     #[test]
@@ -1302,6 +1440,7 @@ mod tests {
 
         let issuer1 = Address::generate(&env);
         let issuer2 = Address::generate(&env);
+        let issuer3 = Address::generate(&env);
 
         assert_eq!(client.list_issuers(), Vec::new(&env));
 
@@ -1317,14 +1456,23 @@ mod tests {
             Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
         );
 
+        client.register_issuer(&issuer3);
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer1.clone(), issuer2.clone(), issuer3.clone()])
+        );
+
         client.register_issuer(&issuer1);
         assert_eq!(
             client.list_issuers(),
-            Vec::from_array(&env, [issuer1.clone(), issuer2.clone()])
+            Vec::from_array(&env, [issuer1.clone(), issuer2.clone(), issuer3.clone()])
         );
 
         client.deregister_issuer(&issuer1);
-        assert_eq!(client.list_issuers(), Vec::from_array(&env, [issuer2]));
+        assert_eq!(
+            client.list_issuers(),
+            Vec::from_array(&env, [issuer2, issuer3])
+        );
     }
 
     #[test]
@@ -1429,6 +1577,68 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn anchor_did_cid_validation_v0() {
+        // CIDv0: base58btc multihash, starts with "Qm", 46 chars total.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "QmYwAPJzagoJzrKSTTkG8w6zWZSNxrCYhpDkxQottEwHym");
+        assert_eq!(cid.len(), 46);
+        client.anchor_did(&subject, &cid);
+        assert_eq!(client.get_did_document(&subject), Some(cid));
+    }
+
+    #[test]
+    fn anchor_did_cid_validation_v1() {
+        // CIDv1: multibase base32, starts with "bafy".
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        assert!(cid.len() <= MAX_CID_LENGTH);
+        client.anchor_did(&subject, &cid);
+        assert_eq!(client.get_did_document(&subject), Some(cid));
+    }
+
+    #[test]
+    fn anchor_did_cid_validation_invalid() {
+        // Strings that are not valid IPFS CIDs must be rejected.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+
+        // Empty string.
+        let empty = String::from_str(&env, "");
+        assert_eq!(
+            client.try_anchor_did(&subject, &empty),
+            Err(Ok(IdentityOracleError::InvalidCID))
+        );
+
+        // Wrong prefix (not "Qm", "bafy", or "ipfs://").
+        let bad_prefix = String::from_str(&env, "notacidvalue");
+        assert_eq!(
+            client.try_anchor_did(&subject, &bad_prefix),
+            Err(Ok(IdentityOracleError::InvalidCID))
+        );
+
+        // Arbitrary text that is neither a CID nor a valid prefix.
+        let gibberish = String::from_str(&env, "hello world");
+        assert_eq!(
+            client.try_anchor_did(&subject, &gibberish),
+            Err(Ok(IdentityOracleError::InvalidCID))
+        );
+    }
+
     fn test_anchor_did_accepts_valid_ipfs_cid() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1568,6 +1778,38 @@ mod tests {
     }
 
     #[test]
+    fn test_get_active_vc_count_survives_extended_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_issuer(&issuer);
+
+        let vc_hash_1 = BytesN::from_array(&env, &[1u8; 32]);
+        let vc_hash_2 = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash_1);
+        client.anchor_vc(&issuer, &subject, &vc_hash_2);
+
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .extend_ttl(6_000_000, 6_000_000);
+        });
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += PERS_TTL_EXTEND - 1;
+        });
+
+        assert_eq!(client.get_active_vc_count(&subject), 2);
+    }
+
+    #[test]
     fn test_get_active_vc_count_excludes_revoked() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1655,6 +1897,66 @@ mod tests {
     }
 
     #[test]
+    fn test_get_active_vc_count_cached_cost_stays_flat_with_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let registry_id = env.register_contract(None, MockRevocationRegistry);
+        client.set_revocation_registry(&registry_id);
+
+        let mut costs = Vec::new(&env);
+        for vc_total in [5u32, 10u32, 20u32] {
+            let subject = Address::generate(&env);
+            for i in 0..vc_total {
+                let mut hash_arr = [0u8; 32];
+                hash_arr[0] = i as u8;
+                let vc_hash = BytesN::from_array(&env, &hash_arr);
+                client.anchor_vc(&issuer, &subject, &vc_hash);
+            }
+
+            let count = client.get_active_vc_count(&subject);
+            assert_eq!(count, vc_total);
+
+            costs.push_back(env.cost_estimate().budget().cpu_instruction_cost());
+        }
+
+        let cost_5 = costs.get(0).unwrap();
+        let cost_10 = costs.get(1).unwrap();
+        let cost_20 = costs.get(2).unwrap();
+
+        std::println!(
+            "get_active_vc_count cached (registry configured) cpu instructions: 5 VCs = {}, 10 VCs = {}, 20 VCs = {}",
+            cost_5,
+            cost_10,
+            cost_20
+        );
+
+        let max_cost = core::cmp::max(core::cmp::max(cost_5, cost_10), cost_20);
+        let min_cost = core::cmp::min(core::cmp::min(cost_5, cost_10), cost_20);
+        assert!(
+            max_cost - min_cost <= 25_000,
+            "expected get_active_vc_count with registry configured to cost O(1) (flat), got 5={} 10={} 20={}",
+            cost_5,
+            cost_10,
+            cost_20
+        );
+
+        const MAINNET_CPU_LIMIT: u64 = 600_000_000;
+        assert!(
+            max_cost < MAINNET_CPU_LIMIT,
+            "expected get_active_vc_count with registry configured to stay under the mainnet CPU limit"
+        );
+    }
+
+    #[test]
     fn test_mark_vc_revoked_panics_for_unknown_hash() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1698,6 +2000,36 @@ mod tests {
         client.mark_vc_revoked(&issuer, &subject, &vc_hash);
 
         assert!(!client.is_verified(&subject));
+    }
+
+    #[test]
+    fn test_list_revoked_for_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[2u8; 32]);
+        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc(&issuer, &subject, &hash1);
+        client.anchor_vc(&issuer, &subject, &hash2);
+        client.anchor_vc(&issuer, &subject, &hash3);
+
+        assert_eq!(client.list_revoked_for_subject(&subject).len(), 0);
+
+        client.mark_vc_revoked(&issuer, &subject, &hash2);
+
+        let revoked = client.list_revoked_for_subject(&subject);
+        assert_eq!(revoked.len(), 1);
+        assert_eq!(revoked.get(0).unwrap(), hash2);
     }
 
     #[test]
@@ -2017,6 +2349,69 @@ mod tests {
     }
 
     #[test]
+    fn test_deactivate_did_sets_deactivated_flag_and_removes_did_document() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDeactivateDidFlag");
+        client.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
+        client.anchor_vc(&issuer, &subject, &vc_hash);
+
+        assert!(client.is_verified(&subject));
+        assert!(!client.is_deactivated(&subject));
+        assert!(client.get_did_document(&subject).is_some());
+
+        client.deactivate_did(&subject);
+
+        // Regression test for the bug this issue reports: previously
+        // `deactivate_did` never set the `Deactivated` flag, so
+        // `is_deactivated` (which `credit-oracle` relies on via
+        // cross-contract call) kept returning `false` after a subject
+        // called `deactivate_did`, letting their score still be computed.
+        assert!(client.is_deactivated(&subject));
+
+        // Full deactivation also removes the DID document.
+        assert!(client.get_did_document(&subject).is_none());
+
+        // And, as before, VCs are revoked / not verified / active count 0.
+        assert!(!client.is_verified(&subject));
+        assert_eq!(client.get_active_vc_count(&subject), 0);
+    }
+
+    #[test]
+    fn test_deactivate_identity_does_not_remove_did_document() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmTestDeactivateIdentityKeepsDid");
+        client.anchor_did(&subject, &cid);
+
+        client.deactivate_identity(&subject);
+
+        // Unlike `deactivate_did`, `deactivate_identity` leaves the DID
+        // document CID in place.
+        assert_eq!(client.get_did_document(&subject), Some(cid));
+        assert!(client.is_deactivated(&subject));
+    }
+
+    #[test]
     fn test_deactivate_identity_sets_flag_and_revokes_vcs() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2187,5 +2582,201 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash);
         let stats_after_dedup = client.get_protocol_stats();
         assert_eq!(stats_after_dedup.total_vcs_anchored, 1);
+    }
+
+    #[test]
+    fn test_vc_limit_reached_at_max() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 1;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 1;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let result = client.try_anchor_vc(&issuer, &subject, &vc_hash_101);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
+
+    #[test]
+    fn test_revoked_vcs_do_not_count_toward_limit() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 2;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.mark_vc_revoked(&issuer, &subject, &vc_hash);
+        }
+
+        for i in 0..50u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 3;
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            client.anchor_vc(&issuer, &subject, &vc_hash);
+        }
+
+        assert_eq!(client.get_active_vc_count(&subject), 100);
+    }
+
+    #[test]
+    fn test_anchor_did_accepts_exactly_65_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 65 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        client.anchor_did(&subject, &cid);
+        
+        let stored = client.get_did_document(&subject);
+        assert_eq!(stored.unwrap(), cid);
+    }
+
+    #[test]
+    fn test_anchor_did_rejects_256_byte_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let subject = Address::generate(&env);
+        let mut cid_str = std::string::String::from("ipfs://");
+        while cid_str.len() < 256 {
+            cid_str.push('a');
+        }
+        let cid = String::from_str(&env, &cid_str);
+        
+        let result = client.try_anchor_did(&subject, &cid);
+        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
+    }
+
+    #[test]
+    fn test_anchor_vc_typed_with_arbitrary_credential_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        
+        // Test with various credential types that should work
+        let credential_types = [
+            "kyc",
+            "employment", 
+            "education",
+            "identity",
+            "credit_score",
+            "test",
+            "a",                    // single character
+            "very_long_type_name",  // longer name
+        ];
+
+        for (i, type_name) in credential_types.iter().enumerate() {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i as u8;
+            hash_arr[1] = 42; // distinguishing byte
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            
+            let credential_type = Symbol::new(&env, type_name);
+            let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
+            
+            // Should succeed for all valid credential types
+            assert!(result.is_ok(), "Failed to anchor VC with credential type: {}", type_name);
+        }
+    }
+
+    #[test] 
+    fn test_anchor_vc_typed_vc_limit_with_credential_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        
+        // Anchor exactly 100 VCs with different credential types
+        for i in 0..100u8 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            hash_arr[1] = 10; // distinguishing byte
+            let vc_hash = BytesN::from_array(&env, &hash_arr);
+            
+            // Vary credential types to simulate fuzz input
+            let credential_type = match i % 4 {
+                0 => Symbol::new(&env, "kyc"),
+                1 => Symbol::new(&env, "employment"),
+                2 => Symbol::new(&env, "education"), 
+                _ => Symbol::new(&env, "identity"),
+            };
+            
+            let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
+            assert!(result.is_ok(), "Failed to anchor VC {} with credential type", i);
+        }
+        
+        // The 101st VC should fail with VCLimitReached
+        let mut hash_arr = [0u8; 32];
+        hash_arr[0] = 101;
+        hash_arr[1] = 10;
+        let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
+        let credential_type = Symbol::new(&env, "test");
+        
+        let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash_101, &credential_type);
+        assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
     }
 }

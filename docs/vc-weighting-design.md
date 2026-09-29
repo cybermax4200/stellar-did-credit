@@ -50,23 +50,40 @@ Type weights are configured on credit-oracle:
 - `set_credential_type_weight(admin, credential_type, weight_bps)` — e.g. `kyc` at 150 bps
 - `get_credential_type_weight(credential_type)` — returns 100 bps when unset
 
-### Recency (design only — not in prototype)
+### Recency (implemented — opt-in, see #530)
 
 Recency rewards fresh credentials and decays stale ones without deleting anchors:
 
 ```
 recency_multiplier = max(min_recency_bps, 10_000 − age_days × decay_bps_per_day)
+
+credential_points(vc) = base_points × type_weight_bps ÷ 100 × recency_multiplier ÷ 10_000
 ```
 
-Suggested defaults for a future iteration:
+`age_days = (now − anchored_at) ÷ 86_400`, in whole days — a credential keeps full
+weight for its first 24 hours. `anchored_at` is the ledger timestamp (Unix
+seconds) recorded by identity-oracle when the VC was anchored.
 
-| Parameter | Suggested value |
-| --------- | --------------- |
-| `decay_bps_per_day` | 5 (0.05% per day) |
-| `min_recency_bps` | 5000 (50% floor) |
-| Full weight window | 0–365 days since `anchored_at` |
+Configuration lives on credit-oracle:
 
-Implementation would read `VCRecord.anchored_at` from `get_vc_details` and apply the multiplier inside `compute_score`. No storage migration required.
+- `set_recency_decay(admin, enabled, decay_bps_per_day, min_recency_bps)` — admin only
+- `get_recency_decay()` — returns `RecencyDecayConfig { enabled, decay_bps_per_day, min_recency_bps }`
+
+Defaults, applied when the admin has never configured decay:
+
+| Parameter | Default | Note |
+| --------- | ------- | ---- |
+| `enabled` | `false` | Opt-in — deployments score identically until switched on |
+| `decay_bps_per_day` | 5 (0.05% per day) | |
+| `min_recency_bps` | 5000 (50% floor) | Values above 10_000 are rejected with `InvalidRecencyConfig` |
+
+**Requires a configured identity-oracle.** `anchored_at` is only available from
+`get_vc_details`, so decay applies on the cross-contract path only. With no
+identity-oracle link, the local `VcList` / `VcCount` fallbacks are unchanged.
+
+Decay is uniform across credential types; per-type decay rates remain out of
+scope. No storage migration is required — the three new instance keys are
+optional and read back as "disabled" on contracts deployed before this change.
 
 ## Data flow
 
@@ -111,6 +128,9 @@ One tier-2 KYC VC → `vc_score = 60`, matching three generic VCs — reflecting
 
 | Scenario | Behavior |
 | -------- | -------- |
+| Recency decay never configured | Disabled — per-VC points identical to pre-#530 |
+| Recency decay disabled again | Next `compute_score` drops the multiplier entirely |
+| Recency enabled, no identity-oracle | No decay — `anchored_at` is unavailable |
 | Existing `anchor_vc` records | Treated as `generic` type, issuer tier 100 bps |
 | No identity-oracle link on credit-oracle | Legacy `vc_count × 20` via cached feeder count |
 | Issuer tier unset | Defaults to 100 bps (same as legacy per-VC value) |
@@ -118,7 +138,7 @@ One tier-2 KYC VC → `vc_score = 60`, matching three generic VCs — reflecting
 
 ## Future work (out of scope for #243)
 
-- Recency decay using `anchored_at`
+- Per-credential-type decay rates (#530 implements a single uniform rate)
 - Standardized credential schema (SEP) validation
 - Real-time off-chain verification callbacks
 - Storing `credential_type` inline on `VCRecord` after a migration window

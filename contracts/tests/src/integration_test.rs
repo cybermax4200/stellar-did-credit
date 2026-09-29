@@ -1,20 +1,20 @@
 #[cfg(test)]
 mod tests {
+    use soroban_sdk::{
+        contract, contractimpl, symbol_short,
+        testutils::{Address as _, Events, Ledger as _},
+        Address, BytesN, Env, String, Symbol, TryIntoVal,
+    };
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeRecord,
-        DisputeStatus, RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
+        RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
-    use soroban_sdk::{
-        contract, contractimpl, symbol_short,
-        testutils::{Address as _, Events, Ledger as _},
-        BytesN, Env, String, Symbol, TryIntoVal,
-    };
 
     #[test]
-    fn test_initialize_emits_init_event() {
+    fn test_score_freshness_enforcement() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -26,45 +26,67 @@ mod tests {
         let credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
 
         // Initialize identity-oracle and verify Init event
         identity.initialize(&admin);
         let events = env.events().all();
-        let id_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == identity_id).collect();
+        let id_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == identity_id)
+            .collect();
         assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
         let topic0: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic0, symbol_short!("Init"));
+        assert_eq!(topic0, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
+        assert_eq!(
+            event_admin, admin,
+            "Initialized event admin mismatch for identity-oracle"
+        );
 
         // Initialize credit-oracle and verify Initialized event
         credit.initialize(&admin);
         let events = env.events().all();
-        let credit_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == credit_id).collect();
+        let credit_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == credit_id)
+            .collect();
         assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
         let topic1: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic1, symbol_short!("Init"));
+        assert_eq!(topic1, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
+        assert_eq!(
+            event_admin, admin,
+            "Initialized event admin mismatch for credit-oracle"
+        );
 
         // Initialize revocation-registry and verify Initialized event
         revocation.initialize(&admin);
         let events = env.events().all();
-        let rev_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == revocation_id).collect();
-        assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
+        let rev_events: Vec<_> = events
+            .iter()
+            .filter(|(id, _, _)| *id == revocation_id)
+            .collect();
+        assert_eq!(
+            rev_events.len(),
+            1,
+            "revocation-registry should emit 1 event"
+        );
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
         let topic2: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
-        assert_eq!(topic2, symbol_short!("Init"));
+        assert_eq!(topic2, Symbol::new(&env, "Initialized"));
         let event_admin: soroban_sdk::Address = data.clone().try_into_val(&env).unwrap();
-        assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
+        assert_eq!(
+            event_admin, admin,
+            "Initialized event admin mismatch for revocation-registry"
+        );
 
-        // Issue #302: governance contract must also emit an Initialized event
+        // Issue #665: governance contract must also emit an Initialized event
         // with the admin and credit-oracle target addresses so off-chain
         // indexers can detect deployments before the first admin action.
         let gov_id = env.register_contract(None, Governance);
@@ -79,7 +101,11 @@ mod tests {
             "governance contract should emit exactly 1 event on initialize"
         );
         let (_, topics, data) = &gov_events[0];
-        assert_eq!(topics.len(), 1, "topic count mismatch for governance Initialized");
+        assert_eq!(
+            topics.len(),
+            1,
+            "topic count mismatch for governance Initialized"
+        );
         let gov_topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
         assert_eq!(
             gov_topic,
@@ -303,7 +329,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let initial_score = credit.compute_score(&subject);
-        assert!(initial_score > 300, "expected initial_score > 300, got {}", initial_score);
+        assert!(
+            initial_score > 300,
+            "expected initial_score > 300, got {}",
+            initial_score
+        );
 
         // 2. Revoke the VC on identity-oracle
         identity.mark_vc_revoked(&issuer, &subject, &vc_hash);
@@ -365,7 +395,10 @@ mod tests {
         revocation.initialize(&admin);
 
         let result = identity.try_set_revocation_registry(&bad_address);
-        assert_eq!(result, Err(Ok(IdentityOracleError::InvalidRevocationRegistry)));
+        assert_eq!(
+            result,
+            Err(Ok(IdentityOracleError::InvalidRevocationRegistry))
+        );
     }
 
     #[test]
@@ -409,6 +442,57 @@ mod tests {
         // Also verify that is_verified and get_active_vc_count correctly reflect the revocation
         assert!(!identity.is_verified(&subject));
         assert_eq!(identity.get_active_vc_count(&subject), 0);
+
+        // The subject forwarded to revoke() enables the per-subject revoked list
+        assert_eq!(
+            identity.list_revoked_for_subject(&subject),
+            soroban_sdk::vec![&env, vc_hash.clone()]
+        );
+    }
+
+    #[test]
+    fn test_get_active_vc_count_uses_cache_with_registry_configured() {
+        // Acceptance criteria for #481:
+        // configure revocation registry, anchor 3 VCs, revoke 1 via registry,
+        // assert get_active_vc_count returns 2.
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let hash_a = BytesN::from_array(&env, &[0u8; 32]);
+        let hash_b = BytesN::from_array(&env, &[1u8; 32]);
+        let hash_c = BytesN::from_array(&env, &[2u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &hash_a);
+        identity.anchor_vc(&issuer, &subject, &hash_b);
+        identity.anchor_vc(&issuer, &subject, &hash_c);
+
+        assert_eq!(identity.get_active_vc_count(&subject), 3);
+
+        // Revoke exactly one of the VCs via the revocation registry. This flows
+        // through mark_vc_revoked, which must decrement the ActiveVCCount cache.
+        revocation.revoke(&issuer, &subject, &hash_a);
+
+        assert_eq!(identity.get_active_vc_count(&subject), 2);
+
+        // The cache must remain authoritative even when the registry stays linked.
+        revocation.revoke(&issuer, &subject, &hash_b);
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
     }
 
     #[test]
@@ -524,7 +608,7 @@ mod tests {
             vc_hashes.push_back(vc_hash);
         }
 
-// 5. Assert is_verified is true (5 active VCs)
+        // 5. Assert is_verified is true (5 active VCs)
         assert!(identity.is_verified(&subject));
 
         // 6. Assert get_total_vc_count returns 5
@@ -725,6 +809,46 @@ mod tests {
         assert!(!revocation.is_revoked(&hash3));
     }
 
+    /// An oversized batch submitted without the issuer's authorization must
+    /// fail with an auth error, not `BatchTooLarge`: `require_auth()` runs
+    /// before the batch-size check so unauthenticated callers cannot probe
+    /// validation logic without paying for authorization.
+    #[test]
+    fn test_batch_revoke_requires_auth_before_size_check() {
+        let env = Env::default();
+        // Deliberately do NOT mock authorizations: nothing is signed.
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+
+        // 101 hashes: exceeds the batch size limit.
+        let mut batch = soroban_sdk::Vec::new(&env);
+        for i in 0..101u32 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = (i % 256) as u8;
+            hash_arr[1] = (i / 256) as u8;
+            batch.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+
+        let res = revocation.try_batch_revoke(&issuer, &batch);
+
+        match res {
+            // Host-level auth error: expected, authorization is enforced first.
+            Err(Err(soroban_sdk::InvokeError::Abort)) => {}
+            // A contract-level BatchTooLarge would mean the size check ran
+            // before auth.
+            Err(Ok(e)) => panic!(
+                "expected auth error before size check, got contract error {:?}",
+                e
+            ),
+            other => panic!(
+                "unauthorized batch_revoke must fail with an auth error, got {:?}",
+                other.map(|_| ())
+            ),
+        }
+    }
+
     #[test]
     fn test_revocation_registry_count_and_list_integration() {
         let env = Env::default();
@@ -840,13 +964,16 @@ mod tests {
                 if *id != gov_id || topics.len() != 2 {
                     return false;
                 }
-                let sym: Result<soroban_sdk::Symbol, _> =
-                    topics.get(0).unwrap().try_into_val(&env);
+                let sym: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
                 sym.map(|s| s == soroban_sdk::symbol_short!("PropCanc"))
                     .unwrap_or(false)
             })
             .collect();
-        assert_eq!(cancel_events.len(), 1, "exactly one PropCanc event must be emitted");
+        assert_eq!(
+            cancel_events.len(),
+            1,
+            "exactly one PropCanc event must be emitted"
+        );
         let (_, topics, data) = &cancel_events[0];
         let event_proposal_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
         assert_eq!(event_proposal_id, proposal_id);
@@ -896,7 +1023,10 @@ mod tests {
         gov.cancel_proposal(&admin, &proposal_id);
 
         let proposal = gov.get_proposal(&proposal_id).unwrap();
-        assert!(proposal.cancelled, "admin should be able to cancel a proposal");
+        assert!(
+            proposal.cancelled,
+            "admin should be able to cancel a proposal"
+        );
     }
 
     /// A third party (neither proposer nor admin) cannot cancel a proposal.
@@ -974,9 +1104,85 @@ mod tests {
         );
     }
 
+    /// Voting on a cancelled proposal must be rejected with
+    /// ProposalAlreadyCancelled, even while the voting period is still open.
+    /// Execution of the cancelled proposal must also remain rejected.
+    #[test]
+    fn test_vote_after_cancel_is_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Register a voter and cast a vote before cancellation.
+        let voter1 = soroban_sdk::Address::generate(&env);
+        let voter2 = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter1, &500);
+        gov.register_voter(&admin, &voter2, &500);
+        gov.vote(&voter1, &proposal_id, &true, &300);
+
+        // Proposer cancels while voting is still open.
+        gov.cancel_proposal(&proposer, &proposal_id);
+
+        // New votes must be rejected even though the voting period has not
+        // expired.
+        let res = gov.try_vote(&voter2, &proposal_id, &true, &100);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "vote after cancel must return ProposalAlreadyCancelled"
+        );
+
+        // Votes cast before cancellation are preserved for audit.
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal must be marked cancelled");
+        assert_eq!(
+            proposal.votes_for, 300,
+            "pre-cancel votes must be preserved"
+        );
+
+        // Advance past the voting period: execution stays rejected.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        let res = gov.try_execute(&proposal_id);
+        assert_eq!(
+            res,
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled)),
+            "executing a cancelled proposal must return ProposalAlreadyCancelled"
+        );
+    }
+
     /// Integration test for governance execution timelock:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
+    ///
+    /// This follows the double-timelock model from docs/governance.md §2.2:
+    /// `execute()` only queues weights in the credit-oracle via
+    /// `propose_weights()` (starting the fixed 17,280-ledger timelock); the
+    /// weights do NOT become active until `apply_weights()` is called after
+    /// that timelock expires. This test therefore:
+    ///   1. execute() → active weights unchanged (still default)
+    ///   2. advance 17,282 ledgers and bump instance TTL on both contracts
+    ///   3. apply_weights()
+    ///   4. verify active weights now equal the proposal's values.
     #[test]
     fn test_governance_execution_timelock_integration() {
         let env = Env::default();
@@ -1393,7 +1599,8 @@ mod tests {
         assert!(identity.is_deactivated(&subject));
         assert!(!identity.is_verified(&subject));
         // Advance ledger to satisfy compute_score cooldown
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
 
         // 3. compute_score should now return 300 for deactivated subject
         let score_after_deactivation = credit.compute_score(&subject);
@@ -1516,14 +1723,15 @@ mod tests {
             env.storage()
                 .instance()
                 .set(&DataKey::Config, &default_weights);
-            env.storage().instance().set(
-                &DataKey::ComputeCooldownLedgers,
-                &1u32,
-            );
+            env.storage()
+                .instance()
+                .set(&DataKey::ComputeCooldownLedgers, &1u32);
         }
 
         pub fn register_lender(env: Env, lender: soroban_sdk::Address) {
-            env.storage().persistent().set(&DataKey::TrustedLender(lender), &true);
+            env.storage()
+                .persistent()
+                .set(&DataKey::TrustedLender(lender), &true);
         }
 
         pub fn record_repayment(
@@ -1621,6 +1829,123 @@ mod tests {
         assert_eq!(rec1_v2_updated.on_time_count, 3);
         assert_eq!(rec1_v2_updated.total_count, 4);
         assert_eq!(rec1_v2_updated.total_repaid, 5000);
+    }
+
+    #[test]
+    fn test_identity_oracle_migration_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        let did_uri = String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
+
+        let mut hash_bytes = [0u8; 32];
+        hash_bytes[0] = 42;
+        let vc_hash = BytesN::from_array(&env, &hash_bytes);
+        let vc_record = identity_oracle::VCRecord {
+            vc_hash: vc_hash.clone(),
+            issuer: issuer.clone(),
+            anchored_at: env.ledger().timestamp(),
+            revoked: false,
+        };
+
+        // Simulate a V1 deployment by manually writing storage entries without StorageVersion.
+        env.as_contract(&contract_id, || {
+            // Instance storage: Admin set, StorageVersion NOT set (simulating V1)
+            env.storage()
+                .instance()
+                .set(&identity_oracle::DataKey::Admin, &admin);
+            assert!(!env
+                .storage()
+                .instance()
+                .has(&identity_oracle::DataKey::StorageVersion));
+
+            // Persistent storage: simulate pre-migration identity records
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::TrustedIssuer(issuer.clone()), &true);
+            let mut issuers = soroban_sdk::Vec::new(&env);
+            issuers.push_back(issuer.clone());
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::IssuersIndex, &issuers);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::DIDDocument(subject.clone()), &did_uri);
+
+            let mut vcs = soroban_sdk::Vec::new(&env);
+            vcs.push_back(vc_record);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::VCAnchors(subject.clone()), &vcs);
+            env.storage()
+                .persistent()
+                .set(&identity_oracle::DataKey::ActiveVCCount(subject.clone()), &1u32);
+        });
+
+        // Verify StorageVersion is absent before migration
+        let version_before: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_before, None);
+
+        // Verify pre-migration state is readable
+        let issuers_before = client.list_issuers();
+        assert_eq!(issuers_before.len(), 1);
+        assert_eq!(issuers_before.get(0).unwrap(), issuer);
+        assert_eq!(client.has_anchored_did(&subject), true);
+        assert_eq!(client.get_did_document(&subject), Some(did_uri.clone()));
+        assert_eq!(client.is_verified(&subject), true);
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+        assert_eq!(client.get_vc_count(&subject), 1);
+        assert_eq!(client.verify_vc(&subject, &vc_hash), true);
+
+        // Execute migration
+        client.migrate();
+
+        // Verify StorageVersion is now set to 2
+        let version_after: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_after, Some(2u32));
+
+        // Verify reads still work properly after migration
+        let issuers_list = client.list_issuers();
+        assert_eq!(issuers_list.len(), 1);
+        assert_eq!(issuers_list.get(0).unwrap(), issuer);
+        assert_eq!(client.has_anchored_did(&subject), true);
+        assert_eq!(client.get_did_document(&subject), Some(did_uri));
+        assert_eq!(client.is_verified(&subject), true);
+        assert_eq!(client.get_active_vc_count(&subject), 1);
+        assert_eq!(client.get_vc_count(&subject), 1);
+        assert_eq!(client.verify_vc(&subject, &vc_hash), true);
+        let vc_records = client.get_vc_details(&subject);
+        assert_eq!(vc_records.len(), 1);
+        assert_eq!(vc_records.get(0).unwrap().vc_hash, vc_hash);
+
+        // Verify new operations continue to succeed after migration
+        let subject2 = soroban_sdk::Address::generate(&env);
+        let did_uri2 = String::from_str(&env, "ipfs://QmSecondSubjectDIDDocumentHash123456789012");
+        client.anchor_did(&subject2, &did_uri2);
+        assert_eq!(client.get_did_document(&subject2), Some(did_uri2));
+
+        // Verify migrate is idempotent
+        client.migrate();
+        let version_idempotent: Option<u32> = env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .get(&identity_oracle::DataKey::StorageVersion)
+        });
+        assert_eq!(version_idempotent, Some(2u32));
     }
 
     // ── Compute-score cooldown tests ──────────────────────────────────────
@@ -1810,11 +2135,19 @@ mod tests {
         assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert!(identity.verify_vc(&subject, &vc_hash));
 
-        // Now set the registry and confirm the revocation IS detected
+        // Now set the registry and confirm the revocation IS detected.
+        //
+        // `is_verified` / `verify_vc` perform a live cross-contract check against
+        // the registry, so they reflect the revocation immediately. However,
+        // `get_active_vc_count` is served from the cached `ActiveVCCount`, which is
+        // only decremented through `mark_vc_revoked`. Because the registry was never
+        // linked as the identity-oracle (revocation.set_identity_oracle was not
+        // called), `revocation.revoke` did not invoke `mark_vc_revoked`, so the cache
+        // is unchanged. The cached count is authoritative (issue #481).
         identity.set_revocation_registry(&revocation_id);
 
         assert!(!identity.is_verified(&subject));
-        assert_eq!(identity.get_active_vc_count(&subject), 0);
+        assert_eq!(identity.get_active_vc_count(&subject), 1);
         assert!(!identity.verify_vc(&subject, &vc_hash));
     }
 
@@ -1853,7 +2186,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let inflated_score = credit.compute_score(&subject);
-        assert!(inflated_score > 300, "expected inflated score > 300, got {}", inflated_score);
+        assert!(
+            inflated_score > 300,
+            "expected inflated score > 300, got {}",
+            inflated_score
+        );
 
         // Step 1: Subject files a dispute against tx_stats.
         let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
@@ -1878,7 +2215,8 @@ mod tests {
         let mut rslv_count = 0;
         for (id, topics, _) in events.iter() {
             if id == credit_id && !topics.is_empty() {
-                let topic_res: Result<soroban_sdk::Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                let topic_res: Result<soroban_sdk::Symbol, _> =
+                    topics.get(0).unwrap().try_into_val(&env);
                 if let Ok(topic) = topic_res {
                     if topic == soroban_sdk::symbol_short!("DsptRslv") {
                         rslv_count += 1;
@@ -1910,7 +2248,11 @@ mod tests {
             corrected_score,
             inflated_score
         );
-        assert!(corrected_score >= 300, "score must be >= 300, got {}", corrected_score);
+        assert!(
+            corrected_score >= 300,
+            "score must be >= 300, got {}",
+            corrected_score
+        );
     }
 
     /// Subjects cannot file a dispute for an unrecognised input key.
@@ -2016,5 +2358,156 @@ mod tests {
 
         let active_count = identity.get_active_vc_count(&subject);
         assert_eq!(active_count, 0); // Revoked VC => 0 active
+    }
+
+    #[test]
+    fn test_full_deployment_sequence() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // 1. Deploy all four contracts
+        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100i128);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+
+        identity.register_issuer(&issuer);
+        credit.register_feeder(&admin, &feeder);
+
+        let cid = String::from_str(&env, "ipfs://QmTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Ensure initially verified
+        assert_eq!(identity.is_verified(&subject), true);
+
+        revocation.revoke(&issuer, &subject, &vc_hash);
+
+        // (a) Verify that without set_revocation_registry, revocation-registry revocations are ignored
+        assert_eq!(identity.is_verified(&subject), true);
+
+        // (b) Verify that after set_revocation_registry, they are respected
+        identity.set_revocation_registry(&revocation_id);
+
+        // Now the revocation is respected
+        assert_eq!(identity.is_verified(&subject), false);
+
+        // Call set_identity_oracle on credit-oracle
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        // Verify compute_score reflects the revoked VC
+        let score_revoked = credit.compute_score(&subject);
+
+        // Add a new VC to see the score increase, showing the score reflects active VCs
+        let vc_hash2 = BytesN::from_array(&env, &[43u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let score_active = credit.compute_score(&subject);
+
+        assert!(
+            score_active > score_revoked,
+            "Score should increase when an active VC is present"
+        );
+    }
+
+    /// Issue #530: recency decay must lower the score of stale credentials,
+    /// clamp at the configured floor, and be fully reversible.
+    #[test]
+    fn test_recency_decay_affects_score() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        // Decay needs `anchored_at`, which only the cross-contract path exposes.
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmRecency"));
+
+        // Five generic VCs anchored at T0 => 5 x 20 = 100 undecayed VC points.
+        let t0 = 1_700_000_000u64;
+        let day = 86_400u64;
+        env.ledger().set_timestamp(t0);
+        for i in 0..5u8 {
+            identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[i; 32]));
+        }
+
+        let weights = credit.get_scoring_weights();
+        let expected = |vc_points: u32| -> u32 {
+            credit_oracle::compute_score_pure(
+                vc_points,
+                0,
+                0,
+                0,
+                0,
+                0,
+                weights.vc_weight,
+                weights.tx_weight,
+                weights.repayment_weight,
+            )
+        };
+
+        // Decay defaults to disabled: full weight, pre-#530 behavior.
+        let baseline = credit.compute_score(&subject);
+        assert_eq!(baseline, expected(100));
+
+        // Enable the documented defaults: 5 bps/day with a 50% floor.
+        credit.set_recency_decay(&admin, &true, &5, &5_000);
+
+        // 100 days old => 10_000 - 500 = 9_500 bps => 19 points per VC.
+        env.ledger().set_timestamp(t0 + 100 * day);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let aged_100d = credit.compute_score(&subject);
+        assert_eq!(aged_100d, expected(95));
+        assert!(
+            aged_100d < baseline,
+            "a 100-day-old credential must score below a fresh one"
+        );
+
+        // 5 years old => 9_125 bps of decay clamps to the 5_000 bps floor.
+        env.ledger().set_timestamp(t0 + 1_825 * day);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let aged_5y = credit.compute_score(&subject);
+        assert_eq!(aged_5y, expected(50));
+        assert!(aged_5y < aged_100d, "decay must be monotonic in age");
+
+        // Turning decay off restores the pre-#530 score exactly.
+        credit.set_recency_decay(&admin, &false, &5, &5_000);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        assert_eq!(credit.compute_score(&subject), baseline);
     }
 }

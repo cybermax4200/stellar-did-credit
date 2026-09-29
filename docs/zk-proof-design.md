@@ -384,9 +384,112 @@ impl ScoreRangeVerifier {
 | 2 | Circom/arkworks circuit + unit tests against scoring-spec vectors | Step 1 |
 | 3 | Groth16 ceremony + vk hash | Step 2 |
 | 4 | `score-range-verifier` Soroban contract + tests | Step 3, CAP-0059 |
-| 5 | TypeScript prover module in SDK | Step 2 |
 | 6 | End-to-end integration test (testnet) | Steps 4–5 |
-| 7 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
+| 7 | CLI command (`stellar-did prove-score`) | Steps 4–5 |
+| 8 | Optional Merkle binding to on-chain `ScoreRecord` | Research Q1 |
+
+---
+
+## Phase 4 implementation checklist
+
+Single tracking view for Phase 4 completion. Each deliverable links to the GitHub issue that owns it; maintainers tick boxes as work lands.
+
+> **Numbering note:** earlier Phase 4 issue bodies (#741, #748, #780) refer to deliverables by an internal numbering that predates this repository's issue numbering, and a code comment in `contracts/score-range-verifier/src/lib.rs` still says "Issue 59". The checklist below cites the current issue numbers first, with the legacy number in parentheses.
+
+| Legacy # | Deliverable | Current issue(s) |
+| -------- | ----------- | ---------------- |
+| 69 | Trusted setup ceremony + real verification key | #744, #732 |
+| 77 | WASM prover build pipeline | #740 |
+| 78 | SDK methods | #741 |
+| 79 | CLI command | #742 |
+| 85 | End-to-end integration test | #748 |
+
+- [ ] **Trusted setup ceremony + real verification key** — write `docs/zk-trusted-setup.md` and replace the placeholder VK embedded in `contracts/score-range-verifier` (key generation currently uses a fixed-seed dev RNG in `zk/circuit/src/bin/generate_vk.rs`). (#744, #732 — legacy #69)
+- [x] **WASM prover build pipeline** — `packages/zk-wasm` compiles `zk/circuit` with `wasm-pack`; the build runs in CI (`.github/workflows/ci.yml`). (#740 — legacy #77)
+- [x] **SDK methods** — `generateScoreProof()` and `verifyScoreProof()` in `packages/sdk/src/index.ts`. (#741 — legacy #78)
+- [x] **CLI command** — `stellar-did prove-score` in `packages/cli/src/index.ts`. (#742 — legacy #79)
+- [ ] **End-to-end integration test** — on-chain proof flow covering `compute_score` → generate proof → submit to `score-range-verifier` → replay rejection. `packages/sdk/src/__tests__/e2e-phase4.test.ts` exists but mocks RPC calls; no ZK coverage in `contracts/tests`. (#748 — legacy #85)
+
+Checkboxes reflect implementation state at time of writing; open issues remain the source of truth for what is still outstanding.
+
+---
+
+## User Journey: CLI and SDK
+
+Users and applications interact with the ZK proof layer using either the `stellar-did` CLI or the `@stellar-did-credit/sdk`.
+
+### CLI: Proving a Score
+
+A user wants to prove their credit score exceeds a given threshold (e.g., 600) to a verifier contract, without revealing the score itself.
+
+```bash
+stellar-did prove-score --subject <YOUR_ADDRESS> --threshold 600 --verifier <VERIFIER_CONTRACT_ID>
+```
+
+Under the hood, this command:
+1. Queries the credit-oracle for the subject's private scoring inputs.
+2. Generates a Groth16 proof locally using the WASM prover.
+3. Submits a transaction to the `score-range-verifier` contract to verify the proof.
+4. Outputs `Proof successfully verified by the contract!` on success.
+
+### SDK: Programmatic Integration
+
+Lenders and dApps can generate and verify proofs programmatically:
+
+```typescript
+import { StellarDIDCreditSDK } from "@stellar-did-credit/sdk";
+
+// Initialize SDK
+const sdk = new StellarDIDCreditSDK({ ...config });
+
+// 1. Generate the proof locally in WASM
+const threshold = 650;
+const blinding = 12345; // Private blinding factor
+const proofBytes = await sdk.generateScoreProof(subjectAddress, threshold, blinding);
+
+// 2. Submit the proof to the on-chain verifier
+const isValid = await sdk.verifyScoreProof(
+  payerKeypair,
+  subjectAddress,
+  threshold,
+  proofBytes,
+  verifierContractId
+);
+
+if (isValid) {
+  console.log("Subject's score is verified to be >=", threshold);
+}
+```
+
+### Step 1: Constraint count estimate (score > T circuit)
+
+The circuit is implemented in `zk/circuit/` (arkworks-rs, BLS12-381). The
+constraint budget below is derived from the actual R1CS constraints generated
+by the circuit.
+
+| Circuit component | Constraint count |
+| ----------------- | ---------------- |
+| `score > threshold` range proof (32-bit) | ~33 |
+| `vc_score == min(vc_points, 100)` | ~14 |
+| `volume_score == min(tx_volume_30d / 1e8, 80)` (integer division + range) | ~34 |
+| `counterparty_bonus == min(avg_counterparties / 5, 20)` (integer division) | ~8 |
+| `tx_score == min(volume_score + counterparty_bonus, 100)` | ~14 |
+| `repayment_rate_score` (integer division, 2 levels) | ~46 |
+| `repayment_volume_score == min(total_repaid / 1e8, 100)` | ~34 |
+| `repay_score == (rr_score + rv_score) / 2` | ~1 |
+| `composite == (vc·w_vc + tx·w_tx + repay·w_repay) / 100` | ~14 |
+| `score == 300 + composite·550 / 100` | ~14 |
+| Pedersen commitment binding (8 fields × 2 coords) | ~16 |
+| **Total** | **~228** |
+
+This is well within Soroban's resource limits for on-chain verification
+(Groth16 verification on BLS12-381 via CAP-0059 host functions is a single
+pairing check, independent of circuit size). The prover runs off-chain in WASM,
+so the constraint count only affects proof generation time, not on-chain cost.
+
+**Open Q #11 resolution:** `avg_counterparties` is bound into the Pedersen
+commitment preimage (8 committed fields) rather than a separate `TxStats`
+commitment. See [ADR-001](adr-001-avg-counterparties-binding.md).
 
 ---
 

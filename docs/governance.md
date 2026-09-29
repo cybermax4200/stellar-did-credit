@@ -15,7 +15,7 @@ The governance contract provides on-chain proposal creation, weighted voting, an
 Related reading:
 
 - [Architecture Guide](architecture.md) — ADR-003 (governance respects credit-oracle timelock) and the admin-transfer two-step flow.
-- [Epoch Model](EPOCH_MODEL.md) — Instance TTL requirements, weight timelock semantics, and the relationship between admin-gated calls and contract liveness.
+- [Epoch Model](epoch-model.md) — Instance TTL requirements, weight timelock semantics, and the relationship between admin-gated calls and contract liveness.
 - [Scoring Specification](scoring-spec.md) — What the three scoring weights (vc, tx, repayment) actually control in the credit score formula.
 
 ---
@@ -29,7 +29,7 @@ Every proposal is a persisted struct with these fields (see `DataKey::Proposal(u
 | Field | Type | Meaning |
 |---|---|---|
 | `id` | `u64` | Monotonically assigned at creation, starting from 1. |
-| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100. |
+| `proposed_weights` | `ScoringWeights` | The weights that will be queued if the proposal passes. Must sum to exactly 100 and each component weight must be at least 10 (`MIN_COMPONENT_WEIGHT`). |
 | `votes_for` | `i128` | Accumulated registered voting weight cast in favor. Saturating add. |
 | `votes_against` | `i128` | Accumulated registered voting weight cast against. Saturating add. |
 | `expiry_ledger` | `u32` | Ledger sequence after which `vote` is rejected (`ProposalExpired`). Set to `current_sequence + voting_period_ledgers` at creation. |
@@ -81,7 +81,7 @@ Any non-zero `voting_period_ledgers` or `execution_delay_ledgers` adds on top of
 
 ### 2.3 Known Test Inconsistency (Issue #8)
 
-The unit tests `test_execution_timelock_delays_after_voting_ends` inside `contracts/governance/src/lib.rs` and `test_governance_execution_timelock_integration` inside `contracts/tests/src/integration_test.rs` call `execute()` and then immediately read `get_scoring_weights()` to assert the new values, **without** waiting the additional 17,280 ledgers or calling `apply_weights()`. These assertions are inconsistent with the real contract behavior described in ADR-003 and implemented in both `governance.execute` (which calls `propose_weights`, not `apply_weights`) and `credit-oracle.apply_weights` (which panics `timelock not expired` before `effective_ledger`).
+The unit tests `test_execution_timelock_delays_after_voting_ends` inside `contracts/governance/src/lib.rs` and `test_governance_execution_timelock_integration` inside `contracts/tests/src/integration_test.rs` call `execute()` and then immediately read `get_scoring_weights()` to assert the new values, **without** waiting the additional 17,280 ledgers or calling `apply_weights()`. These assertions are inconsistent with the real contract behavior described in ADR-003 and implemented in both `governance.execute` (which calls `propose_weights`, not `apply_weights`) and `credit-oracle.apply_weights` (which rejects with `TimelockNotExpired` before `effective_ledger`).
 
 The accurate working test is `test_governance_proposal_creation_voting_and_execution` in the governance contract's own tests, which correctly:
 
@@ -102,18 +102,18 @@ When reading tests, prefer the pattern in that test as the canonical flow. The i
 - Multiple partial votes across different `vote` transactions are allowed, as long as the sum for a voter on a proposal does not exceed their registered total.
 - Weights are NOT locked across proposals: the same registered total is available independently per proposal (because `VoteWeightUsed` is keyed by `(proposal_id, Address)`). A voter with weight 100 can vote 100 FOR on proposal 1 and 100 AGAINST on proposal 2 concurrently.
 
-### 2.5 The `cancel()` Function Is a Stub
+### 2.5 The `cancel_proposal()` Function
 
-The public `cancel(env, canceller, proposal_id, reason)` entrypoint:
+The public `cancel_proposal(env, canceller, proposal_id)` entrypoint:
 
-- Requires `canceller.require_auth()` (any signer is accepted — the contract does **not** check that canceller is admin, proposer, or any specific role).
-- Emits a `PropCanc` event with the canceller address and optional reason string.
-- Does **not** set any flag on the `GovernanceProposal` struct.
-- Does **not** prevent subsequent `vote` calls.
-- Does **not** prevent subsequent `execute` calls.
-- Does **not** refund or reset used vote weights.
+- Requires `canceller.require_auth()`, **and** the contract checks that `canceller` is either the original proposer (`DataKey::Proposer(proposal_id)`) or the contract admin. Any other caller gets `NotAuthorized`.
+- Returns `ProposalNotFound` if the proposal doesn't exist, `ProposalAlreadyExecuted` if `execute` already succeeded, and `ProposalAlreadyCancelled` if it was already cancelled.
+- Sets `cancelled: bool = true` on the stored `GovernanceProposal`.
+- Cancellation is immediate and permanent: a cancelled proposal can never be executed, and `vote` rejects on it just like it rejects on an executed proposal.
+- Does **not** refund or reset already-used vote weights — this is intentional, since registered voting weight is per-proposal (§2.4), not consumed globally, so no refund is needed for a voter to participate in other proposals.
+- Emits a `PropCanc` event with `proposal_id` as an extra topic and the `canceller` address as data, so off-chain indexers can track cancellations.
 
-It is currently an off-chain signaling hook only. Operators should not rely on it for on-chain cancellation guarantees.
+Cancellation has real on-chain enforcement: once cancelled, both `vote` and `execute` fail for that proposal for the rest of its lifetime.
 
 ---
 
@@ -355,7 +355,7 @@ assert_eq!(pending.weights.repayment_weight, 30);
 
 **What happens when a proposal fails the vote but quorum was met?** If `votes_for <= votes_against`, `execute` skips the `propose_weights` call but still sets `executed = true` and emits the event. The proposal is finalized as rejected; no weights change, no credit-oracle timelock is started.
 
-**What happens if quorum is not met?** `execute` returns `QuorumNotMet`, does NOT set `executed = true`. The proposal remains open for (re-)execution in the future — but there is no way to add votes, since `vote` rejects after `expiry_ledger`. In effect, a proposal that fails quorum is permanently stuck unexecuted. The `cancel()` stub cannot help here (see §2.5).
+**What happens if quorum is not met?** `execute` returns `QuorumNotMet`, does NOT set `executed = true`. The proposal remains open for (re-)execution in the future — but there is no way to add votes, since `vote` rejects after `expiry_ledger`. In effect, a proposal that fails quorum is permanently stuck unexecuted unless the proposer or admin calls `cancel_proposal` (see §2.5), which marks it `cancelled` and takes it out of active enumeration via `list_proposals`.
 
 Events: `PropExec(u64 id)` with data `(votes_for, votes_against)`.
 
@@ -369,7 +369,12 @@ pub fn apply_weights(env: Env) -> Result<(), GovernanceError>
 **Auth:** none — permissionless. Any caller can finalize the credit-oracle's pending weights after its timelock expires. There is no `proposal_id` argument: there can be at most one set of pending weights in the credit-oracle at any given time, because `credit-oracle.propose_weights` overwrites `PendingWeights` and `PendingWeightsEffectiveLedger` each call.
 
 **Errors:**
-- `NotAuthorized` (misleading error name) if `CreditOracle` storage key is missing. Returned as `Gov` side only when governance was never initialized with a credit-oracle address. The actual credit-oracle `apply_weights` panics with the string `"timelock not expired"` before the effective ledger and panics with `"no pending weights"` if nothing was proposed.
+- `TimelockNotExpired` if the credit-oracle's 17,280-ledger timelock has not yet elapsed. The relay maps the credit-oracle's typed `CreditOracleError::TimelockNotExpired` to its own `GovernanceError::TimelockNotExpired`.
+- `NoPendingWeights` if nothing was proposed (`PendingWeightsEffectiveLedger` is unset in the credit-oracle), or if the credit-oracle invocation failed for an unexpected reason.
+- `ContractPaused` if the credit-oracle is paused and refuses the write.
+- `NotAuthorized` if the `CreditOracle` storage key is missing — returned only when governance was never initialized with a credit-oracle address.
+
+Previously these situations surfaced as raw panics inside the credit-oracle (`panic!("timelock not expired")`, `.expect("no pending weights")`), which governance tooling could not distinguish or handle. `apply_weights` now propagates typed errors only.
 
 **Worked example — step 2 of 2, weights finally go active:**
 
@@ -439,6 +444,7 @@ No auth, no side effects.
 | `get_voter_weight` | `(env, voter: Address) -> Option<i128>` | Registered total weight, or `None` if not registered. |
 | `get_vote_weight_used` | `(env, proposal_id: u64, voter: Address) -> i128` | Used weight on a specific proposal. 0 if never voted. |
 | `get_available_vote_weight` | `(env, proposal_id: u64, voter: Address) -> i128` | `total_weight - used_weight`. 0 if not registered (total defaults to 0). |
+| `list_proposals` | `(env, from_id: u64, limit: u32, include_inactive: bool) -> Vec<GovernanceProposal>` | Enumerates up to `limit` (max 20) proposals starting from `from_id`. Skips non-existent proposals and filters inactive (cancelled/executed) proposals unless `include_inactive` is true. Returns empty vector if `from_id >= NextProposalId`. |
 
 ---
 
@@ -490,7 +496,7 @@ All events use Soroban's `(topics_tuple, data)` shape with the first topic eleme
 | `VoterReg` | `voter: Address` | `weight: i128` | `register_voter` |
 | `VoterUpd` | `voter: Address` | `weight: i128` | `update_voter_weight` |
 | `VoterDer` | `voter: Address` | `()` (unit) | `deregister_voter` |
-| `PropCanc` | `proposal_id: u64` | `(canceller: Address, reason: Option<String>)` | `cancel` (stub) |
+| `PropCanc` | `proposal_id: u64` | `canceller: Address` | `cancel_proposal` |
 
 Also subscribe to credit-oracle events for the downstream weight-change steps:
 
@@ -499,7 +505,17 @@ Also subscribe to credit-oracle events for the downstream weight-change steps:
 
 ### 4.4 TypeScript SDK
 
-The governance contract is currently **not exposed in `packages/sdk/src/index.ts`** (as of the workspace state at time of writing). Score-reading methods are implemented; `anchorDID`, `issueVC`, and governance helpers are listed as open/planned. Integration from TypeScript today should use the generic `SorobanRpc.Server` + contract spec directly, calling the same function names and argument order documented above. The `ScoringWeights` struct type IS already exported by the SDK (per CHANGELOG #20), so callers can reuse it for proposal and pending-weight payloads.
+The SDK exposes `GovernanceClient` as `sdk.governance` when
+`ProtocolConfig.governanceId` is configured. It provides signed helpers for
+`createProposal`, `vote`, `execute`, and `applyWeights`, plus read-only
+`getProposal` and `listProposals` helpers. See
+[`packages/sdk/README.md`](../packages/sdk/README.md#governance) for the
+TypeScript API and examples.
+
+`listProposals` scans the contract's monotonically increasing proposal IDs
+because the governance contract exposes `get_proposal` but does not expose a
+bulk list entrypoint. Its `fromId` and `limit` arguments therefore bound the
+number of read-only simulations performed by the client.
 
 ---
 
@@ -516,24 +532,42 @@ The governance contract is currently **not exposed in `packages/sdk/src/index.ts
   - Call `credit_oracle.upgrade(admin, new_wasm_hash)` via a cross-contract call from their admin position (they would need to add that call path — the current governance contract does not expose an `upgrade` passthrough, but the admin of the governance contract can deploy an upgrade TO governance itself through the normal Soroban upgrade flow if they have the wasm hash, and governance-as-credit-oracle-admin can thereafter call `credit_oracle.upgrade`).
 - This model is appropriate for testnet / initial trusted-steward deployment. A production DAO model requires token-weighted voting and an admin multisig or timelock on the governance admin itself.
 
-### 5.2 No On-Chain Cancellation
+### 5.2 Cancellation Authority Is Proposer-or-Admin
 
-`cancel()` emits an event but does not actually prevent `vote` or `execute` from running. Operators relying on a cancellation signal today must enforce it in the off-chain layer (e.g., by refusing to call `execute`). An attacker who can front-run the canceler can still vote and execute before any off-chain coordination completes.
+`cancel_proposal` enforces on-chain that the caller is either the original proposer or the contract admin (see §2.5); it blocks further `vote` and `execute` calls immediately once it succeeds. This means:
+
+- A proposer can unilaterally kill their own proposal at any time before it executes, even over the objection of voters who have already cast weight in favor.
+- The admin can cancel *any* proposal, including one it did not create. Combined with §5.1's centralization concerns, a malicious or compromised admin could cancel proposals it disfavors rather than let them reach quorum and execute.
+- Because cancellation is instant and requires only one transaction, there is no front-running window: once `cancel_proposal` lands, the proposal is dead in the same ledger, unlike the earlier event-only implementation this function replaced.
 
 ### 5.3 Double-Timelock and Reaction Windows
 
 - Reaction window #1 (governance `execution_delay_ledgers`) starts when voting closes. Operators should set this to a non-zero value for mainnet proposals so the community can review the outcome of a contentious vote before `execute` queues the weights.
 - Reaction window #2 (credit-oracle 17,280 ledgers) is fixed and unavoidable even with `execution_delay_ledgers = 0`. Users and integrators can inspect `credit-oracle.get_pending_weights()` during this window and, if disagreeing, exit dependent positions.
-- There is NO `update_weights` bypass in the current credit-oracle code. Earlier documentation (`docs/EPOCH_MODEL.md` §5.2 and §8 table) mentions an `update_weights` admin bypass that was never merged into `credit-oracle/src/lib.rs`. The code only exposes `propose_weights` → `apply_weights`. All weight changes, even admin-initiated, must wait the 17,280-ledger timelock. (The admin of the credit-oracle — i.e., the governance contract — can always deploy a new credit-oracle WASM via `upgrade`, which changes behavior without going through the weight timelock. This is an orthogonal escape hatch.)
+- There is NO `update_weights` bypass in the current credit-oracle code. Earlier documentation (`docs/epoch-model.md` §5.2 and §8 table) mentions an `update_weights` admin bypass that was never merged into `credit-oracle/src/lib.rs`. The code only exposes `propose_weights` → `apply_weights`. All weight changes, even admin-initiated, must wait the 17,280-ledger timelock. (The admin of the credit-oracle — i.e., the governance contract — can always deploy a new credit-oracle WASM via `upgrade`, which changes behavior without going through the weight timelock. This is an orthogonal escape hatch.)
 
 ### 5.4 Instance TTL and Lost Pending Proposals
 
-- If no admin-gated call is made on governance for longer than the instance TTL window (~30 days with the default pattern used in the other three contracts — see `EPOCH_MODEL.md`), the governance contract's instance storage could be archived. If that happens before `apply_weights` is called, the `CreditOracle` instance key is lost. The pending weights inside the credit-oracle are **still there** (they live in credit-oracle's instance storage, managed by credit-oracle admin-gated calls), so an operator can call `credit-oracle.apply_weights()` directly without going through governance. The governance contract being archived does not trap pending weights — but it does mean future proposals cannot be created until governance is redeployed and re-accepted as credit-oracle admin.
+- If no admin-gated call is made on governance for longer than the instance TTL window (~30 days with the default pattern used in the other three contracts — see `epoch-model.md`), the governance contract's instance storage could be archived. If that happens before `apply_weights` is called, the `CreditOracle` instance key is lost. The pending weights inside the credit-oracle are **still there** (they live in credit-oracle's instance storage, managed by credit-oracle admin-gated calls), so an operator can call `credit-oracle.apply_weights()` directly without going through governance. The governance contract being archived does not trap pending weights — but it does mean future proposals cannot be created until governance is redeployed and re-accepted as credit-oracle admin.
 - Moral: ensure at least one admin-gated call runs on governance every ~30 days. A cronned `set_quorum(admin, current_quorum_value)` (no-op write) suffices.
 
 ### 5.5 Proposal ID and Creation Order
 
-IDs are assigned from `NextProposalId`, which starts at 1 and increments by 1 each `create_proposal`. The counter is stored in instance storage (not persistent), but the actual proposals are stored in persistent storage keyed by ID. There is no reverse index of `proposer → proposal_ids` or a paginated list; off-chain indexers should track `PropCreat` events to build a proposal list.
+Proposal IDs are intentionally **1-based**. `NextProposalId` is initialized to
+`1`, so the first call to `create_proposal` returns ID `1`; each subsequent call
+increments the ID by `1`. ID `0` is unused and should not be queried or used as
+the starting point for off-chain iteration.
+
+The counter is stored in instance storage (not persistent), but the actual
+proposals are stored in persistent storage keyed by ID. Proposals can be
+enumerated on-chain using `list_proposals(from_id, limit, include_inactive)`;
+callers that want all proposals should start with `from_id = 1`. Off-chain
+indexers can also track `PropCreat` events, whose proposal ID is the canonical
+identifier.
+
+This convention is part of the deployed contract interface. Changing the first
+ID to `0` would require coordinating a migration for existing deployments and
+updating every indexer, SDK, and integration that consumes proposal IDs.
 
 ### 5.6 No Proposal Expiry Cleanup
 

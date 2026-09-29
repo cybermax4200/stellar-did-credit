@@ -1,5 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { Feeder, parsePollIntervalMs, MIN_POLL_INTERVAL_MS } from "./index";
+import {
+  Feeder,
+  parsePollIntervalMs,
+  MIN_POLL_INTERVAL_MS,
+  isValidSorobanContractId,
+} from "./index";
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
@@ -20,6 +25,8 @@ const mockServerInstance = {
   getTransaction: jest.fn().mockResolvedValue({
     status: "SUCCESS",
   }),
+  getLatestLedger: jest.fn().mockResolvedValue({ sequence: 100 }),
+  getEvents: jest.fn().mockResolvedValue({ events: [], latestLedger: 100 }),
 };
 
 const mockHorizonPaymentsCall = jest
@@ -67,9 +74,22 @@ jest.mock("@stellar/stellar-sdk", () => ({
   Account: jest.fn(),
   scValToNative: jest.fn().mockReturnValue(3),
   nativeToScVal: jest.fn().mockReturnValue({}),
-  Address: jest.fn().mockImplementation(() => ({
-    toScVal: jest.fn().mockReturnValue({}),
-  })),
+  Address: Object.assign(
+    jest.fn().mockImplementation(() => ({
+      toScVal: jest.fn().mockReturnValue({}),
+    })),
+    {
+      fromString: jest.fn((address: string) => {
+        if (
+          (address.startsWith("C") || address.startsWith("G")) &&
+          address.length === 56
+        ) {
+          return {};
+        }
+        throw new Error("Invalid address");
+      }),
+    },
+  ),
   xdr: {
     ScVal: {
       scvMap: jest.fn().mockReturnValue({}),
@@ -106,6 +126,8 @@ beforeEach(() => {
   mockServerInstance.getTransaction.mockResolvedValue({
     status: "SUCCESS",
   });
+  mockServerInstance.getLatestLedger.mockResolvedValue({ sequence: 100 });
+  mockServerInstance.getEvents.mockResolvedValue({ events: [], latestLedger: 100 });
   mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
 });
 
@@ -650,6 +672,29 @@ describe("Error classification helpers", () => {
   });
 });
 
+describe("isValidSorobanContractId", () => {
+  it("accepts a well-formed Soroban contract address", () => {
+    expect(isValidSorobanContractId("C" + "A".repeat(55))).toBe(true);
+  });
+
+  it("rejects addresses that do not start with C", () => {
+    expect(isValidSorobanContractId("G" + "A".repeat(55))).toBe(false);
+    expect(isValidSorobanContractId("c" + "A".repeat(55))).toBe(false);
+  });
+
+  it("rejects addresses with the wrong length", () => {
+    expect(isValidSorobanContractId("C" + "A".repeat(10))).toBe(false);
+    expect(isValidSorobanContractId("C" + "A".repeat(54))).toBe(false);
+    expect(isValidSorobanContractId("C" + "A".repeat(56))).toBe(false);
+  });
+
+  it("rejects empty, whitespace, and non-string values", () => {
+    expect(isValidSorobanContractId("")).toBe(false);
+    expect(isValidSorobanContractId("   ")).toBe(false);
+    expect(isValidSorobanContractId("not-an-address")).toBe(false);
+  });
+});
+
 describe("parsePollIntervalMs", () => {
   let exitSpy: jest.SpyInstance;
   let errorSpy: jest.SpyInstance;
@@ -739,5 +784,790 @@ describe("parsePollIntervalMs", () => {
   it("handles whitespace-padded valid values", () => {
     expect(parsePollIntervalMs("  3600000  ")).toBe(3_600_000);
     expect(exitSpy).not.toHaveBeenCalled();
+  });
+});
+
+describe("Dead-letter queue", () => {
+  let consoleLogSpy: jest.SpyInstance;
+  let consoleErrorSpy: jest.SpyInstance;
+  let consoleWarnSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+    consoleErrorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    consoleWarnSpy = jest.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+    consoleErrorSpy.mockRestore();
+    consoleWarnSpy.mockRestore();
+  });
+
+  it("subject appears in dead-letter after MAX_CONSECUTIVE_FAILURES consecutive failures", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    // feedSubject throws every time
+    jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+
+    // Subject should be in dead-letter queue
+    const deadLetters = feeder.getDeadLetterSubjects();
+    expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567232");
+
+    // Should have logged ERROR with [dead-letter] prefix
+    const deadLetterErrors = consoleErrorSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("[dead-letter]") && call[0].includes("has failed"),
+    );
+    expect(deadLetterErrors.length).toBeGreaterThan(0);
+  });
+
+  it("subject is cleared from dead-letter after a successful feed", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail 5 times to enter dead-letter
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+    expect(feeder.getDeadLetterSubjects()).toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Now succeed
+    feedSubjectSpy.mockResolvedValue(undefined);
+    await feeder.runCycle();
+
+    // Dead-letter should be cleared
+    expect(feeder.getDeadLetterSubjects()).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have logged recovery message
+    const recoveryLogs = consoleLogSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("recovered"),
+    );
+    expect(recoveryLogs.length).toBeGreaterThan(0);
+  });
+
+  it("logs sub-threshold failures at warn level with failure count", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail only 3 times (below threshold of 5)
+    for (let i = 0; i < 3; i++) {
+      await feeder.runCycle();
+    }
+
+    // Subject should NOT be in dead-letter yet
+    const deadLetters = feeder.getDeadLetterSubjects();
+    expect(deadLetters).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have logged warn with failure count
+    const warnLogs = consoleWarnSpy.mock.calls.filter(
+      (call: string[]) => typeof call[0] === "string" && call[0].includes("[dead-letter]") && call[0].includes("will retry"),
+    );
+    expect(warnLogs.length).toBeGreaterThan(0);
+  });
+
+  it("still retries dead-letter subjects each cycle", async () => {
+    const configWithThreshold: FeederConfig = {
+      ...config,
+      maxConsecutiveFailures: 5,
+    };
+    const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
+
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+
+    // Fail 5 times to enter dead-letter
+    for (let i = 0; i < 5; i++) {
+      await feeder.runCycle();
+    }
+
+    // Fail one more cycle — feedSubject should still be called for both subjects
+    feedSubjectSpy.mockClear();
+    feedSubjectSpy.mockRejectedValue(new Error("still failing"));
+    await feeder.runCycle();
+
+    // feedSubject was still called for both subjects (dead-letter does not drop)
+    expect(feedSubjectSpy).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("Feeder oracle configuration handling", () => {
+  let consoleLogSpy: jest.SpyInstance;
+
+  beforeEach(() => {
+    consoleLogSpy = jest.spyOn(console, "log").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    consoleLogSpy.mockRestore();
+  });
+
+  it("skips set_vc_count when identity oracle is configured", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return true (oracle is configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(true);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for update_tx_stats only
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should log that set_vc_count is being skipped due to cross-contract lookup
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "  skipping set_vc_count (cross-contract lookup configured)"
+    );
+
+    // Should have only submitted one transaction (update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    getHasIdentityOracleSpy.mockRestore();
+  });
+
+  it("skips set_vc_count when skipLegacyVcCount is explicitly enabled", async () => {
+    const configWithSkip: FeederConfig = {
+      ...config,
+      skipLegacyVcCount: true,
+    };
+    const feeder = new Feeder(configWithSkip, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return false (oracle not configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(false);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for update_tx_stats only
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should log that set_vc_count is being skipped due to explicit configuration
+    expect(consoleLogSpy).toHaveBeenCalledWith(
+      "  skipping set_vc_count (skipLegacyVcCount enabled)"
+    );
+
+    // Should have only submitted one transaction (update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    getHasIdentityOracleSpy.mockRestore();
+  });
+
+  it("calls set_vc_count when neither oracle nor skipLegacyVcCount are configured", async () => {
+    const feeder = new Feeder(config, { publicKey: () => "GFEEDER" } as unknown as Keypair);
+
+    // Mock getHasIdentityOracle to return false (oracle not configured)
+    const getHasIdentityOracleSpy = jest
+      .spyOn(feeder, "getHasIdentityOracle")
+      .mockResolvedValue(false);
+
+    // Mock the other necessary functions
+    jest.mocked(sdk.scValToNative).mockReturnValue(3);
+    mockHorizonPaymentsCall.mockResolvedValue({ records: [] });
+
+    // Mock successful transaction submission for both set_vc_count and update_tx_stats
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction
+      .mockResolvedValueOnce({
+        status: "PENDING",
+        hash: "set-vc-count-hash",
+      })
+      .mockResolvedValueOnce({
+        status: "PENDING",
+        hash: "update-tx-stats-hash",
+      });
+    mockServerInstance.getTransaction.mockResolvedValue({
+      status: "SUCCESS",
+    });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+
+    await feeder.feedSubject("GBAD5234567234567234567234567234567234567234567234567231");
+
+    // Should have called getHasIdentityOracle to check configuration
+    expect(getHasIdentityOracleSpy).toHaveBeenCalled();
+
+    // Should NOT have logged the skip message
+    const skipLogs = consoleLogSpy.mock.calls.filter(
+      (call: string[]) => call[0]?.includes("skipping set_vc_count")
+    );
+    expect(skipLogs).toHaveLength(0);
+
+    // Should have submitted two transactions (set_vc_count + update_tx_stats)
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(2);
+
+    // Should log the transaction hashes
+    expect(consoleLogSpy).toHaveBeenCalledWith("  set_vc_count tx   = set-vc-count-hash");
+    expect(consoleLogSpy).toHaveBeenCalledWith("  update_tx_stats tx = update-tx-stats-hash");
+
+    getHasIdentityOracleSpy.mockRestore();
+  }, 15_000);
+});
+
+// ---------------------------------------------------------------------------
+// fetchHorizonStats — mixed operation types (issue #503)
+// ---------------------------------------------------------------------------
+
+describe("fetchHorizonStats — mixed operation types", () => {
+  const SUBJECT = "GBAD5234567234567234567234567234567234567234567234567231";
+  const OTHER   = "GBAD5234567234567234567234567234567234567234567234567232";
+  const NOW_ISO = new Date(Date.now() - 60_000).toISOString(); // 1 minute ago
+
+  it("counts path_payment_strict_send XLM source leg in volume and tx_count", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "txhash-pps",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          // Source leg: 5 XLM native
+          source_asset_type: "native",
+          source_amount: "5.0000000",
+          // Destination leg: non-native asset
+          asset_type: "credit_alphanum4",
+          amount: "100.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // 5 XLM = 50_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(50_000_000));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("counts path_payment_strict_receive XLM destination leg in volume and tx_count", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_receive",
+          transaction_hash: "txhash-ppr",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          // Source leg: non-native
+          source_asset_type: "credit_alphanum4",
+          source_amount: "50.0000000",
+          // Destination leg: 10 XLM native received by SUBJECT
+          asset_type: "native",
+          amount: "10.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // 10 XLM = 100_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(100_000_000));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("does NOT count non-native path payment legs in volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "txhash-nonxlm",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          source_asset_type: "credit_alphanum4",
+          source_amount: "999.0000000",
+          asset_type: "credit_alphanum4",
+          amount: "888.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // No XLM legs — volume stays 0 but tx is counted
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("counts create_account in tx_count but not volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "create_account",
+          transaction_hash: "txhash-ca",
+          created_at: NOW_ISO,
+          funder: SUBJECT,
+          account: OTHER,
+          starting_balance: "1.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+    // OTHER is tracked as a counterparty
+    expect(stats.avgCounterparties).toBe(1);
+  });
+
+  it("counts claim_claimable_balance in tx_count but not volume", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        {
+          type: "claim_claimable_balance",
+          transaction_hash: "txhash-ccb",
+          created_at: NOW_ISO,
+          claimant: SUBJECT,
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    expect(stats.volume30d).toBe(BigInt(0));
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("aggregates mixed operation types correctly across one page", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({
+      records: [
+        // 1) plain XLM payment — 3 XLM
+        {
+          type: "payment",
+          transaction_hash: "tx1",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          asset_type: "native",
+          amount: "3.0000000",
+        },
+        // 2) path_payment_strict_send — SUBJECT sends 5 XLM, receives non-native
+        {
+          type: "path_payment_strict_send",
+          transaction_hash: "tx2",
+          created_at: NOW_ISO,
+          from: SUBJECT,
+          to: OTHER,
+          source_asset_type: "native",
+          source_amount: "5.0000000",
+          asset_type: "credit_alphanum4",
+          amount: "200.0000000",
+        },
+        // 3) create_account — SUBJECT funded a new account (no volume)
+        {
+          type: "create_account",
+          transaction_hash: "tx3",
+          created_at: NOW_ISO,
+          funder: SUBJECT,
+          account: OTHER,
+          starting_balance: "1.0000000",
+        },
+        // 4) claim_claimable_balance — no volume
+        {
+          type: "claim_claimable_balance",
+          transaction_hash: "tx4",
+          created_at: NOW_ISO,
+          claimant: SUBJECT,
+        },
+        // 5) non-XLM payment — should not add to volume
+        {
+          type: "payment",
+          transaction_hash: "tx5",
+          created_at: NOW_ISO,
+          from: OTHER,
+          to: SUBJECT,
+          asset_type: "credit_alphanum4",
+          amount: "999.0000000",
+        },
+      ],
+      next: jest.fn().mockResolvedValue({ records: [] }),
+    });
+
+    const stats = await fetchHorizonStats("https://horizon.example", SUBJECT);
+
+    // volume = 3 XLM (payment) + 5 XLM (path_payment source) = 8 XLM = 80_000_000 stroops
+    expect(stats.volume30d).toBe(BigInt(80_000_000));
+    // all 5 ops are in distinct transactions
+    expect(stats.txCount30d).toBe(5);
+  });
+});
+
+
+// ---------------------------------------------------------------------------
+// Issue #518: a transient failure mid-pagination must not discard the subject
+// ---------------------------------------------------------------------------
+
+const PARTIAL_SUBJECT =
+  "GBAD5234567234567234567234567234567234567234567234567233";
+
+/** A transient Horizon failure (503) shaped like an SDK HTTP error. */
+function transientHorizonError(): any {
+  const err: any = new Error("503 Service Unavailable");
+  err.response = { status: 503 };
+  return err;
+}
+
+/** One page holding a single in-window 10 XLM payment on its own transaction. */
+function pageWithPayment(
+  subject: string,
+  txHash: string,
+  next: () => Promise<any>,
+): any {
+  return {
+    records: [
+      {
+        type: "payment",
+        transaction_hash: txHash,
+        created_at: new Date().toISOString(),
+        from: subject,
+        to: "GOTHER234567234567234567234567234567234567234567234567234",
+        asset_type: "native",
+        amount: "10.0000000",
+      },
+    ],
+    next,
+  };
+}
+
+describe("Horizon partial pagination handling (#518)", () => {
+  it("retries page.next() up to maxRetries, then commits the pages already read", async () => {
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const { fetchHorizonStats } = await import("./index");
+
+    // Page 1 succeeds; the jump to page 2 fails transiently every time.
+    const next = jest.fn().mockImplementation(() => {
+      throw transientHorizonError();
+    });
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 2, retryBaseDelayMs: 1 },
+    );
+
+    // Initial attempt + 2 retries.
+    expect(next).toHaveBeenCalledTimes(3);
+
+    // Page 1's data survives instead of being thrown away.
+    expect(stats.partial).toBe(true);
+    expect(stats.txCount30d).toBe(1);
+    expect(stats.volume30d).toBe(BigInt(100_000_000));
+    expect(stats.avgCounterparties).toBe(1);
+    expect(consoleWarn).toHaveBeenCalled();
+
+    consoleWarn.mockRestore();
+  });
+
+  it("returns a complete result when a retried page.next() eventually succeeds", async () => {
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const { fetchHorizonStats } = await import("./index");
+
+    // Page 2 fails once, then succeeds and yields a second payment.
+    const next = jest
+      .fn()
+      .mockImplementationOnce(() => {
+        throw transientHorizonError();
+      })
+      .mockImplementationOnce(() =>
+        Promise.resolve(
+          pageWithPayment(
+            PARTIAL_SUBJECT,
+            "tx2",
+            jest.fn().mockResolvedValue({ records: [] }),
+          ),
+        ),
+      );
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 3, retryBaseDelayMs: 1 },
+    );
+
+    expect(next).toHaveBeenCalledTimes(2);
+    // Both pages were aggregated, so nothing is missing.
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(2);
+    expect(stats.volume30d).toBe(BigInt(200_000_000));
+
+    consoleWarn.mockRestore();
+  });
+
+  it("rethrows a non-transient mid-pagination error instead of silently truncating", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    const next = jest.fn().mockImplementation(() => {
+      throw new Error("malformed response body");
+    });
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(PARTIAL_SUBJECT, "tx1", next),
+    );
+
+    await expect(
+      fetchHorizonStats("https://horizon.example", PARTIAL_SUBJECT, {
+        maxRetries: 2,
+        retryBaseDelayMs: 1,
+      }),
+    ).rejects.toThrow("malformed response body");
+
+    // Permanent errors are not retried.
+    expect(next).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports partial: false for a fully paginated fetch", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce(
+      pageWithPayment(
+        PARTIAL_SUBJECT,
+        "tx1",
+        jest.fn().mockResolvedValue({ records: [] }),
+      ),
+    );
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+      { maxRetries: 2, retryBaseDelayMs: 1 },
+    );
+
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(1);
+  });
+
+  it("reports partial: false when the account has no history", async () => {
+    const { fetchHorizonStats } = await import("./index");
+
+    mockHorizonPaymentsCall.mockResolvedValueOnce({ records: [] });
+
+    const stats = await fetchHorizonStats(
+      "https://horizon.example",
+      PARTIAL_SUBJECT,
+    );
+
+    expect(stats.partial).toBe(false);
+    expect(stats.txCount30d).toBe(0);
+  });
+});
+
+describe("FEEDER_ALLOW_PARTIAL_STATS gating (#518)", () => {
+  const SUBJECT = config.subjects[0]!;
+
+  /** Config tuned for fast retries; identity oracle is mocked as configured. */
+  const fastConfig: FeederConfig = {
+    ...config,
+    maxRetries: 1,
+    retryBaseDelayMs: 1,
+  };
+
+  /** Makes Horizon serve one page and then fail transiently forever. */
+  function serveOnePageThenFail(): void {
+    mockHorizonPaymentsCall.mockResolvedValue(
+      pageWithPayment(
+        SUBJECT,
+        "tx1",
+        jest.fn().mockImplementation(() => {
+          throw transientHorizonError();
+        }),
+      ),
+    );
+  }
+
+  function primeTransactionMocks(): void {
+    mockServerInstance.simulateTransaction.mockResolvedValue({
+      result: { retval: {} },
+    });
+    mockServerInstance.sendTransaction.mockResolvedValue({
+      status: "PENDING",
+      hash: "update-tx-stats-hash",
+    });
+    mockServerInstance.getTransaction.mockResolvedValue({ status: "SUCCESS" });
+    mockServerInstance.getAccount.mockResolvedValue({
+      sequenceNumber: () => "99",
+    });
+    jest.mocked(sdk.scValToNative).mockReturnValue(1);
+  }
+
+  it("submits partial stats and logs partial = true by default", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const feeder = new Feeder(fastConfig, {
+      publicKey: () => "GFEEDER",
+    } as unknown as Keypair);
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    serveOnePageThenFail();
+
+    await feeder.feedSubject(SUBJECT);
+
+    // The partial flag gets its own log line so monitoring can alert on it.
+    expect(
+      consoleLog.mock.calls.some((c) =>
+        String(c[0]).includes("partial           = true"),
+      ),
+    ).toBe(true);
+    // set_vc_count is skipped (identity oracle configured), so the single
+    // submission here is update_tx_stats: partial data was still committed.
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("suppresses update_tx_stats when allowPartialStats is false", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+    const consoleWarn = jest
+      .spyOn(console, "warn")
+      .mockImplementation(() => {});
+
+    const feeder = new Feeder(
+      { ...fastConfig, allowPartialStats: false },
+      { publicKey: () => "GFEEDER" } as unknown as Keypair,
+    );
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    serveOnePageThenFail();
+
+    await feeder.feedSubject(SUBJECT);
+
+    // Nothing was written on-chain for this subject.
+    expect(mockServerInstance.sendTransaction).not.toHaveBeenCalled();
+    expect(
+      consoleWarn.mock.calls.some((c) =>
+        String(c[0]).includes("skipping update_tx_stats"),
+      ),
+    ).toBe(true);
+
+    consoleLog.mockRestore();
+    consoleWarn.mockRestore();
+  });
+
+  it("still submits a complete fetch when allowPartialStats is false", async () => {
+    const consoleLog = jest.spyOn(console, "log").mockImplementation(() => {});
+
+    const feeder = new Feeder(
+      { ...fastConfig, allowPartialStats: false },
+      { publicKey: () => "GFEEDER" } as unknown as Keypair,
+    );
+    jest.spyOn(feeder, "getHasIdentityOracle").mockResolvedValue(true);
+    primeTransactionMocks();
+    mockHorizonPaymentsCall.mockResolvedValue(
+      pageWithPayment(
+        SUBJECT,
+        "tx1",
+        jest.fn().mockResolvedValue({ records: [] }),
+      ),
+    );
+
+    await feeder.feedSubject(SUBJECT);
+
+    expect(mockServerInstance.sendTransaction).toHaveBeenCalledTimes(1);
+    expect(
+      consoleLog.mock.calls.some((c) =>
+        String(c[0]).includes("partial           = false"),
+      ),
+    ).toBe(true);
+
+    consoleLog.mockRestore();
   });
 });

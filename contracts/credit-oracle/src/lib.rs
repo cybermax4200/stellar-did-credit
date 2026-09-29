@@ -1,40 +1,12 @@
 #![no_std]
-pub use credit_oracle_types::{PendingWeightsRecord, ScoringWeights};
+pub use credit_oracle_types::{CreditOracleError, PendingWeightsRecord, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
-    IntoVal, String, Symbol, TryFromVal, Val, Vec,
+    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
+    Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
 pub const MAX_SCORE: u32 = 850;
-
-/// Error types for the credit-oracle contract.
-#[contracterror]
-#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
-pub enum CreditOracleError {
-    /// Contract is already initialized.
-    AlreadyInitialized = 1,
-    /// Caller is not authorized to perform this action.
-    NotAuthorized = 2,
-    /// Feeder is not registered.
-    FeederNotRegistered = 3,
-    /// Lender is not registered.
-    LenderNotRegistered = 4,
-    /// Proposed weights do not sum to 100.
-    InvalidWeights = 5,
-    /// No pending admin proposal exists.
-    NoPendingAdmin = 6,
-    /// Compute score called too soon — cooldown has not elapsed.
-    ComputeCooldownActive = 7,
-    /// A dispute is already pending for this subject and input key.
-    DisputeAlreadyPending = 8,
-    /// No dispute was found for the given subject and input key.
-    DisputeNotFound = 9,
-    /// The provided input key is not a valid score input name.
-    InvalidInputKey = 10,
-    /// The provided identity oracle contract is invalid or did not respond.
-    InvalidIdentityOracle = 11,
-}
 
 /// Aggregate protocol-level counters stored in instance storage.
 ///
@@ -62,9 +34,14 @@ pub enum DataKey {
     Config,
     /// Registered weight for a VC credential type (default 100 when unset)
     VcWeight(Symbol),
-    /// Trusted feeder address authorized to update transaction stats
+    /// Whether the given address is a *currently* trusted transaction-stats
+    /// feeder. Present and `true` while registered; present and `false` once
+    /// deregistered (a tombstone, not removed) so re-registration can be told
+    /// apart from first-time registration without rescanning `FeedersIndex`;
+    /// absent if never registered.
     TrustedFeeder(Address),
-    /// Trusted lender address authorized to record repayments
+    /// Whether the given address is a *currently* trusted repayment-recording
+    /// lender. Tombstone semantics are identical to `TrustedFeeder`.
     TrustedLender(Address),
     /// Transaction statistics for a user
     TxStats(Address),
@@ -86,16 +63,102 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
-    /// Index of all registered feeders
+    /// Append-only index of every address ever registered as a trusted
+    /// feeder. Entries are never removed on deregistration (that would
+    /// require an O(n) rewrite on every `deregister_feeder` call) — a
+    /// deregistered feeder's entry is left in place and its `TrustedFeeder`
+    /// flag is set to `false` instead. Use `list_feeders` (which filters
+    /// this index against `TrustedFeeder`) to get the currently-active set.
     FeedersIndex,
-    /// Index of all registered lenders
+    /// Append-only index of every address ever registered as a trusted
+    /// lender. Entries are never removed on deregistration; use
+    /// `list_lenders` (which filters this index against `TrustedLender`)
+    /// to get the currently-active set.
     LendersIndex,
     /// Dispute record for a (subject, input_key) pair
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
-    /// Whether verbose ScoreDetail events are emitted on compute_score (default false)
-    VerboseEvents,
+    /// Whether the contract is currently paused for writes.
+    Paused,
+    /// Issue #530: whether VC recency decay is applied inside `compute_score`.
+    /// Absent or `false` reproduces the pre-#530 scoring behavior exactly.
+    RecencyDecayEnabled,
+    /// Issue #530: basis points of recency multiplier lost per day of VC age.
+    DecayBpsPerDay,
+    /// Issue #530: lower bound (bps) the recency multiplier may decay to.
+    MinRecencyBps,
+}
+
+/// Basis-point denominator: 10_000 bps == 1.00x multiplier.
+pub const BPS_DENOMINATOR: u32 = 10_000;
+
+/// Seconds in one day. `VCRecord.anchored_at` is a ledger timestamp in Unix
+/// seconds, so credential age must be divided by this to obtain whole days.
+pub const SECONDS_PER_DAY: u64 = 86_400;
+
+/// Default decay rate from docs/vc-weighting-design.md: 5 bps/day (0.05%).
+pub const DEFAULT_DECAY_BPS_PER_DAY: u32 = 5;
+
+/// Default recency floor from docs/vc-weighting-design.md: 5_000 bps (50%).
+pub const DEFAULT_MIN_RECENCY_BPS: u32 = 5_000;
+
+/// Recency decay configuration for the VC component of the score (issue #530).
+///
+/// Returned by `get_recency_decay` and written by `set_recency_decay`. When
+/// `enabled` is `false` the other two fields are ignored and `compute_score`
+/// behaves exactly as it did before recency decay existed.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RecencyDecayConfig {
+    /// Whether `compute_score` applies the recency multiplier.
+    pub enabled: bool,
+    /// Basis points of multiplier lost per whole day of credential age.
+    pub decay_bps_per_day: u32,
+    /// Floor (bps) below which the multiplier never falls, e.g. 5_000 = 50%.
+    pub min_recency_bps: u32,
+}
+
+/// Recency multiplier in basis points for a credential anchored at `anchored_at`.
+///
+/// Implements the model documented in docs/vc-weighting-design.md:
+///
+/// ```text
+/// recency_multiplier = max(min_recency_bps, 10_000 - age_days * decay_bps_per_day)
+/// ```
+///
+/// `anchored_at` and `now` are ledger timestamps in **Unix seconds**; the age is
+/// converted to whole days by integer division by `SECONDS_PER_DAY`, so a
+/// credential keeps full weight for its first 24 hours.
+///
+/// Saturating arithmetic throughout: a credential anchored in the future (clock
+/// skew, or a replayed ledger) yields age 0 rather than underflowing, and an
+/// arbitrarily large `decay_bps_per_day` clamps to the floor instead of
+/// panicking under `overflow-checks`. `min_recency_bps` is also clamped to
+/// `BPS_DENOMINATOR` so a mis-set floor can never *increase* a VC contribution.
+///
+/// The result is monotonically non-decreasing in `anchored_at`: a younger
+/// credential always yields a multiplier greater than or equal to an older one.
+pub fn recency_multiplier_bps(
+    anchored_at: u64,
+    now: u64,
+    decay_bps_per_day: u32,
+    min_recency_bps: u32,
+) -> u32 {
+    let age_days = now.saturating_sub(anchored_at) / SECONDS_PER_DAY;
+    let decay = age_days.saturating_mul(decay_bps_per_day as u64);
+    let multiplier = (BPS_DENOMINATOR as u64).saturating_sub(decay);
+    let floor = (min_recency_bps as u64).min(BPS_DENOMINATOR as u64);
+    multiplier.max(floor) as u32
+}
+
+/// Scale `points` by a basis-point multiplier, rounding down.
+///
+/// Widened to `u64` before multiplying: `points` is already type-weighted and
+/// `recency_bps` can be up to 10_000, so the product overflows `u32` for any
+/// non-trivial input and would panic under `overflow-checks`.
+pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
+    ((points as u64).saturating_mul(recency_bps as u64) / BPS_DENOMINATOR as u64) as u32
 }
 
 /// Scoring components returned by [`compute_score_components`].
@@ -353,6 +416,8 @@ pub struct DisputeRecord {
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
+/// Longest supported compute-score cooldown (approximately five days).
+pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 /// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
@@ -370,6 +435,46 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+/// Read the recency decay configuration from instance storage (issue #530).
+///
+/// Every key is optional: a contract deployed before #530 (or one whose admin
+/// never called `set_recency_decay`) reads back `enabled: false` plus the
+/// documented defaults, which keeps `compute_score` backward compatible with
+/// no storage migration.
+fn load_recency_config(env: &Env) -> RecencyDecayConfig {
+    RecencyDecayConfig {
+        enabled: env
+            .storage()
+            .instance()
+            .get(&DataKey::RecencyDecayEnabled)
+            .unwrap_or(false),
+        decay_bps_per_day: env
+            .storage()
+            .instance()
+            .get(&DataKey::DecayBpsPerDay)
+            .unwrap_or(DEFAULT_DECAY_BPS_PER_DAY),
+        min_recency_bps: env
+            .storage()
+            .instance()
+            .get(&DataKey::MinRecencyBps)
+            .unwrap_or(DEFAULT_MIN_RECENCY_BPS),
+    }
+}
+
+fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
+    if env
+        .storage()
+        .instance()
+        .get(&DataKey::Paused)
+        .unwrap_or(false)
+    {
+        Err(CreditOracleError::ContractPaused)
+    } else {
+        Ok(())
+    }
+
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -418,11 +523,42 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
         env.events()
-            .publish((symbol_short!("Init"),), admin.clone());
+            .publish((Symbol::new(&env, "Initialized"),), admin.clone());
         Ok(())
     }
 
-    /// Register a trusted feeder address
+    /// Return the number of ledgers a subject must wait between score computations.
+    pub fn get_compute_cooldown_ledgers(env: Env) -> u32 {
+        env.storage().instance().get(&DataKey::ComputeCooldownLedgers)
+            .unwrap_or(DEFAULT_COMPUTE_COOLDOWN_LEDGERS)
+    }
+
+    /// Update the compute-score cooldown. Admin only.
+    ///
+    /// `ledgers` must be in `1..=86_400`, allowing up to approximately five days.
+    pub fn set_compute_cooldown_ledgers(env: Env, admin: Address, ledgers: u32) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if ledgers == 0 || ledgers > MAX_COMPUTE_COOLDOWN_LEDGERS {
+            return Err(CreditOracleError::InvalidComputeCooldown);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
+        env.events().publish((Symbol::new(&env, "CooldownUpdated"),), ledgers);
+        Ok(())
+    }
+
+    /// Register a trusted feeder address.
+    ///
+    /// `FeedersIndex` is append-only: the address is pushed only when it is
+    /// not already in the index, so a deregister → re-register cycle never
+    /// duplicates the entry. The flag key is then set to `true`, which both
+    /// activates a fresh registration and clears a deregistration tombstone.
+    ///
+    /// Auth: admin only.
     pub fn register_feeder(
         env: Env,
         admin: Address,
@@ -438,23 +574,35 @@ impl CreditOracle {
         }
         admin.require_auth();
 
-        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
-        if !env.storage().persistent().has(&feeder_key) {
-            let mut feeders: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::FeedersIndex)
-                .unwrap_or(Vec::new(&env));
-            feeders.push_back(feeder.clone());
-            let index_key = DataKey::FeedersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &feeders);
-            env.storage()
-                .persistent()
-                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
+        let index_key = DataKey::FeedersIndex;
+        let feeders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
 
+        // Append-only dedup: check index membership rather than flag-key
+        // presence. A tombstoned (deregistered) feeder still has its flag key,
+        // and a long-dormant flag can outlive — or predecease — its index
+        // entry as the two keys' TTLs are bumped independently, so `has()` on
+        // the flag is not a reliable "already indexed" test.
+        let mut already_indexed = false;
+        for addr in feeders.iter() {
+            if addr == feeder {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            let mut feeders = feeders;
+            feeders.push_back(feeder.clone());
+            env.storage().persistent().set(&index_key, &feeders);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
         env.storage().persistent().set(&feeder_key, &true);
         env.storage()
             .persistent()
@@ -463,7 +611,15 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Deregister a trusted feeder address
+    /// Deregister a trusted feeder address.
+    ///
+    /// Tombstones `TrustedFeeder` (sets it to `false`) instead of removing
+    /// the key, and leaves `FeedersIndex` untouched, so deregistration is a
+    /// single storage write instead of an O(n) scan + rewrite. The index
+    /// stays append-only; `list_feeders` returns the currently-active set by
+    /// filtering it against the flag.
+    ///
+    /// Auth: admin only.
     pub fn deregister_feeder(
         env: Env,
         admin: Address,
@@ -478,30 +634,25 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let feeder_key = DataKey::TrustedFeeder(feeder.clone());
+        env.storage().persistent().set(&feeder_key, &false);
         env.storage()
             .persistent()
-            .remove(&DataKey::TrustedFeeder(feeder.clone()));
-
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::FeedersIndex)
-            .unwrap_or(Vec::new(&env));
-
-        let mut compacted = Vec::new(&env);
-        for i in 0..ever_registered.len() {
-            let addr: Address = ever_registered.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(addr.clone())) {
-                compacted.push_back(addr);
-            }
-        }
-        env.storage().persistent().set(&DataKey::FeedersIndex, &compacted);
+            .extend_ttl(&feeder_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events().publish((symbol_short!("FdrDeReg"),), feeder);
         Ok(())
     }
 
-    /// Register a trusted lender address
+    /// Register a trusted lender address.
+    ///
+    /// `LendersIndex` is append-only: the address is pushed only when it is
+    /// not already in the index, so a deregister → re-register cycle never
+    /// duplicates the entry. The flag key is then set to `true`, which both
+    /// activates a fresh registration and clears a deregistration tombstone.
+    ///
+    /// Auth: admin only.
     pub fn register_lender(
         env: Env,
         admin: Address,
@@ -517,23 +668,32 @@ impl CreditOracle {
         }
         admin.require_auth();
 
-        let lender_key = DataKey::TrustedLender(lender.clone());
-        if !env.storage().persistent().has(&lender_key) {
-            let mut lenders: Vec<Address> = env
-                .storage()
-                .persistent()
-                .get(&DataKey::LendersIndex)
-                .unwrap_or(Vec::new(&env));
-            lenders.push_back(lender.clone());
-            let index_key = DataKey::LendersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &lenders);
-            env.storage()
-                .persistent()
-                .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        }
+        let index_key = DataKey::LendersIndex;
+        let lenders: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&index_key)
+            .unwrap_or(Vec::new(&env));
 
+        // Append-only dedup — see `register_feeder` for why index membership,
+        // not flag-key presence, is the reliable "already indexed" test.
+        let mut already_indexed = false;
+        for addr in lenders.iter() {
+            if addr == lender {
+                already_indexed = true;
+                break;
+            }
+        }
+        if !already_indexed {
+            let mut lenders = lenders;
+            lenders.push_back(lender.clone());
+            env.storage().persistent().set(&index_key, &lenders);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
         env.storage().persistent().set(&lender_key, &true);
         env.storage()
             .persistent()
@@ -542,7 +702,15 @@ impl CreditOracle {
         Ok(())
     }
 
-    /// Deregister a trusted lender address
+    /// Deregister a trusted lender address.
+    ///
+    /// Tombstones `TrustedLender` (sets it to `false`) instead of removing
+    /// the key, and leaves `LendersIndex` untouched, so deregistration is a
+    /// single storage write instead of an O(n) scan + rewrite. The index
+    /// stays append-only; `list_lenders` returns the currently-active set by
+    /// filtering it against the flag.
+    ///
+    /// Auth: admin only.
     pub fn deregister_lender(
         env: Env,
         admin: Address,
@@ -557,42 +725,76 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
+
+        let lender_key = DataKey::TrustedLender(lender.clone());
+        env.storage().persistent().set(&lender_key, &false);
         env.storage()
             .persistent()
-            .remove(&DataKey::TrustedLender(lender.clone()));
-
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::LendersIndex)
-            .unwrap_or(Vec::new(&env));
-
-        let mut compacted = Vec::new(&env);
-        for i in 0..ever_registered.len() {
-            let addr: Address = ever_registered.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedLender(addr.clone())) {
-                compacted.push_back(addr);
-            }
-        }
-        env.storage().persistent().set(&DataKey::LendersIndex, &compacted);
+            .extend_ttl(&lender_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
         env.events().publish((symbol_short!("LndDeReg"),), lender);
         Ok(())
     }
 
     /// Update transaction statistics for a user
+    /// Pause all writes on the contract.
+    ///
+    /// Auth: admin only.
+    pub fn pause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    /// Resume the contract and allow writes again.
+    ///
+    /// Auth: admin only.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
+    /// Returns true if the contract is paused.
+    pub fn is_paused(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::Paused)
+            .unwrap_or(false)
+    }
+
     pub fn update_tx_stats(
         env: Env,
         feeder: Address,
         subject: Address,
         stats: TxStats,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
         env.storage()
@@ -609,12 +811,17 @@ impl CreditOracle {
         amount: i128,
         on_time: bool,
     ) -> Result<(), CreditOracleError> {
+        if amount <= 0 {
+            return Err(CreditOracleError::InvalidAmount);
+        }
+        ensure_not_paused(&env)?;
         lender.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedLender(lender.clone()))
-        {
+            .get(&DataKey::TrustedLender(lender.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::LenderNotRegistered);
         }
         let current_version: u32 = env
@@ -673,7 +880,11 @@ impl CreditOracle {
     ///
     /// **Authentication:** only the current admin may call this function.
     pub fn migrate(env: Env, subjects: soroban_sdk::Vec<Address>) -> Result<(), CreditOracleError> {
-        let admin: Address = env.storage().instance().get(&DataKey::Admin).unwrap();
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(CreditOracleError::NotInitialized)?;
         admin.require_auth();
 
         for i in 0..subjects.len() {
@@ -708,14 +919,25 @@ impl CreditOracle {
         subject: Address,
         count: u32,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
+
+        // Emit deprecation warning if identity oracle is configured
+        if env.storage().instance().has(&DataKey::IdentityOracleId) {
+            env.events().publish(
+                (symbol_short!("VcCntDep"),),
+                (subject.clone(), count),
+            );
+        }
+
         env.storage()
             .persistent()
             .set(&DataKey::VcCount(subject), &count);
@@ -761,6 +983,74 @@ impl CreditOracle {
             .unwrap_or(100u32)
     }
 
+    /// Configure VC recency decay for the score's VC component (issue #530).
+    ///
+    /// When `enabled`, `compute_score` multiplies each credential's weighted
+    /// points by
+    ///   `max(min_recency_bps, 10_000 - age_days * decay_bps_per_day) / 10_000`
+    /// where `age_days` derives from `VCRecord.anchored_at`. Decay therefore
+    /// only applies on the cross-contract path, which requires
+    /// `set_identity_oracle` to have been called - `anchored_at` is only
+    /// available from `get_vc_details`.
+    ///
+    /// Decay is **opt-in**: the feature ships disabled, so existing deployments
+    /// score identically until an admin turns it on. Disabling it again
+    /// restores the previous behavior on the next `compute_score`.
+    ///
+    /// Suggested values from docs/vc-weighting-design.md: `decay_bps_per_day =
+    /// 5` (0.05%/day) and `min_recency_bps = 5_000` (50% floor).
+    ///
+    /// Auth: admin only.
+    ///
+    /// Errors with `InvalidRecencyConfig` when `min_recency_bps` exceeds
+    /// `BPS_DENOMINATOR`, which would otherwise define a floor above full
+    /// weight. `decay_bps_per_day` needs no bound: the floor already caps how
+    /// far any rate can push the multiplier down.
+    pub fn set_recency_decay(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+        decay_bps_per_day: u32,
+        min_recency_bps: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        if min_recency_bps > BPS_DENOMINATOR {
+            return Err(CreditOracleError::InvalidRecencyConfig);
+        }
+
+        env.storage()
+            .instance()
+            .set(&DataKey::RecencyDecayEnabled, &enabled);
+        env.storage()
+            .instance()
+            .set(&DataKey::DecayBpsPerDay, &decay_bps_per_day);
+        env.storage()
+            .instance()
+            .set(&DataKey::MinRecencyBps, &min_recency_bps);
+
+        env.events().publish(
+            (symbol_short!("RecDecay"),),
+            (enabled, decay_bps_per_day, min_recency_bps),
+        );
+        Ok(())
+    }
+
+    /// Return the current recency decay configuration (issue #530).
+    ///
+    /// Defaults to `enabled: false` with the documented suggested parameters
+    /// when the admin has never called `set_recency_decay`.
+    pub fn get_recency_decay(env: Env) -> RecencyDecayConfig {
+        load_recency_config(&env)
+    }
+
     /// Anchor a verifiable credential for a user with an optional type tag.
     ///
     /// The `vc_type` can later be looked up by `compute_score` to apply
@@ -774,12 +1064,14 @@ impl CreditOracle {
         vc_id: BytesN<32>,
         vc_type: Option<Symbol>,
     ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         feeder.require_auth();
-        if !env
+        let is_trusted: bool = env
             .storage()
             .persistent()
-            .has(&DataKey::TrustedFeeder(feeder.clone()))
-        {
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
             return Err(CreditOracleError::FeederNotRegistered);
         }
         let list_key = DataKey::VcList(user.clone());
@@ -816,6 +1108,7 @@ impl CreditOracle {
 
     /// Compute and store credit score for a user
     pub fn compute_score(env: Env, subject: Address) -> Result<u32, CreditOracleError> {
+        ensure_not_paused(&env)?;
         // Reject if last computation was within the cooldown window
         Self::check_compute_cooldown(&env, &subject)?;
 
@@ -864,6 +1157,17 @@ impl CreditOracle {
         let mut vc_points: u32 = 0;
         let mut vc_count: u32 = 0;
 
+        // Issue #530: recency decay is opt-in. `None` here means the multiplier
+        // is never computed, so the per-VC arithmetic below is identical to the
+        // pre-#530 code path.
+        let recency_config = load_recency_config(&env);
+        let recency = if recency_config.enabled {
+            Some(recency_config)
+        } else {
+            None
+        };
+        let now = env.ledger().timestamp();
+
         // Check if identity-oracle is configured
         if let Some(identity_oracle_id) = env
             .storage()
@@ -905,7 +1209,21 @@ impl CreditOracle {
                     .instance()
                     .get(&DataKey::VcWeight(vc_type.clone()))
                     .unwrap_or(100u32);
-                vc_points = vc_points.saturating_add(20u32.saturating_mul(weight) / 100);
+                let mut points = 20u32.saturating_mul(weight) / 100;
+                // Issue #530: decay this credential by its age. `anchored_at` is
+                // only reachable on this cross-contract path, which is why decay
+                // requires a configured identity-oracle. Computed per VC inside
+                // the loop, alongside the existing per-VC type-weight lookup.
+                if let Some(ref cfg) = recency {
+                    let recency_bps = recency_multiplier_bps(
+                        record.anchored_at,
+                        now,
+                        cfg.decay_bps_per_day,
+                        cfg.min_recency_bps,
+                    );
+                    points = apply_recency_bps(points, recency_bps);
+                }
+                vc_points = vc_points.saturating_add(points);
             }
         } else {
             // Compute weighted VC points from stored VC list
@@ -941,7 +1259,11 @@ impl CreditOracle {
         }
         let vc_points = vc_points.min(100);
 
-        let weights: ScoringWeights = env.storage().instance().get(&DataKey::Config).unwrap();
+        let weights: ScoringWeights = env
+            .storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(CreditOracleError::NotInitialized)?;
 
         let components = compute_score_components(
             vc_points,
@@ -1067,14 +1389,42 @@ impl CreditOracle {
     /// at read time by comparing `computed_at_ledger` against the
     /// current ledger sequence. A score is considered stale when the
     /// ledger delta exceeds `STALE_LEDGER_AGE` (~30 days).
+    ///
+    /// When an identity-oracle is configured, the record is additionally
+    /// marked stale if the subject's identity state changed *after* the score
+    /// was computed (`computed_at_ledger` is older than the identity-oracle's
+    /// `get_last_state_change_ledger`), so a cached score never outlives the
+    /// on-chain identity data it was derived from.
     pub fn get_score(env: Env, subject: Address) -> Option<ScoreRecord> {
+        let current_ledger = env.ledger().sequence();
         env.storage()
             .persistent()
             .get::<_, ScoreRecord>(&DataKey::Score(subject.clone()))
             .map(|mut record| {
-                let current_ledger = env.ledger().sequence();
                 record.stale =
                     current_ledger.saturating_sub(record.computed_at_ledger) > STALE_LEDGER_AGE;
+                if !record.stale {
+                    if let Some(identity_oracle_id) = env
+                        .storage()
+                        .instance()
+                        .get::<_, Address>(&DataKey::IdentityOracleId)
+                    {
+                        let last_state_change: Option<u32> = env
+                            .try_invoke_contract::<Option<u32>, soroban_sdk::InvokeError>(
+                                &identity_oracle_id,
+                                &Symbol::new(&env, "get_last_state_change_ledger"),
+                                soroban_sdk::vec![&env, subject.clone().into_val(&env)],
+                            )
+                            .ok()
+                            .and_then(|res| res.ok())
+                            .flatten();
+                        if let Some(change_ledger) = last_state_change {
+                            if record.computed_at_ledger < change_ledger {
+                                record.stale = true;
+                            }
+                        }
+                    }
+                }
                 record
             })
     }
@@ -1082,7 +1432,7 @@ impl CreditOracle {
     /// Propose new scoring weights with timelock
     /// Propose new scoring weights with timelock
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(CreditOracleError::InvalidWeights);
         }
         let stored_admin: Address = env
@@ -1114,22 +1464,28 @@ impl CreditOracle {
     }
 
     /// Apply pending weights after timelock expires
-    pub fn apply_weights(env: Env) {
+    ///
+    /// Returns a typed error instead of panicking so callers (governance
+    /// tooling, scripts, cross-contract relays) can distinguish calling too
+    /// early (`TimelockNotExpired`) from nothing being queued
+    /// (`NoPendingWeights`).
+    pub fn apply_weights(env: Env) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
         let effective_ledger: u32 = env
             .storage()
             .instance()
             .get(&DataKey::PendingWeightsEffectiveLedger)
-            .expect("no pending weights");
+            .ok_or(CreditOracleError::NoPendingWeights)?;
 
         if env.ledger().sequence() < effective_ledger {
-            panic!("timelock not expired");
+            return Err(CreditOracleError::TimelockNotExpired);
         }
 
         let weights: ScoringWeights = env
             .storage()
             .instance()
             .get(&DataKey::PendingWeights)
-            .expect("no pending weights");
+            .ok_or(CreditOracleError::NoPendingWeights)?;
 
         env.storage().instance().set(&DataKey::Config, &weights);
 
@@ -1146,11 +1502,16 @@ impl CreditOracle {
                 weights.repayment_weight,
             ),
         );
+
+        Ok(())
     }
 
     /// Get current scoring weights
-    pub fn get_scoring_weights(env: Env) -> ScoringWeights {
-        env.storage().instance().get(&DataKey::Config).unwrap()
+    pub fn get_scoring_weights(env: Env) -> Result<ScoringWeights, CreditOracleError> {
+        env.storage()
+            .instance()
+            .get(&DataKey::Config)
+            .ok_or(CreditOracleError::NotInitialized)
     }
 
     /// Set the identity-oracle contract ID for cross-contract VC count lookups.
@@ -1158,6 +1519,9 @@ impl CreditOracle {
     /// When configured, `compute_score` will call `get_active_vc_count` on the
     /// identity-oracle instead of reading the cached `VcCount` storage key.
     /// This enables live VC count resolution that automatically excludes revoked VCs.
+    ///
+    /// Emits an `IdOSet` event with the new identity oracle address so indexers
+    /// and monitoring tools can detect configuration changes.
     ///
     /// Auth: admin only.
     pub fn set_identity_oracle(
@@ -1181,12 +1545,16 @@ impl CreditOracle {
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
         env.events()
-            .publish((symbol_short!("IdOracle"),), identity_oracle_id);
+            .publish((symbol_short!("IdOSet"),), identity_oracle_id);
         Ok(())
     }
 
-    /// Returns the configured identity-oracle contract ID, if any.
-    ///
+    /// Returns the current admin address, or None if not initialized.
+    pub fn get_admin(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Admin)
+    }
+
+    /// Returns the configured identity oracle address.
     /// Returns `None` if cross-contract VC count lookup is not configured.
     pub fn get_identity_oracle(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::IdentityOracleId)
@@ -1285,17 +1653,18 @@ impl CreditOracle {
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) {
+    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
             .instance()
             .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
-            panic!("not authorized");
+            return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+        Ok(())
     }
 
     /// Returns aggregate protocol-level counters.
@@ -1306,7 +1675,12 @@ impl CreditOracle {
         load_protocol_stats(&env)
     }
 
-    /// Returns all currently registered feeder addresses.
+    /// Returns all currently registered (non-deregistered) feeder addresses.
+    ///
+    /// `FeedersIndex` is append-only and holds every address ever
+    /// registered, so each entry is filtered against its `TrustedFeeder`
+    /// flag: only addresses whose flag is present and `true` are returned.
+    /// A deregistered feeder's tombstone flag reads `false` and is excluded.
     pub fn list_feeders(env: Env) -> Vec<Address> {
         let feeders: Vec<Address> = env
             .storage()
@@ -1315,9 +1689,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for i in 0..feeders.len() {
-            let feeder: Address = feeders.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedFeeder(feeder.clone())) {
+        for feeder in feeders.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedFeeder(feeder.clone()))
+                .unwrap_or(false);
+            if is_trusted {
                 active.push_back(feeder);
             }
         }
@@ -1495,7 +1873,12 @@ impl CreditOracle {
         records
     }
 
-    /// Returns all currently registered lender addresses.
+    /// Returns all currently registered (non-deregistered) lender addresses.
+    ///
+    /// `LendersIndex` is append-only and holds every address ever
+    /// registered, so each entry is filtered against its `TrustedLender`
+    /// flag: only addresses whose flag is present and `true` are returned.
+    /// A deregistered lender's tombstone flag reads `false` and is excluded.
     pub fn list_lenders(env: Env) -> Vec<Address> {
         let lenders: Vec<Address> = env
             .storage()
@@ -1504,9 +1887,13 @@ impl CreditOracle {
             .unwrap_or(Vec::new(&env));
 
         let mut active = Vec::new(&env);
-        for i in 0..lenders.len() {
-            let lender: Address = lenders.get(i).unwrap();
-            if env.storage().persistent().has(&DataKey::TrustedLender(lender.clone())) {
+        for lender in lenders.iter() {
+            let is_trusted: bool = env
+                .storage()
+                .persistent()
+                .get(&DataKey::TrustedLender(lender.clone()))
+                .unwrap_or(false);
+            if is_trusted {
                 active.push_back(lender);
             }
         }
@@ -1515,12 +1902,116 @@ impl CreditOracle {
 }
 
 #[cfg(test)]
+mod prop_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use proptest::prelude::*;
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::TryIntoVal;
+
+    #[test]
+    fn test_scoring_spec_example_1_new_user_scores_300() {
+        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+
+        assert_eq!(score, 300);
+    }
+
+    #[test]
+    fn test_scoring_spec_example_2_moderate_scores_569() {
+        let score = compute_score_pure(
+            60,
+            3_000_000_000,
+            0,
+            8,
+            10,
+            3_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 569);
+    }
+
+    #[test]
+    fn test_scoring_spec_example_3_strong_scores_817() {
+        let score = compute_score_pure(
+            100,
+            8_000_000_000,
+            0,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 817);
+    }
+
+    #[test]
+    fn test_scoring_spec_perfect_scores_850() {
+        let score = compute_score_pure(
+            100,
+            10_000_000_000,
+            100,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+        );
+
+        assert_eq!(score, 850);
+    }
+
+    #[test]
+    fn scoring_examples() {
+        // Pins every "Example scores" row in README.md (and the worked
+        // examples in docs/scoring-spec.md) to compute_score_pure so the
+        // documentation can never drift from the implementation again.
+
+        // Mirrors how compute_score derives vc_points (20 per VC, cap 100) and
+        // the default weights (40/30/30).
+        let row = |vcs: u32,
+                   volume_xlm: u32,
+                   repaid_xlm: u32,
+                   counterparties: u32,
+                   on_time: u32,
+                   total: u32|
+         -> u32 {
+            compute_score_pure(
+                vcs.saturating_mul(20).min(100),
+                volume_xlm as i128 * 100_000_000,
+                counterparties,
+                on_time,
+                total,
+                repaid_xlm as i128 * 100_000_000,
+                40,
+                30,
+                30,
+            )
+        };
+
+        // Established profile from the issue acceptance criteria:
+        // 2 VCs, 20 XLM volume, 20 XLM repaid, 0 counterparties, 85% on-time.
+        assert_eq!(row(2, 20, 20, 0, 17, 20), 503);
+
+        // New user: 0 VCs, no volume, no repayment record.
+        assert_eq!(row(0, 0, 0, 0, 0, 0), 300);
+        // Early stage: 1 VC, 5 XLM volume/repaid, 0 counterparties, 70% on-time.
+        assert_eq!(row(1, 5, 5, 0, 7, 10), 410);
+        // Established: covered above.
+        // Strong: 3 VCs, 50 XLM volume/repaid, 5 counterparties, 95% on-time.
+        assert_eq!(row(3, 50, 50, 5, 19, 20), 630);
+        // Exceptional: maxed VCs, volume, repaid, and counterparties, 100% on-time.
+        assert_eq!(row(5, 100, 100, 100, 20, 20), 850);
+    }
 
     #[test]
     fn test_default_weights_sum_to_100() {
@@ -1883,13 +2374,43 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights — should return error via try_
+        // Invalid weights (sum != 100) — should return error via try_
         let result = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
             repayment_weight: 40,
         });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        let res_vc_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 9,
+            tx_weight: 45,
+            repayment_weight: 46,
+        });
+        assert_eq!(res_vc_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_tx_zero = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 55,
+            tx_weight: 0,
+            repayment_weight: 45,
+        });
+        assert_eq!(res_tx_zero, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        let res_repayment_low = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 46,
+            repayment_weight: 9,
+        });
+        assert_eq!(res_repayment_low, Err(Ok(CreditOracleError::InvalidWeights)));
+
+        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        let res_valid_min = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 10,
+            repayment_weight: 40,
+        });
+        assert!(res_valid_min.is_ok());
     }
 
     #[test]
@@ -1942,7 +2463,6 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "timelock not expired")]
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1956,7 +2476,21 @@ mod tests {
             tx_weight: 30,
             repayment_weight: 20,
         });
-        client.apply_weights();
+        let result = client.try_apply_weights();
+        assert_eq!(result, Err(Ok(CreditOracleError::TimelockNotExpired)));
+    }
+
+    #[test]
+    fn test_apply_weights_with_no_pending_weights_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let result = client.try_apply_weights();
+        assert_eq!(result, Err(Ok(CreditOracleError::NoPendingWeights)));
     }
 
     #[test]
@@ -2025,6 +2559,26 @@ mod tests {
     }
 
     #[test]
+    fn test_compute_score_not_initialized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Only set admin, not config (simulating a botched upgrade)
+        env.as_contract(&contract_id, || {
+            env.storage().instance().set(&DataKey::Admin, &admin);
+        });
+
+        // compute_score should return NotInitialized error
+        let result = client.try_compute_score(&subject);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotInitialized)));
+    }
+
+    #[test]
     fn test_deregistered_lender_cannot_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2044,7 +2598,262 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not authorized")]
+    fn test_record_repayment_invalid_amount() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        let result = client.try_record_repayment(&lender, &subject, &-1, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidAmount)));
+
+        let zero_result = client.try_record_repayment(&lender, &subject, &0, &true);
+        assert_eq!(zero_result, Err(Ok(CreditOracleError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_list_feeders_returns_only_currently_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let feeder1 = Address::generate(&env);
+        let feeder2 = Address::generate(&env);
+
+        client.register_feeder(&admin, &feeder1);
+        client.register_feeder(&admin, &feeder2);
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder1.clone(), feeder2.clone()])
+        );
+
+        client.deregister_feeder(&admin, &feeder1);
+
+        // Only the still-registered feeder is listed …
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder2.clone()])
+        );
+
+        // … while FeedersIndex stays append-only (no removal on deregister).
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 2);
+    }
+
+    #[test]
+    fn test_list_lenders_returns_only_currently_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let lender1 = Address::generate(&env);
+        let lender2 = Address::generate(&env);
+
+        client.register_lender(&admin, &lender1);
+        client.register_lender(&admin, &lender2);
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender1.clone(), lender2.clone()])
+        );
+
+        client.deregister_lender(&admin, &lender1);
+
+        // Only the still-registered lender is listed …
+        assert_eq!(
+            client.list_lenders(),
+            Vec::from_array(&env, [lender2.clone()])
+        );
+
+        // … while LendersIndex stays append-only (no removal on deregister).
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::LendersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 2);
+    }
+
+    #[test]
+    fn test_list_feeders_empty_index_returns_empty_vec() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // No feeder ever registered -> FeedersIndex unset -> empty Vec.
+        assert_eq!(
+            client.list_feeders(),
+            Vec::<Address>::new(&env)
+        );
+    }
+
+    #[test]
+    fn test_list_lenders_empty_index_returns_empty_vec() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // No lender ever registered -> LendersIndex unset -> empty Vec.
+        assert_eq!(
+            client.list_lenders(),
+            Vec::<Address>::new(&env)
+        );
+    }
+
+    #[test]
+    fn test_reregistering_deregistered_feeder_does_not_duplicate_index() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.deregister_feeder(&admin, &feeder);
+        client.register_feeder(&admin, &feeder);
+
+        // list_feeders must show the feeder exactly once even though it went
+        // through a register → deregister → register cycle, and the append-only
+        // FeedersIndex must hold it exactly once.
+        assert_eq!(
+            client.list_feeders(),
+            Vec::from_array(&env, [feeder.clone()])
+        );
+        let index_len: u32 = env.as_contract(&contract_id, || {
+            let index: Vec<Address> = env
+                .storage()
+                .persistent()
+                .get(&DataKey::FeedersIndex)
+                .unwrap_or(Vec::new(&env));
+            index.len()
+        });
+        assert_eq!(index_len, 1);
+    }
+
+    #[test]
+    fn test_deregister_feeder_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Clear any existing events
+        env.events().all();
+
+        // Deregister the feeder
+        client.deregister_feeder(&admin, &feeder);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the FdrDeReg event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("FdrDeReg")
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_val = topics.get(0).unwrap();
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("FdrDeReg"), "expected FdrDeReg topic");
+
+        // Verify the data payload is the feeder address
+        let event_feeder: Address = data
+            .try_into_val(&env)
+            .expect("data should be Address");
+        assert_eq!(event_feeder, feeder, "event feeder mismatch");
+    }
+
+    #[test]
+    fn test_deregister_lender_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        // Clear any existing events
+        env.events().all();
+
+        // Deregister the lender
+        client.deregister_lender(&admin, &lender);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the LndDeReg event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("LndDeReg")
+        assert_eq!(topics.len(), 1, "expected 1 topic element");
+        let topic_val = topics.get(0).unwrap();
+        let topic_sym: Symbol = topic_val
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(topic_sym, symbol_short!("LndDeReg"), "expected LndDeReg topic");
+
+        // Verify the data payload is the lender address
+        let event_lender: Address = data
+            .try_into_val(&env)
+            .expect("data should be Address");
+        assert_eq!(event_lender, lender, "event lender mismatch");
+    }
+
+    #[test]
     fn test_upgrade_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2054,7 +2863,8 @@ mod tests {
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
-        client.upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+        let result = client.try_upgrade(&non_admin, &BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
     /// When tx_weight = 0, the counterparty bonus contributes nothing to the final score
@@ -2070,60 +2880,27 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 0
-        client.propose_weights(&ScoringWeights {
+        // Proposing tx_weight = 0 to contract is rejected as InvalidWeights
+        let res_zero = client.try_propose_weights(&ScoringWeights {
             vc_weight: 60,
             tx_weight: 0,
             repayment_weight: 40,
         });
-        let jump = TIMELOCK_LEDGERS + 2;
-        env.as_contract(&contract_id, || {
-            env.storage().instance().extend_ttl(jump, jump);
-        });
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + jump);
-        client.apply_weights();
+        assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        client.register_feeder(&admin, &feeder);
-
-        let subject_with_counterparties = Address::generate(&env);
-        let subject_without_counterparties = Address::generate(&env);
-
-        // Give first subject 100 counterparties (max bonus)
-        client.update_tx_stats(
-            &feeder,
-            &subject_with_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 100,
-            },
-        );
-        // Second subject has no counterparties
-        client.update_tx_stats(
-            &feeder,
-            &subject_without_counterparties,
-            &TxStats {
-                volume_30d: 0,
-                tx_count_30d: 0,
-                avg_counterparties: 0,
-            },
-        );
-
-        let score_with = client.compute_score(&subject_with_counterparties);
-        let score_without = client.compute_score(&subject_without_counterparties);
-
-        // Both scores must be identical — tx_weight=0 suppresses the counterparty bonus
+        // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
         );
     }
 
-    /// When tx_weight = 100, the counterparty bonus is fully applied and
+    /// When tx_weight is high (e.g., 80), the counterparty bonus is applied and
     /// a subject with 100+ counterparties scores higher than one with none.
     #[test]
-    fn test_counterparty_bonus_applied_when_tx_weight_is_100() {
+    fn test_counterparty_bonus_applied_when_tx_weight_is_high() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -2133,11 +2910,11 @@ mod tests {
         let feeder = Address::generate(&env);
         client.initialize(&admin);
 
-        // Propose and apply weights with tx_weight = 100
+        // Propose and apply valid weights with tx_weight = 80
         client.propose_weights(&ScoringWeights {
-            vc_weight: 0,
-            tx_weight: 100,
-            repayment_weight: 0,
+            vc_weight: 10,
+            tx_weight: 80,
+            repayment_weight: 10,
         });
         let jump = TIMELOCK_LEDGERS + 2;
         env.as_contract(&contract_id, || {
@@ -2215,6 +2992,45 @@ mod tests {
         let result = client.get_identity_oracle();
         assert!(result.is_some());
         assert_eq!(result.unwrap(), identity_oracle_id);
+    }
+
+    #[test]
+    fn test_set_identity_oracle_emits_idoset() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        let events = env.events().all();
+        // Filter for the IdOSet event from this contract (robust to
+        // additional setup events such as Initialized).
+        let mut idoset_count = 0u32;
+        for (event_contract_id, topics, data) in events.iter() {
+            if event_contract_id != contract_id || topics.len() != 1 {
+                continue;
+            }
+            let topic_sym: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+            if topic_sym != symbol_short!("IdOSet") {
+                continue;
+            }
+            let event_oracle: Address = data.try_into_val(&env).expect("data should be an Address");
+            assert_eq!(
+                event_oracle, identity_oracle_id,
+                "event data should be the new identity oracle address"
+            );
+            idoset_count += 1;
+        }
+        assert_eq!(idoset_count, 1, "expected exactly one IdOSet event");
     }
 
     #[test]
@@ -2414,7 +3230,7 @@ mod tests {
     }
 
     #[test]
-    fn test_flag_score_input_rejects_invalid_key() {
+    fn flag_score_input_invalid_key() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -2424,7 +3240,7 @@ mod tests {
         let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        let bad_key = soroban_sdk::Symbol::new(&env, "bad_input");
+        let bad_key = soroban_sdk::Symbol::new(&env, "invalid");
         let reason = soroban_sdk::String::from_str(&env, "test");
         let result = client.try_flag_score_input(&subject, &bad_key, &reason);
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidInputKey)));
@@ -2681,53 +3497,211 @@ mod tests {
         assert_eq!(record.vc_count, 4);
     }
 
-    // ── verbose events ────────────────────────────────────────────────────────
-
-    /// When verbose_events is disabled (the default) compute_score must emit
-    /// exactly one event: the existing `Score` event.  No `ScoreDtl` event
-    /// should appear.
     #[test]
-    fn test_verbose_events_disabled_emits_no_score_detail() {
+    fn test_set_vc_count_emits_deprecation_event_when_oracle_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        
+        // Configure identity oracle
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        // Clear any existing events from setup
+        env.events().all().len(); // Just to consume them
+        
+        // Call set_vc_count - should emit deprecation warning
+        client.set_vc_count(&feeder, &subject, &5);
+
+        // Check for VcCntDep event
+        let events = env.events().all();
+        let mut found_deprecation_event = false;
+        for i in 0..events.len() {
+            let (event_contract_id, topics, data) = events.get(i).unwrap();
+            if event_contract_id == contract_id && topics.len() == 1 {
+                let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if topic == symbol_short!("VcCntDep") {
+                    let (event_subject, event_count): (Address, u32) =
+                        data.try_into_val(&env).unwrap();
+                    assert_eq!(event_subject, subject);
+                    assert_eq!(event_count, 5);
+                    found_deprecation_event = true;
+                    break;
+                }
+            }
+        }
+        assert!(
+            found_deprecation_event,
+            "VcCntDep event should be emitted when identity oracle is configured"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Issue #530: VC recency decay
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn test_recency_multiplier_full_weight_within_first_day() {
+        // age_days uses integer division, so a VC keeps full weight for 24h.
+        assert_eq!(recency_multiplier_bps(0, 0, 5, 5_000), 10_000);
+        assert_eq!(
+            recency_multiplier_bps(0, SECONDS_PER_DAY - 1, 5, 5_000),
+            10_000
+        );
+        // Exactly one day old: the first decay step applies.
+        assert_eq!(recency_multiplier_bps(0, SECONDS_PER_DAY, 5, 5_000), 9_995);
+    }
+
+    #[test]
+    fn test_recency_multiplier_decays_linearly_per_day() {
+        // 100 days x 5 bps = 500 bps lost.
+        assert_eq!(
+            recency_multiplier_bps(0, 100 * SECONDS_PER_DAY, 5, 5_000),
+            9_500
+        );
+        // 365 days x 5 bps = 1_825 bps lost.
+        assert_eq!(
+            recency_multiplier_bps(0, 365 * SECONDS_PER_DAY, 5, 5_000),
+            8_175
+        );
+    }
+
+    #[test]
+    fn test_recency_multiplier_clamps_to_floor() {
+        // 5_000 days x 5 bps = 25_000 bps, far past zero: the floor holds.
+        let now = 5_000 * SECONDS_PER_DAY;
+        assert_eq!(recency_multiplier_bps(0, now, 5, 5_000), 5_000);
+        // A zero floor decays all the way down without underflowing.
+        assert_eq!(recency_multiplier_bps(0, now, 5, 0), 0);
+    }
+
+    #[test]
+    fn test_recency_multiplier_saturates_on_extreme_inputs() {
+        // Anchored "in the future" (clock skew): age saturates to 0, not underflow.
+        assert_eq!(
+            recency_multiplier_bps(1_000 * SECONDS_PER_DAY, 0, 5, 5_000),
+            10_000
+        );
+        // Absurd age and decay rate saturate to the floor instead of panicking.
+        assert_eq!(recency_multiplier_bps(0, u64::MAX, u32::MAX, 5_000), 5_000);
+        // A floor above 10_000 is clamped: decay can never *raise* a VC's value.
+        assert_eq!(recency_multiplier_bps(0, 0, 5, u32::MAX), 10_000);
+    }
+
+    #[test]
+    fn test_apply_recency_bps_scales_points() {
+        assert_eq!(apply_recency_bps(20, 10_000), 20);
+        assert_eq!(apply_recency_bps(20, 5_000), 10);
+        assert_eq!(apply_recency_bps(20, 9_500), 19);
+        assert_eq!(apply_recency_bps(20, 0), 0);
+        // Widening to u64 keeps the largest input from overflowing.
+        assert_eq!(apply_recency_bps(u32::MAX, 10_000), u32::MAX);
+    }
+
+    #[test]
+    fn test_get_recency_decay_defaults_to_disabled() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        // Confirm the default is false
-        assert!(!client.get_verbose_events());
-
-        client.compute_score(&subject);
-
-        let events = env.events().all();
-
-        // Only the Score event from compute_score (Init event is cleared by
-        // mock harness between calls, but let's be defensive and just assert
-        // no ScoreDtl topic exists anywhere).
-        let score_dtl_sym = Symbol::new(&env, "ScoreDtl");
-        for (_, topics, _) in events.iter() {
-            if topics.len() > 0 {
-                let first: Symbol = topics
-                    .get(0)
-                    .unwrap()
-                    .try_into_val(&env)
-                    .unwrap_or(Symbol::new(&env, "__none__"));
-                assert_ne!(
-                    first, score_dtl_sym,
-                    "ScoreDtl must NOT be emitted when verbose_events=false"
-                );
-            }
-        }
+        let cfg = client.get_recency_decay();
+        assert!(!cfg.enabled, "decay must be opt-in");
+        assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
+        assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
     }
 
-    /// When verbose_events is enabled, compute_score must emit both the `Score`
-    /// event and a `ScoreDtl` event whose component fields are consistent with
-    /// the final score and the active weights.
     #[test]
-    fn test_verbose_events_enabled_emits_score_detail() {
+    fn test_compute_cooldown_getter_and_setter() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.get_compute_cooldown_ledgers(), 1);
+        client.set_compute_cooldown_ledgers(&admin, &100);
+        assert_eq!(client.get_compute_cooldown_ledgers(), 100);
+    }
+
+    #[test]
+    fn test_compute_cooldown_setter_rejects_invalid_values() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &0), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
+        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &(MAX_COMPUTE_COOLDOWN_LEDGERS + 1)), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
+    }
+
+    #[test]
+    fn test_set_recency_decay_stores_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.set_recency_decay(&admin, &true, &10, &2_500);
+
+        let cfg = client.get_recency_decay();
+        assert!(cfg.enabled);
+        assert_eq!(cfg.decay_bps_per_day, 10);
+        assert_eq!(cfg.min_recency_bps, 2_500);
+    }
+
+    #[test]
+    fn test_set_recency_decay_rejects_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000);
+        assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
+    }
+
+    #[test]
+    fn test_set_recency_decay_rejects_floor_above_full_weight() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
+
+        // The rejected call must not have mutated stored config.
+        assert!(!client.get_recency_decay().enabled);
+    }
+
+    #[test]
+    fn test_recency_decay_ignored_without_identity_oracle() {
+        // The local VcList path has no `anchored_at`, so enabling decay must
+        // leave the score untouched (backward compatibility).
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -2735,102 +3709,83 @@ mod tests {
 
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
-        let lender = Address::generate(&env);
-        let subject = Address::generate(&env);
+        let user = Address::generate(&env);
         client.initialize(&admin);
         client.register_feeder(&admin, &feeder);
-        client.register_lender(&admin, &lender);
 
-        // Give the subject some data so component scores are non-trivial.
-        client.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 500_000_000i128,
-                tx_count_30d: 5,
-                avg_counterparties: 3,
-            },
-        );
-        client.record_repayment(&lender, &subject, &1_000_000_000i128, &true);
-
-        // Enable verbose events
-        client.set_verbose_events(&admin, &true);
-        assert!(client.get_verbose_events());
-
-        let score = client.compute_score(&subject);
-
-        // Collect all events and locate Score / ScoreDtl
-        let events = env.events().all();
-
-        let score_sym = symbol_short!("Score");
-        let score_dtl_sym = Symbol::new(&env, "ScoreDtl");
-
-        let mut found_score = false;
-        let mut found_detail = false;
-
-        for (emitting_contract, topics, data) in events.iter() {
-            if emitting_contract != contract_id || topics.len() == 0 {
-                continue;
-            }
-            let first: Symbol = topics
-                .get(0)
-                .unwrap()
-                .try_into_val(&env)
-                .expect("topic should be a Symbol");
-
-            if first == score_sym {
-                found_score = true;
-                let (ev_subject, ev_score): (Address, u32) = data
-                    .try_into_val(&env)
-                    .expect("Score data should be (Address, u32)");
-                assert_eq!(ev_subject, subject, "Score event subject mismatch");
-                assert_eq!(ev_score, score, "Score event score mismatch");
-            }
-
-            if first == score_dtl_sym {
-                found_detail = true;
-                let detail: ScoreDetail = data
-                    .try_into_val(&env)
-                    .expect("ScoreDtl data should be ScoreDetail");
-
-                // Subject must match
-                assert_eq!(detail.subject, subject, "ScoreDetail subject mismatch");
-
-                // Final score must agree with the Score event
-                assert_eq!(detail.score, score, "ScoreDetail.score mismatch");
-
-                // Components must be in valid ranges
-                assert!(detail.vc_score <= 100, "vc_score out of range");
-                assert!(detail.tx_score <= 100, "tx_score out of range");
-                assert!(detail.repay_score <= 100, "repay_score out of range");
-                assert!(detail.composite <= 100, "composite out of range");
-
-                // Weights must sum to 100 (default 40/30/30)
-                assert_eq!(
-                    detail.weights.vc_weight
-                        + detail.weights.tx_weight
-                        + detail.weights.repayment_weight,
-                    100,
-                    "weights must sum to 100"
-                );
-
-                // Composite must be consistent with components and weights
-                let expected_composite = (detail.vc_score as u128 * detail.weights.vc_weight as u128
-                    + detail.tx_score as u128 * detail.weights.tx_weight as u128
-                    + detail.repay_score as u128 * detail.weights.repayment_weight as u128)
-                    / 100;
-                assert_eq!(
-                    detail.composite as u128, expected_composite,
-                    "composite does not match component×weight calculation"
-                );
-            }
+        env.ledger().set_timestamp(1_700_000_000);
+        for i in 0..3u8 {
+            client.anchor_vc(&feeder, &user, &BytesN::from_array(&env, &[i; 32]), &None);
         }
 
-        assert!(found_score, "Score event must always be emitted");
-        assert!(
-            found_detail,
-            "ScoreDtl event must be emitted when verbose_events=true"
+        let before = client.compute_score(&user);
+
+        client.set_recency_decay(&admin, &true, &5, &5_000);
+        // Age the ledger by 5 years and recompute.
+        env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let after = client.compute_score(&user);
+
+        assert_eq!(
+            before, after,
+            "decay must be a no-op when anchored_at is unavailable"
         );
     }
 
+    proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
+
+        /// Issue #530 acceptance criterion: monotonically younger credentials
+        /// produce a higher or equal score under the same decay configuration.
+        #[test]
+        fn proptest_younger_credentials_score_at_least_as_high(
+            younger_age_days in 0u64..3_650,
+            extra_age_days in 0u64..3_650,
+            decay_bps_per_day in 0u32..100,
+            min_recency_bps in 0u32..=10_000,
+            vc_count in 1u32..=5,
+            type_weight in 0u32..=300,
+        ) {
+            let now = 10_000u64 * SECONDS_PER_DAY;
+            let younger_anchor = now - younger_age_days * SECONDS_PER_DAY;
+            let older_anchor = now - (younger_age_days + extra_age_days) * SECONDS_PER_DAY;
+            prop_assert!(older_anchor <= younger_anchor);
+
+            // Mirrors the per-VC arithmetic in `compute_score`.
+            let base_points = 20u32.saturating_mul(type_weight) / 100;
+            let vc_points_at = |anchored_at: u64| -> u32 {
+                let bps = recency_multiplier_bps(
+                    anchored_at,
+                    now,
+                    decay_bps_per_day,
+                    min_recency_bps,
+                );
+                apply_recency_bps(base_points, bps)
+                    .saturating_mul(vc_count)
+                    .min(100)
+            };
+            let score_at = |anchored_at: u64| -> u32 {
+                compute_score_pure(
+                    vc_points_at(anchored_at),
+                    3_000_000_000,
+                    7,
+                    8,
+                    10,
+                    3_000_000_000,
+                    40,
+                    30,
+                    30,
+                )
+            };
+
+            // The multiplier is monotonic in `anchored_at` ...
+            prop_assert!(
+                recency_multiplier_bps(younger_anchor, now, decay_bps_per_day, min_recency_bps)
+                    >= recency_multiplier_bps(older_anchor, now, decay_bps_per_day, min_recency_bps)
+            );
+            // ... and so is the resulting score.
+            prop_assert!(score_at(younger_anchor) >= score_at(older_anchor));
+        }
+    }
 }

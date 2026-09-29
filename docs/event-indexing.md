@@ -12,286 +12,251 @@ Soroban events are structured as a topic vector and a data payload. By conventio
 
 The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit an `Initialized` event during their `initialize` function. The `governance` contract also emits one — see the Governance section below. In all cases the event is emitted exactly once per contract, immediately after the admin address and target wiring is stored.
 
-* **Topic:** `[Symbol("Initialized")]`
-* **Data:** `admin: Address` (governance uses `(admin: Address, credit_oracle: Address)` — see below)
-* **Emitted When:** The contract is initialized with an administrator address.
-* **feeder Action:** None (metadata tracking).
+- **Topic:** `[Symbol("Initialized")]`
+- **Data:** `admin: Address` (governance uses `(admin: Address, credit_oracle: Address)` — see below)
+- **Emitted When:** The contract is initialized with an administrator address.
+- **feeder Action:** None (metadata tracking).
 
 ---
 
 ### 1. Identity Oracle Events
 
 #### Initialized
-* **Topic:** `[Symbol("Initialized")]`
-* **Data:** `admin: Address`
-* **Emitted When:** The contract is initialized with an admin address.
-* **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
+
+- **Topic:** `[Symbol("Initialized")]`
+- **Data:** `admin: Address`
+- **Emitted When:** The contract is initialized with an admin address.
+- **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### DIDAnch
-* **Topic:** `[Symbol("DIDAnch")]`
-* **Data:** `(subject: Address, did_doc_cid: String)`
-* **Emitted When:** A subject anchors or updates their DID document CID.
-* **feeder Action:** None (metadata tracking).
+
+- **Topic:** `[Symbol("DIDAnch")]`
+- **Data:** `(subject: Address, did_doc_cid: String)`
+- **Emitted When:** A subject anchors or updates their DID document CID.
+- **feeder Action:** None (metadata tracking).
 
 #### VCAnch
-* **Topic:** `[Symbol("VCAnch")]`
-* **Data:** `(issuer: Address, subject: Address, vc_hash: BytesN<32>)`
-* **Emitted When:** A trusted issuer anchors a new Verifiable Credential for a subject.
-* **feeder Action:** Trigger sync for `subject` (fetch new VC count, submit `set_vc_count`).
+
+- **Topic:** `[Symbol("VCAnch")]`
+- **Data:** `(issuer: Address, subject: Address, vc_hash: BytesN<32>)`
+- **Emitted When:** A trusted issuer anchors a new Verifiable Credential for a subject.
+- **feeder Action:** Trigger sync for `subject` (fetch new VC count, submit `set_vc_count`).
 
 #### RevocationRegistryUpdated
-* **Topic:** `[Symbol("RegSet")]`
-* **Data:** `(previous_registry: Address, new_registry: Address)`
-* **Emitted When:** The admin updates the revocation registry contract ID on the identity oracle.
-* **feeder Action:** None (configuration tracking). Update local cache of the revocation registry address.
+
+- **Topic:** `[Symbol("RegSet")]`
+- **Data:** `(previous_registry: Address, new_registry: Address)`
+- **Emitted When:** The admin updates the revocation registry contract ID on the identity oracle.
+- **feeder Action:** None (configuration tracking). Update local cache of the revocation registry address.
 
 #### IssReg / IssDeReg
-* **Topic:** `[Symbol("IssReg")]` or `[Symbol("IssDeReg")]`
-* **Data:** `issuer: Address`
-* **Emitted When:** An issuer is registered or deregistered by the admin.
+
+- **Topic:** `[Symbol("IssReg")]` or `[Symbol("IssDeReg")]`
+- **Data:** `issuer: Address`
+- **Emitted When:** An issuer is registered or deregistered by the admin.
 
 ---
 
 ### 2. Revocation Registry Events
 
 #### Initialized
-* **Topic:** `[Symbol("Initialized")]`
-* **Data:** `admin: Address`
-* **Emitted When:** The contract is initialized with an admin address.
-* **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
+
+- **Topic:** `[Symbol("Initialized")]`
+- **Data:** `admin: Address`
+- **Emitted When:** The contract is initialized with an admin address.
+- **Note:** Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### Revoked
-* **Topic:** `[Symbol("Revoked")]`
-* **Data:** `(issuer: Address, vc_hash: BytesN<32>)`
-* **Emitted When:** An issuer revokes a single VC hash.
-* **feeder Action:** Map the `vc_hash` to the subject, decrement their VC count, and submit `set_vc_count` to the credit oracle.
+
+- **Topic:** `[Symbol("Revoked")]`
+- **Data:** `(issuer: Address, vc_hash: BytesN<32>)`
+- **Emitted When:** An issuer revokes a single VC hash, or for each individual VC hash revoked during `batch_revoke`.
+- **Note:** The payload carries no `subject` — the registry stores revocations keyed only by `vc_hash`. The subject forwarded to `revoke` is recorded through the identity-oracle's `mark_vc_revoked`; indexers can resolve per-subject revocations with `IdentityOracle::list_revoked_for_subject(subject)`.
+- **feeder Action:** Map the `vc_hash` to the subject, decrement their VC count, and submit `set_vc_count` to the credit oracle.
 
 #### BatchRev
-* **Topic:** `[Symbol("BatchRev")]`
-* **Data:** `(issuer: Address, count: u32)`
-* **Emitted When:** An issuer revokes a batch of VC hashes.
+
+- **Topic:** `[Symbol("BatchRev")]`
+- **Data:** `(issuer: Address, count: u32)`
+- **Emitted When:** An issuer revokes a batch of VC hashes via `batch_revoke`. Emitted once at the completion of `batch_revoke` after all per-VC `Revoked` events for the batch have been emitted.
+- **feeder Action:** Optional aggregate tracking or metric collection. Indexers synchronizing credential status rely on the preceding per-VC `Revoked` events emitted for each item in the batch.
 
 ---
+
+#### IdentityOracleUpdated
+
+- **Topic:** `[Symbol("IdOSet")]`
+- **Data:** `identity_oracle_id: Address`
+- **Emitted When:** The admin configures the identity-oracle contract ID on the revocation registry.
+- **feeder Action:** None (configuration tracking). Update local cache of the identity-oracle address.
 
 ### 3. Credit Oracle Events
 
 #### IdentityOracleUpdated
-* **Topic:** `[Symbol("OrclSet")]`
-* **Data:** `(previous_oracle: Address, new_oracle: Address)`
-* **Emitted When:** The admin updates the identity-oracle contract ID on the credit oracle.
+* **Topic:** `[Symbol("IdOSet")]`
+* **Data:** `identity_oracle_id: Address`
+* **Emitted When:** The admin sets or updates the identity-oracle contract ID on the credit oracle via `set_identity_oracle`.
 * **feeder Action:** None (configuration tracking). Update local cache of the identity-oracle address.
 
 #### Score
-* **Topic:** `[Symbol("Score")]`
-* **Data:** `(subject: Address, score: u32)`
-* **Emitted When:** A subject's credit score is recomputed and updated.
-* **Note:** Always emitted by `compute_score`, regardless of the `verbose_events` flag.
 
-#### ScoreDtl _(verbose only)_
-* **Topic:** `[Symbol("ScoreDtl")]`
-* **Data:** `ScoreDetail { subject: Address, vc_score: u32, tx_score: u32, repay_score: u32, composite: u32, score: u32, weights: ScoringWeights }`
-* **Emitted When:** `compute_score` is called **and** the admin has enabled verbose events via `set_verbose_events(admin, true)`.
-* **Purpose:** Provides the full intermediate scoring breakdown so analytics platforms can build issuer and feeder quality dashboards without re-running the scoring formula. The `weights` field captures the active `ScoringWeights` at compute time, which is critical because weights can be updated via the timelock mechanism.
-* **feeder Action:** Index the component scores alongside the `Score` event to populate per-subject scoring timelines. The `composite` field can be used to detect which component is dragging a subject's score.
-* **Default state:** Disabled (`false`). No `ScoreDtl` events are emitted until an admin call enables them.
-
-#### VbsEvt
-* **Topic:** `[Symbol("VbsEvt")]`
-* **Data:** `enabled: bool`
-* **Emitted When:** The admin calls `set_verbose_events`.
-* **feeder Action:** Update your local flag so you know whether to expect `ScoreDtl` events alongside each `Score` event.
+- **Topic:** `[Symbol("Score")]`
+- **Data:** `(subject: Address, score: u32)`
+- **Emitted When:** A subject's credit score is recomputed and updated.
 
 #### FdrReg / FdrDeReg
-* **Topic:** `[Symbol("FdrReg")]` / `[Symbol("FdrDeReg")]`
-* **Data:** `feeder: Address`
-* **Emitted When:** A feeder is registered or deregistered.
+
+- **Topic:** `[Symbol("FdrReg")]` / `[Symbol("FdrDeReg")]`
+- **Data:** `feeder: Address`
+- **Emitted When:** A feeder is registered or deregistered.
 
 #### LndReg / LndDeReg
-* **Topic:** `[Symbol("LndReg")]` / `[Symbol("LndDeReg")]`
-* **Data:** `lender: Address`
-* **Emitted When:** A lender is registered or deregistered.
+
+- **Topic:** `[Symbol("LndReg")]` / `[Symbol("LndDeReg")]`
+- **Data:** `lender: Address`
+- **Emitted When:** A lender is registered or deregistered.
 
 #### WtProp
-* **Topic:** `[Symbol("WtProp")]`
-* **Data:** `(vc_weight: u32, tx_weight: u32, repayment_weight: u32, effective_ledger: u32)`
-* **Emitted When:** New scoring weights are proposed.
+
+- **Topic:** `[Symbol("WtProp")]`
+- **Data:** `(vc_weight: u32, tx_weight: u32, repayment_weight: u32, effective_ledger: u32)`
+- **Emitted When:** New scoring weights are proposed.
 
 #### WtApply
-* **Topic:** `[Symbol("WtApply")]`
-* **Data:** `(vc_weight: u32, tx_weight: u32, repayment_weight: u32)`
-* **Emitted When:** Pending or direct weights are applied.
+
+- **Topic:** `[Symbol("WtApply")]`
+- **Data:** `(vc_weight: u32, tx_weight: u32, repayment_weight: u32)`
+- **Emitted When:** Pending or direct weights are applied.
 
 #### CdSet
-* **Topic:** `[Symbol("CdSet")]`
-* **Data:** `(ledgers: u32, admin: Address)`
-* **Emitted When:** The compute cooldown ledgers value is updated by the admin.
+
+- **Topic:** `[Symbol("CdSet")]`
+- **Data:** `(ledgers: u32, admin: Address)`
+- **Emitted When:** The compute cooldown ledgers value is updated by the admin.
+
+#### DsptFild
+
+- **Topic:** `[Symbol("DsptFild")]`
+- **Data:** `(subject: Address, input_key: Symbol)`
+- **Emitted When:** A subject flags one of their score inputs as possibly incorrect via `flag_score_input`. `input_key` is one of `tx_stats`, `repayment`, or `vc_count`, and the stored `DisputeRecord` starts as `Pending`.
+- **feeder Action:** Review the flagged input. Only one pending dispute per `(subject, input_key)` is allowed, so a second `flag_score_input` for the same key fails with `DisputeAlreadyPending`.
+
+#### DsptRslv
+
+- **Topic:** `[Symbol("DsptRslv")]`
+- **Data:** `(subject: Address, input_key: Symbol)`
+- **Emitted When:** The admin accepts the dispute with `resolve_dispute(subject, input_key, true)`, moving the record to `Resolved`.
+- **feeder Action:** Re-fetch and correct the flagged input, then resubmit it (`update_tx_stats`, `record_repayment`, or `set_vc_count`) so the score is recomputed from clean data.
+
+#### DsptRjct
+
+- **Topic:** `[Symbol("DsptRjct")]`
+- **Data:** `(subject: Address, input_key: Symbol)`
+- **Emitted When:** The admin rejects the dispute with `resolve_dispute(subject, input_key, false)`, moving the record to `Rejected`. The flagged input stands, so no re-fetch is needed.
+- **feeder Action:** None. The subject may file a new dispute for the same key afterwards.
+
+`get_dispute(subject, input_key)` and `list_disputes(subject)` return the stored `DisputeRecord` (`subject`, `input_key`, `reason`, `filed_at_ledger`, `status`) for consumers that prefer a storage read over indexing.
 
 ---
 
 ### 4. Governance Events
 
 #### Initialized
-* **Topic:** `[Symbol("Initialized")]`
-* **Data:** `(admin: Address, credit_oracle: Address)`
-* **Emitted When:** The governance contract is initialized with an admin address and the credit-oracle it will govern. The admin address must be passed in by the caller (matches the `initialize` parameter); `credit_oracle` is also passed in at init time and must match the address stored under `DataKey::CreditOracle`.
-* **Note:** The data format differs from the other contracts because governance's `initialize` signature includes the credit-oracle target. The identity-oracle address is not currently stored by governance (a specific follow-up to issue #39 would make this consistent — for now governance is the only contract that emits more than just the admin on init). Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
+
+- **Topic:** `[Symbol("Initialized")]`
+- **Data:** `(admin: Address, credit_oracle: Address)`
+- **Emitted When:** The governance contract is initialized with an admin address and the credit-oracle it will govern. The admin address must be passed in by the caller (matches the `initialize` parameter); `credit_oracle` is also passed in at init time and must match the address stored under `DataKey::CreditOracle`.
+- **Note:** The data format differs from the other contracts because governance's `initialize` signature includes the credit-oracle target. The identity-oracle address is not currently stored by governance (a specific follow-up to issue #39 would make this consistent — for now governance is the only contract that emits more than just the admin on init). Emitted exactly once — the `AlreadyInitialized` error prevents re-initialization.
 
 #### ProposalCreated
-* **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
-* **Data:** `(proposer: Address, expiry_ledger: u32)`
-* **Emitted When:** A new governance proposal is created.
+
+- **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
+- **Data:** `(proposer: Address, expiry_ledger: u32)`
+- **Emitted When:** A new governance proposal is created.
 
 #### ProposalExecuted
-* **Topic:** `[Symbol("PropExec"), proposal_id: u64]`
-* **Data:** `(votes_for: i128, votes_against: i128)`
-* **Emitted When:** An expired governance proposal is executed.
+
+- **Topic:** `[Symbol("PropExec"), proposal_id: u64]`
+- **Data:** `(votes_for: i128, votes_against: i128)`
+- **Emitted When:** An expired governance proposal is executed.
 
 #### ProposalCancelled
 * **Topic:** `[Symbol("PropCanc"), proposal_id: u64]`
-* **Data:** `(canceller: Address, reason: Option<String>)`
+* **Data:** `canceller: Address`
 * **Emitted When:** A governance proposal is cancelled.
 
----
+#### WeightsApplied
+
+- **Topic:** `[Symbol("WtApplied")]`
+- **Data:** `ledger_sequence: u32`
+- **Emitted When:** The credit-oracle's pending weights have reached their effective ledger and are successfully applied.
 
 ---
 
-## Verbose Scoring Events
+## Subscribing to Events with the SDK
 
-### Overview
-
-By default `compute_score` emits only the `Score` event (subject + final score). When verbose events are enabled the contract additionally emits a `ScoreDtl` event containing every intermediate component and the weights that were active at compute time.
-
-| Flag state | Events emitted by `compute_score` |
-|---|---|
-| `verbose_events = false` (default) | `Score` |
-| `verbose_events = true` | `Score` + `ScoreDtl` |
-
-### Enabling verbose events
-
-Only the contract admin can toggle this flag:
-
-```bash
-stellar contract invoke \
-  --id <CREDIT_ORACLE_CONTRACT_ID> \
-  --source <ADMIN_SECRET_KEY> \
-  -- set_verbose_events \
-  --admin <ADMIN_ADDRESS> \
-  --enabled true
-```
-
-To disable again, pass `--enabled false`.
-
-### ScoreDetail fields
-
-| Field | Type | Description |
-|---|---|---|
-| `subject` | `Address` | The subject whose score was computed. |
-| `vc_score` | `u32` | VC component score (0–100) before weighting. |
-| `tx_score` | `u32` | Transaction component score (0–100) before weighting. |
-| `repay_score` | `u32` | Repayment component score (0–100) before weighting. |
-| `composite` | `u32` | Weighted composite (0–100): `(vc_score × vc_weight + tx_score × tx_weight + repay_score × repayment_weight) / 100`. |
-| `score` | `u32` | Final clamped score ([300, 850]). Matches the value in the `Score` event. |
-| `weights` | `ScoringWeights` | Active weights at compute time (`vc_weight`, `tx_weight`, `repayment_weight`). |
-
-### Indexer guidance
-
-When `VbsEvt` fires with `enabled = true`, start correlating `ScoreDtl` events with `Score` events (same ledger, same contract, same `subject`).
-
-**Dashboard use-cases enabled by `ScoreDtl`:**
-
-* **Feeder quality:** Track `tx_score` trends per feeder to detect stale or missing `update_tx_stats` calls.
-* **Issuer quality:** Track `vc_score` to see whether new VC issuances are lifting subject scores.
-* **Repayment health:** Monitor `repay_score` across a lender's portfolio without re-running the formula.
-* **Weight-change impact analysis:** Because `weights` is captured at compute time you can retroactively compare scores computed under different weight regimes.
-
-### Node.js example — consuming ScoreDtl
+The TypeScript SDK provides polling helpers for the events most useful to
+off-chain lenders, feeders, and analytics services. Each helper polls
+Soroban RPC's `getEvents` method and returns an unsubscribe function. Configure
+the polling interval with `pollIntervalMs`; no WebSocket connection is
+required.
 
 ```typescript
-import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
+import StellarDIDCreditSDK from "@stellar-did-credit/sdk";
 
-const rpcUrl = "https://soroban-testnet.stellar.org";
-const server = new SorobanRpc.Server(rpcUrl);
-const contractId = "<CREDIT_ORACLE_CONTRACT_ID>";
+const sdkConfig = {
+  identityOracleId: "C...", // Identity Oracle contract ID
+  creditOracleId: "C...", // Credit Oracle contract ID
+  revocationRegistryId: "C...", // Revocation Registry contract ID
+  networkPassphrase: "Test SDF Network ; September 2015",
+  rpcUrl: "https://soroban-testnet.stellar.org",
+  simAccount: "G...", // Account used for read-only simulations
+  pollIntervalMs: 5_000,
+};
+const sdk = new StellarDIDCreditSDK(sdkConfig);
 
-async function indexScoreDetails(startLedger: number) {
-  const response = await server.getEvents({
-    startLedger,
-    filters: [
-      {
-        type: "contract",
-        contractIds: [contractId],
-        topics: [[xdr.ScVal.scvSymbol("ScoreDtl").toXDR("base64")]],
-      },
-    ],
-    limit: 100,
-  });
+const stopAnchored = sdk.onVCAnchored(
+  sdkConfig.identityOracleId,
+  (issuer, subject, vcHash) => {
+    console.log("VC anchored", { issuer, subject, vcHash });
+    // Trigger your feeder sync logic here.
+  },
+);
 
-  for (const event of response.events) {
-    const detail = scValToNative(event.value);
-    // detail is a ScoreDetail struct — fields match the order in the contract type
-    const { subject, vc_score, tx_score, repay_score, composite, score, weights } = detail;
+const stopScored = sdk.onScoreComputed(
+  sdkConfig.creditOracleId,
+  (subject, score) => {
+    console.log("Score computed", { subject, score });
+  },
+);
 
-    console.log(
-      `[ScoreDtl] subject=${subject} ` +
-      `vc=${vc_score} tx=${tx_score} repay=${repay_score} ` +
-      `composite=${composite} final=${score} ` +
-      `weights=${weights.vc_weight}/${weights.tx_weight}/${weights.repayment_weight}`
-    );
+const stopRevoked = sdk.onVCRevoked(
+  sdkConfig.revocationRegistryId,
+  (issuer, vcHash) => {
+    console.log("VC revoked", { issuer, vcHash });
+  },
+);
 
-    // Store in your analytics database:
-    // await db.upsertScoreBreakdown({ subject, vc_score, tx_score, repay_score, composite, score, weights, ledger: event.ledger });
-  }
-}
+// All three dispute topics for one subject share a single poll per interval.
+const stopDisputes = sdk.subscribeToDisputeEvents(
+  "G...", // Subject address whose disputes to watch
+  (event) => {
+    console.log("Dispute", event);
+    // event: { eventType, subject, inputKey, status }
+  },
+);
+
+// Call the returned functions during shutdown.
+void stopAnchored;
+void stopScored;
+void stopRevoked;
+void stopDisputes;
 ```
 
----
-
-## Subscribing to Events (Node.js Example)
-
-Here is a Node.js example using the `@stellar/stellar-sdk` to subscribe to `VCAnch` events on the Identity Oracle contract.
-
-```typescript
-import { SorobanRpc, xdr, scValToNative } from "@stellar/stellar-sdk";
-
-const rpcUrl = "https://soroban-testnet.stellar.org";
-const server = new SorobanRpc.Server(rpcUrl);
-const contractId = "CATORJPJ..."; // Replace with Identity Oracle contract ID
-
-async function pollEvents() {
-  const currentLedger = await server.getLatestLedger();
-  const startLedger = currentLedger.sequence - 100; // Start polling from 100 ledgers ago
-
-  console.log(`Polling events starting from ledger ${startLedger}...`);
-
-  const response = await server.getEvents({
-    startLedger,
-    filters: [
-      {
-        type: "contract",
-        contractIds: [contractId],
-        topics: [
-          [
-            xdr.ScVal.scvSymbol("VCAnch").toXDR("base64")
-          ]
-        ]
-      }
-    ],
-    limit: 50
-  });
-
-  for (const event of response.events) {
-    const value = scValToNative(event.value);
-    // VCAnch value is a tuple/array: [issuer, subject, vc_hash]
-    const [issuer, subject, vcHash] = value;
-    console.log(`[VCAnch] Issuer: ${issuer}, Subject: ${subject}, Hash: ${vcHash}`);
-    
-    // Trigger your feeder sync logic here:
-    // await syncSubjectVCs(subject);
-  }
-}
-
-pollEvents().catch(console.error);
-```
+The first poll begins at the latest ledger available from the RPC server.
+After each successful response, the SDK advances the subscription cursor to the
+next ledger after the latest ledger seen, so events are not delivered again by
+later polls.
 
 ---
 
@@ -300,14 +265,23 @@ pollEvents().catch(console.error);
 To maintain a real-time credit score, the off-chain feeder performs the following event-driven loops:
 
 ### Scenario A: VC Anchored
+
 1. Subscribe to `VCAnch` events on `identity-oracle`.
 2. Extract the `subject` address from the event payload.
 3. Call `get_active_vc_count(subject)` on `identity-oracle` via read-only RPC simulation to get the latest count.
 4. Call `set_vc_count(feeder, subject, count)` on `credit-oracle`.
 
 ### Scenario B: VC Revoked
+
 1. Subscribe to `Revoked` events on `revocation-registry`.
 2. Extract the `vc_hash`.
 3. Resolve the `subject` address associated with that `vc_hash` (e.g. from local indexing database).
 4. Call `get_active_vc_count(subject)` on `identity-oracle` via read-only RPC simulation to get the decremented count.
 5. Call `set_vc_count(feeder, subject, count)` on `credit-oracle`.
+
+### Scenario C: Dispute Resolved
+
+1. Subscribe to `DsptFild`, `DsptRslv`, and `DsptRjct` on `credit-oracle` with `sdk.subscribeToDisputeEvents(subject, callback)`.
+2. On a `DsptRslv` event, re-fetch the input named by `inputKey` (`tx_stats`, `repayment`, or `vc_count`) from its source of truth.
+3. Resubmit the corrected value with `update_tx_stats`, `record_repayment`, or `set_vc_count`.
+4. `DsptFild` is informational (an admin still has to rule); `DsptRjct` means the existing input was confirmed correct, so no resubmission is needed.

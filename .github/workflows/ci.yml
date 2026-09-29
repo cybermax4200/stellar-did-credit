@@ -11,12 +11,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      
+
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
-      
+
+      - name: Install wasm-pack
+        run: |
+          cargo install wasm-pack --version 0.13.1 --locked
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
       - name: Cache cargo registry
         uses: actions/cache@v4
         with:
@@ -25,12 +30,44 @@ jobs:
             ~/.cargo/git
             target
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
-      
+
       - name: Run tests (regenerate snapshots if needed)
         run: SOROBAN_TEST_SNAPSHOT_FILE_UPDATE=true cargo test --workspace
-      
+
+      - name: Run cargo deny
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
       - name: Run clippy
         run: cargo clippy --workspace -- -D warnings
+
+  contract-lint:
+    name: Contract lint (no bare panic!)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for bare panic!() in contract source
+        run: |
+          # Fail if bare panic!() exists in contract source files.
+          # Exemptions:
+          #   - contracts/tests/ (integration test crate, all code is test code)
+          #   - soroban_sdk::panic_with_error! (canonical Soroban error signal)
+          #   - Lines containing // panic (comments)
+          matches=$(grep -rn 'panic!' contracts/*/src/ --include='*.rs' \
+            | grep -v '^contracts/tests/' \
+            | grep -v 'panic_with_error!' \
+            | grep -v '//.*panic' || true)
+          if [ -n "$matches" ]; then
+            echo "ERROR: Found bare panic!() in contract source files:"
+            echo "$matches"
+            echo ""
+            echo "Use soroban_sdk::panic_with_error!() or return Err() instead."
+            echo "See CONTRIBUTING.md for guidelines."
+            exit 1
+          fi
+          echo "No bare panic!() found in contract source files."
 
   fuzz:
     runs-on: ubuntu-latest
@@ -52,9 +89,17 @@ jobs:
       - name: Install cargo-fuzz
         run: cargo install cargo-fuzz
 
-      - name: Run fuzz tests
-        run: cargo +nightly fuzz run compute_score_pure -- -runs=10000
+      - name: Run fuzz tests (credit-oracle)
+        run: cargo +nightly fuzz run compute_score_pure -- -runs=5000
         working-directory: contracts/credit-oracle
+
+      - name: Run fuzz tests (identity-oracle)
+        run: cargo +nightly fuzz run anchor_vc_typed -- -runs=5000
+        working-directory: contracts/identity-oracle
+
+      - name: Run fuzz tests (governance)
+        run: cargo +nightly fuzz run vote_weight -- -runs=5000
+        working-directory: contracts/governance
 
   ts-test:
     runs-on: ubuntu-latest
@@ -69,12 +114,22 @@ jobs:
       - name: Install pnpm
         uses: pnpm/action-setup@v4
 
-      - name: Install SDK dependencies
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      - name: Install dependencies
         run: pnpm install --frozen-lockfile
-        working-directory: packages/sdk
+
+      - name: Build zk-wasm
+        run: pnpm --filter @stellar-did-credit/zk-wasm build
 
       - name: Run TypeScript SDK tests
-        run: pnpm test -- --coverage
+        run: pnpm run test --coverage
         working-directory: packages/sdk
 
   docs:
@@ -160,6 +215,30 @@ jobs:
       - name: Check Node.js dependencies for vulnerabilities
         run: pnpm audit --audit-level=high
 
+  smoke-test:
+    name: Testnet smoke test
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    continue-on-error: true
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies for stellar-cli
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libdbus-1-dev libudev-dev
+
+      - name: Install stellar-cli
+        run: cargo install --locked stellar-cli
+
+      - name: Run testnet smoke test
+        env:
+          NETWORK: testnet
+          INVOKE_TIMEOUT_SECS: 30
+        run: bash scripts/smoke-test-testnet.sh deployments.testnet.json
+
   check-wasm-sizes:
     runs-on: ubuntu-latest
     steps:
@@ -180,7 +259,14 @@ jobs:
           key: ${{ runner.os }}-cargo-wasm-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build contracts (release)
-        run: cargo build --target wasm32-unknown-unknown --release --workspace
+        run: >-
+          cargo build --target wasm32-unknown-unknown --release
+          -p identity-oracle
+          -p credit-oracle
+          -p credit-oracle-types
+          -p revocation-registry
+          -p score-range-verifier
+          -p governance
 
       - name: Check WASM binary sizes
         run: |

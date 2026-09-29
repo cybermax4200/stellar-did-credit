@@ -94,6 +94,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "BatchLimit"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 100
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "PendingAdmin"
                             }
                           ]

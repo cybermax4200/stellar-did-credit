@@ -3,9 +3,9 @@
 //!
 //! Provides on-chain proposal creation, voting, and execution that can
 //! update the credit-oracle's scoring weights through a community vote.
-use credit_oracle_types::{CreditOracleClient, ScoringWeights};
+use credit_oracle_types::{CreditOracleClient, CreditOracleError, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -24,7 +24,7 @@ pub enum GovernanceError {
     ProposalNotExpired = 5,
     /// Proposal has already been executed.
     ProposalAlreadyExecuted = 6,
-    /// Proposed scoring weights do not sum to 100.
+    /// Proposed scoring weights do not sum to 100 or a component is below MIN_COMPONENT_WEIGHT (10).
     InvalidWeights = 7,
     /// Quorum value must be positive.
     InvalidQuorum = 8,
@@ -40,6 +40,16 @@ pub enum GovernanceError {
     InsufficientVoteWeight = 13,
     /// Proposal has already been cancelled and cannot be executed or cancelled again.
     ProposalAlreadyCancelled = 14,
+    /// The credit-oracle has no pending weights to apply.
+    NoPendingWeights = 15,
+    /// The credit-oracle is paused and cannot apply weights.
+    ContractPaused = 16,
+    /// The vote would overflow the proposal's tally.
+    VoteTallyOverflow = 17,
+    /// Proposal did not receive more for-votes than against-votes.
+    ProposalRejected = 18,
+    /// Voting period cannot be zero.
+    InvalidVotingPeriod = 19,
 }
 
 /// Storage keys for the governance contract.
@@ -50,9 +60,12 @@ pub enum DataKey {
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
     /// Monotonically increasing counter used to assign proposal IDs.
+    /// IDs start at 1; ID 0 is intentionally unused.
     NextProposalId,
     /// Default quorum (minimum total votes) required for proposal execution.
     QuorumRequired,
+    /// Optional percentage of total registered voting weight required for new proposals.
+    QuorumPercent,
     /// Proposal data stored by proposal ID.
     Proposal(u64),
     /// Original proposer address for a given proposal ID.
@@ -61,6 +74,7 @@ pub enum DataKey {
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
     VoteWeightUsed(u64, Address),
+    TotalRegisteredWeight,
 }
 
 /// Instance-storage TTL bump constants.
@@ -77,6 +91,12 @@ pub enum DataKey {
 /// proposals are being created/voted on.
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+
+const FIRST_PROPOSAL_ID: u64 = 1;
+
+// Persistent voter entries must survive long voting periods.
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+const PERS_TTL_EXTEND: u32 = 518_400;
 
 #[contracttype]
 #[derive(Clone)]
@@ -155,7 +175,7 @@ impl Governance {
             .set(&DataKey::CreditOracle, &credit_oracle);
         env.storage()
             .instance()
-            .set(&DataKey::NextProposalId, &1u64);
+            .set(&DataKey::NextProposalId, &FIRST_PROPOSAL_ID);
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
@@ -163,7 +183,7 @@ impl Governance {
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
 
-        // Issue #302: emit an Initialized event so off-chain indexers can
+        // Issue #665: emit an Initialized event so off-chain indexers can
         // observe governance deployment before the first admin action.
         // Data tuple includes the admin and the credit-oracle target so
         // indexers can record the contract's wiring.
@@ -193,10 +213,42 @@ impl Governance {
             return Err(GovernanceError::NotAuthorized);
         }
         admin.require_auth();
+
+        let total_weight: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        if quorum_required > total_weight {
+            return Err(GovernanceError::InvalidQuorum);
+        }
+
         env.storage()
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
+        env.storage().instance().remove(&DataKey::QuorumPercent);
         Ok(())
+    }
+
+    /// Configure the quorum for future proposals as a percentage of currently
+    /// registered voting weight. The computed quorum is snapshotted at proposal creation.
+    pub fn set_quorum_percent(env: Env, admin: Address, percent: u32) -> Result<(), GovernanceError> {
+        if percent == 0 || percent > 100 {
+            return Err(GovernanceError::InvalidQuorum);
+        }
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::QuorumPercent, &percent);
+        Ok(())
+    }
+
+    /// Return the percentage-based quorum configuration, if enabled.
+    pub fn get_quorum_percent(env: Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::QuorumPercent)
     }
 
     /// Returns the contract-wide default quorum applied to newly created proposals.
@@ -207,12 +259,21 @@ impl Governance {
             .unwrap_or(0)
     }
 
+    /// Returns the total registered voting weight across all voters.
+    pub fn get_total_registered_weight(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0)
+    }
+
     /// Create a new governance proposal to update the credit-oracle's scoring weights.
     ///
     /// `weights` must sum to 100. The voting period runs for `voting_period_ledgers`
     /// ledgers from the current sequence. After voting ends, execution is further
     /// delayed by `execution_delay_ledgers` ledgers to give the community a reaction
-    /// window. Returns the new proposal ID.
+    /// window. Returns the new proposal ID. The first proposal has ID 1 and each
+    /// subsequent proposal increments the ID by 1.
     ///
     /// Auth: `proposer` must sign the transaction.
     pub fn create_proposal(
@@ -223,21 +284,26 @@ impl Governance {
         execution_delay_ledgers: u32,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
-        if weights.vc_weight + weights.tx_weight + weights.repayment_weight != 100 {
+        if !weights.is_valid() {
             return Err(GovernanceError::InvalidWeights);
+        }
+        if voting_period_ledgers == 0 {
+            return Err(GovernanceError::InvalidVotingPeriod);
         }
 
         let id: u64 = env
             .storage()
             .instance()
             .get(&DataKey::NextProposalId)
-            .unwrap_or(1);
+            .unwrap_or(FIRST_PROPOSAL_ID);
         let expiry_ledger = env.ledger().sequence() + voting_period_ledgers;
-        let quorum_required: i128 = env
-            .storage()
-            .instance()
-            .get(&DataKey::QuorumRequired)
-            .unwrap_or(0);
+        let quorum_required = match env.storage().instance().get::<_, u32>(&DataKey::QuorumPercent) {
+            Some(percent) => {
+                let total: i128 = env.storage().instance().get(&DataKey::TotalRegisteredWeight).unwrap_or(0);
+                total.checked_mul(i128::from(percent)).ok_or(GovernanceError::InvalidQuorum)? / 100
+            }
+            None => env.storage().instance().get(&DataKey::QuorumRequired).unwrap_or(0),
+        };
 
         let proposal = GovernanceProposal {
             id,
@@ -273,7 +339,7 @@ impl Governance {
     /// `vote_weight` must be positive and cannot exceed the voter's available
     /// weight for this proposal. Each voter can cast multiple votes up to their
     /// total registered weight. Returns an error if the proposal has expired,
-    /// been executed, or if the voter lacks sufficient weight.
+    /// been executed, been cancelled, or if the voter lacks sufficient weight.
     ///
     /// Auth: `voter` must sign the transaction.
     pub fn vote(
@@ -295,6 +361,11 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoterWeight(voter.clone()))
             .ok_or(GovernanceError::VoterNotRegistered)?;
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
 
         // Check how much weight this voter has already used for this proposal
         let used_weight: i128 = env
@@ -302,6 +373,13 @@ impl Governance {
             .persistent()
             .get(&DataKey::VoteWeightUsed(proposal_id, voter.clone()))
             .unwrap_or(0);
+        if used_weight > 0 {
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        }
 
         let available_weight = total_weight - used_weight;
         if vote_weight > available_weight {
@@ -323,11 +401,24 @@ impl Governance {
             return Err(GovernanceError::ProposalAlreadyExecuted);
         }
 
-        // Update vote totals
+        // A cancelled proposal is dead: no further votes may be cast, even if
+        // the voting period has not yet expired.
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
+        // Reject votes that would overflow a proposal tally instead of
+        // silently saturating and potentially bypassing quorum.
         if vote_for {
-            proposal.votes_for = proposal.votes_for.saturating_add(vote_weight);
+            proposal.votes_for = proposal
+                .votes_for
+                .checked_add(vote_weight)
+                .ok_or(GovernanceError::VoteTallyOverflow)?;
         } else {
-            proposal.votes_against = proposal.votes_against.saturating_add(vote_weight);
+            proposal.votes_against = proposal
+                .votes_against
+                .checked_add(vote_weight)
+                .ok_or(GovernanceError::VoteTallyOverflow)?;
         }
 
         // Update used weight for this voter on this proposal
@@ -335,6 +426,11 @@ impl Governance {
         env.storage().persistent().set(
             &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
             &new_used_weight,
+        );
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoteWeightUsed(proposal_id, voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
         );
 
         // Store updated proposal
@@ -390,24 +486,26 @@ impl Governance {
             return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
+        if proposal.votes_for <= proposal.votes_against {
+            return Err(GovernanceError::ProposalRejected);
+        }
+
         if proposal.votes_for + proposal.votes_against < proposal.quorum_required {
             return Err(GovernanceError::QuorumNotMet);
         }
 
-        if proposal.votes_for > proposal.votes_against {
-            let credit_oracle_addr: Address = env
-                .storage()
-                .instance()
-                .get(&DataKey::CreditOracle)
-                .expect("no credit oracle");
+        let credit_oracle_addr: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::CreditOracle)
+            .expect("no credit oracle");
 
-            // Use propose_weights to start the timelock, not update_weights which bypasses it
-            CreditOracleClient::propose_weights(
-                &env,
-                &credit_oracle_addr,
-                &proposal.proposed_weights,
-            );
-        }
+        // Use propose_weights to start the timelock, not update_weights which bypasses it
+        CreditOracleClient::propose_weights(
+            &env,
+            &credit_oracle_addr,
+            &proposal.proposed_weights,
+        );
 
         proposal.executed = true;
         env.storage().persistent().set(&proposal_key, &proposal);
@@ -420,11 +518,67 @@ impl Governance {
         Ok(())
     }
 
+    /// Cleanup VoteWeightUsed entries for a completed proposal.
+    ///
+    /// Only the contract admin can call this function. The proposal must be
+    /// executed (`proposal.executed == true`) before cleanup is allowed.
+    /// This removes all VoteWeightUsed entries for the specified voters on
+    /// the completed proposal.
+    ///
+    /// If the proposal is not executed, this is a no-op (not an error).
+    ///
+    /// Auth: `admin` must sign the transaction.
+    pub fn cleanup_proposal_votes(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+        voters: Vec<Address>,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Proposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        // No-op if proposal not executed
+        if !proposal.executed {
+            return Ok(());
+        }
+
+        // Remove VoteWeightUsed entries for each voter
+        for voter in voters.iter() {
+            env.storage()
+                .persistent()
+                .remove(&DataKey::VoteWeightUsed(proposal_id, voter.clone()));
+        }
+
+        env.events().publish(
+            (symbol_short!("VCln"), proposal_id),
+            voters.len(),
+        );
+
+        Ok(())
+    }
+
     /// Apply pending weights to the credit-oracle after the timelock expires.
     ///
     /// This function should be called after `execute` has successfully queued
     /// new weights and the credit-oracle's timelock (17,280 ledgers / ~24 hours)
     /// has elapsed. Anyone can call this function.
+    ///
+    /// Errors from the credit-oracle's `apply_weights` are propagated with the
+    /// equivalent governance error so callers can distinguish calling too early
+    /// (`TimelockNotExpired`) from nothing being queued (`NoPendingWeights`).
     pub fn apply_weights(env: Env) -> Result<(), GovernanceError> {
         let credit_oracle_addr: Address = env
             .storage()
@@ -432,12 +586,17 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .ok_or(GovernanceError::NotAuthorized)?;
 
-        CreditOracleClient::apply_weights(&env, &credit_oracle_addr);
-
-        env.events()
-            .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
-
-        Ok(())
+        match CreditOracleClient::apply_weights(&env, &credit_oracle_addr) {
+            Ok(()) => {
+                env.events()
+                    .publish((symbol_short!("WtApplied"),), env.ledger().sequence());
+                Ok(())
+            }
+            Err(CreditOracleError::TimelockNotExpired) => Err(GovernanceError::TimelockNotExpired),
+            Err(CreditOracleError::NoPendingWeights) => Err(GovernanceError::NoPendingWeights),
+            Err(CreditOracleError::ContractPaused) => Err(GovernanceError::ContractPaused),
+            Err(_) => Err(GovernanceError::NotAuthorized),
+        }
     }
 
     /// Accept the admin role of the credit-oracle on behalf of this contract.
@@ -490,9 +649,32 @@ impl Governance {
         }
         admin.require_auth();
 
+        // `register_voter` is also the upsert entry point for voter weights.
+        // Replace (rather than add to) any existing weight so the aggregate
+        // remains an accurate basis for percentage-based quorum calculations.
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         env.storage()
             .persistent()
             .set(&DataKey::VoterWeight(voter.clone()), &weight);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VoterWeight(voter.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
 
         env.events()
             .publish((symbol_short!("VoterReg"), voter.clone()), weight);
@@ -525,6 +707,12 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         if weight == 0 {
             env.storage()
                 .persistent()
@@ -533,7 +721,21 @@ impl Governance {
             env.storage()
                 .persistent()
                 .set(&DataKey::VoterWeight(voter.clone()), &weight);
+            env.storage().persistent().extend_ttl(
+                &DataKey::VoterWeight(voter.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
         }
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
 
         env.events()
             .publish((symbol_short!("VoterUpd"), voter.clone()), weight);
@@ -562,9 +764,24 @@ impl Governance {
         }
         admin.require_auth();
 
+        let old_weight: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VoterWeight(voter.clone()))
+            .unwrap_or(0);
+
         env.storage()
             .persistent()
             .remove(&DataKey::VoterWeight(voter.clone()));
+
+        let total: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::TotalRegisteredWeight)
+            .unwrap_or(0);
+        env.storage()
+            .instance()
+            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight));
 
         env.events()
             .publish((symbol_short!("VoterDer"), voter.clone()), ());
@@ -613,6 +830,52 @@ impl Governance {
             .unwrap_or(0);
 
         total_weight - used_weight
+    }
+
+    /// List governance proposals starting from `from_id` up to `limit`.
+    ///
+    /// Iterates proposal IDs in `[from_id, from_id + min(limit, 20))`.
+    /// `limit` is capped at 20 to prevent storage read budget exhaustion.
+    /// Non-existent proposals (deleted or skipped) are omitted.
+    /// If `include_inactive` is `false`, cancelled and executed proposals are skipped.
+    /// Returns an empty vector (not an error) if `from_id` is beyond `NextProposalId` or `limit` is 0.
+    pub fn list_proposals(
+        env: Env,
+        from_id: u64,
+        limit: u32,
+        include_inactive: bool,
+    ) -> Vec<GovernanceProposal> {
+        let mut result = Vec::new(&env);
+        let cap = limit.min(20);
+        if cap == 0 {
+            return result;
+        }
+
+        let next_proposal_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextProposalId)
+            .unwrap_or(FIRST_PROPOSAL_ID);
+
+        if from_id >= next_proposal_id {
+            return result;
+        }
+
+        let end_id = from_id.saturating_add(cap as u64).min(next_proposal_id);
+
+        for id in from_id..end_id {
+            if let Some(proposal) = env
+                .storage()
+                .persistent()
+                .get::<DataKey, GovernanceProposal>(&DataKey::Proposal(id))
+            {
+                if include_inactive || (!proposal.executed && !proposal.cancelled) {
+                    result.push_back(proposal);
+                }
+            }
+        }
+
+        result
     }
 
     /// Cancel a governance proposal.
@@ -791,6 +1054,66 @@ mod tests {
         assert_eq!(active_weights.repayment_weight, 30);
     }
 
+    /// Issue #665: `initialize` must emit exactly one `Initialized` event
+    /// carrying the admin and credit-oracle addresses so off-chain indexers
+    /// can observe governance deployments before the first admin action, and
+    /// a second initialization must fail without emitting a duplicate event.
+    #[test]
+    fn test_initialize_emits_initialized_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        // A second initialize must fail and must not emit another event.
+        let events = env.events().all();
+        let mut gov_events = 0;
+        let mut found_initialized = false;
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id != gov_id {
+                continue;
+            }
+            gov_events += 1;
+            if topics.len() == 1 {
+                let evt_topic: soroban_sdk::Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(soroban_sdk::symbol_short!("invalid"));
+                if evt_topic == Symbol::new(&env, "Initialized") {
+                    found_initialized = true;
+                    let payload: (Address, Address) = data.try_into_val(&env).unwrap();
+                    assert_eq!(
+                        payload.0, admin,
+                        "governance Initialized event admin mismatch"
+                    );
+                    assert_eq!(
+                        payload.1, credit_oracle_id,
+                        "governance Initialized event credit_oracle mismatch"
+                    );
+                }
+            }
+        }
+
+        assert_eq!(
+            gov_events, 1,
+            "governance should emit exactly one event on initialize"
+        );
+        assert!(
+            found_initialized,
+            "governance Initialized event should be emitted"
+        );
+
+        let res = gov_client.try_initialize(&admin, &credit_oracle_id, &500);
+        assert_eq!(res, Err(Ok(GovernanceError::AlreadyInitialized)));
+    }
+
     #[test]
     fn test_proposal_with_exactly_quorum_votes_succeeds() {
         let env = Env::default();
@@ -896,6 +1219,44 @@ mod tests {
     }
 
     #[test]
+    fn test_vote_rejects_tally_overflow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &1);
+
+        env.as_contract(&gov_id, || {
+            let proposal_key = DataKey::Proposal(proposal_id);
+            let mut proposal: GovernanceProposal = env
+                .storage()
+                .persistent()
+                .get(&proposal_key)
+                .unwrap();
+            proposal.votes_for = i128::MAX;
+            env.storage().persistent().set(&proposal_key, &proposal);
+        });
+
+        let result = gov_client.try_vote(&voter, &proposal_id, &true, &1);
+        assert_eq!(result, Err(Ok(GovernanceError::VoteTallyOverflow)));
+    }
+
+    #[test]
     fn test_cancel_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
@@ -950,9 +1311,107 @@ mod tests {
         assert!(!proposal.executed, "proposal.executed must remain false");
     }
 
+    /// A cancelled proposal must reject all further vote calls with
+    /// `ProposalAlreadyCancelled`, even while the voting period is still
+    /// open, and must remain unexecutable (`execute` already guards against
+    /// cancelled proposals). Votes cast before cancellation are preserved.
+    #[test]
+    fn test_vote_rejected_after_cancellation() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Vote before cancellation succeeds.
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter1, &500);
+        gov_client.register_voter(&admin, &voter2, &500);
+        gov_client.vote(&voter1, &proposal_id, &true, &300);
+
+        // The proposer cancels their own proposal.
+        gov_client.cancel_proposal(&proposer, &proposal_id);
+
+        // Voting after cancellation must fail even though the voting period
+        // has not expired.
+        let res = gov_client.try_vote(&voter2, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+
+        // A voter who already voted cannot add more weight either.
+        let res = gov_client.try_vote(&voter1, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+
+        // Votes cast before cancellation are preserved for audit.
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled);
+        assert_eq!(proposal.votes_for, 300);
+
+        // Execution of a cancelled proposal remains rejected.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+    }
+
+    /// The admin can cancel someone else's proposal, and voting on that
+    /// proposal is then rejected just as if the proposer had cancelled it.
+    #[test]
+    fn test_admin_cancel_blocks_further_votes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        // Admin (not the proposer) cancels the proposal.
+        gov_client.cancel_proposal(&admin, &proposal_id);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "admin cancel must persist cancelled");
+
+        // Voting on an admin-cancelled proposal is rejected.
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &100);
+        let res = gov_client.try_vote(&voter, &proposal_id, &true, &100);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+    }
+
     /// Verifies the full execution timelock flow:
     /// vote passes → advance past voting → execution rejected (timelock) →
     /// advance past delay → execution succeeds.
+    ///
+    /// Per the double-timelock model in docs/governance.md §2.2, `execute()`
+    /// only queues weights (via `propose_weights`), so the active weights must
+    /// remain unchanged and a `PendingWeights` record must be visible until
+    /// `apply_weights()` runs after the credit-oracle's 17,280-ledger timelock.
     #[test]
     fn test_execution_timelock_delays_after_voting_ends() {
         let env = Env::default();
@@ -1032,6 +1491,107 @@ mod tests {
     }
 
     #[test]
+    fn test_execute_rejected_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter_for = Address::generate(&env);
+        let voter_against = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter_for, &40);
+        gov_client.register_voter(&admin, &voter_against, &60);
+        gov_client.vote(&voter_for, &proposal_id, &true, &40);
+        gov_client.vote(&voter_against, &proposal_id, &false, &60);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        let res = gov_client.try_execute(&proposal_id);
+        assert_eq!(res, Err(Ok(GovernanceError::ProposalRejected)));
+    }
+
+    #[test]
+    fn test_apply_weights_relay_propagates_timelock_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // Execute queues weights and starts the credit-oracle timelock.
+        gov_client.execute(&proposal_id);
+
+        // Calling before the credit-oracle timelock elapses must surface the
+        // typed error instead of a panic.
+        let res = gov_client.try_apply_weights();
+        assert_eq!(res, Err(Ok(GovernanceError::TimelockNotExpired)));
+    }
+
+    #[test]
+    fn test_apply_weights_relay_propagates_no_pending_weights_error() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &500);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        // No proposal has been executed, so the credit-oracle has no pending
+        // weights to apply.
+        let res = gov_client.try_apply_weights();
+        assert_eq!(res, Err(Ok(GovernanceError::NoPendingWeights)));
+    }
+
+    #[test]
     fn test_voter_registration_and_weight_management() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1065,6 +1625,53 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         gov_client.update_voter_weight(&admin, &voter, &0);
         assert_eq!(gov_client.get_voter_weight(&voter), None);
+    }
+
+    #[test]
+    fn test_quorum_percent_uses_total_registered_weight_for_new_proposals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+        client.register_voter(&admin, &Address::generate(&env), &101);
+        client.set_quorum_percent(&admin, &50);
+        assert_eq!(client.get_quorum_percent(), Some(50));
+        let proposal_id = client.create_proposal(&Address::generate(&env), &ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 }, &10, &0);
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 50);
+    }
+
+    #[test]
+    fn test_reregistering_voter_keeps_relative_quorum_total_accurate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let voter = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+
+        client.register_voter(&admin, &voter, &100);
+        client.register_voter(&admin, &voter, &40);
+        assert_eq!(client.get_total_registered_weight(), 40);
+
+        client.set_quorum_percent(&admin, &50);
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+        );
+        assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 20);
     }
 
     #[test]
@@ -1172,6 +1779,50 @@ mod tests {
     }
 
     #[test]
+    fn test_vote_weight_used_survives_long_voting_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 25,
+            repayment_weight: 25,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &100);
+        gov_client.vote(&voter, &proposal_id, &true, &60);
+
+        // Keep the proposal alive so this test isolates voter-entry TTLs.
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(500_001, 500_001);
+            env.storage().persistent().extend_ttl(
+                &DataKey::Proposal(proposal_id),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+        });
+        env.ledger().with_mut(|ledger| {
+            ledger.sequence_number += 500_001;
+        });
+
+        gov_client.vote(&voter, &proposal_id, &false, &40);
+
+        assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 100);
+        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 0);
+    }
+
+    #[test]
     fn test_weight_tracking_per_proposal() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1194,6 +1845,8 @@ mod tests {
         // Create two proposals
         let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
         let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        assert_eq!(proposal_id_1, 1);
+        assert_eq!(proposal_id_2, 2);
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -1285,5 +1938,114 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_update_voter_weight(&admin, &voter, &-10);
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVoteWeight)));
+    }
+
+    #[test]
+    fn test_create_proposal_weight_component_bounds() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+
+        // Proposal with tx_weight = 0 fails with InvalidWeights
+        let res_tx_zero = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 60,
+                tx_weight: 0,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_zero, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 9 (< MIN_COMPONENT_WEIGHT) fails with InvalidWeights
+        let res_tx_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 51,
+                tx_weight: 9,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_tx_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with vc_weight = 9 fails with InvalidWeights
+        let res_vc_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 9,
+                tx_weight: 45,
+                repayment_weight: 46,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_vc_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with repayment_weight = 9 fails with InvalidWeights
+        let res_repayment_low = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 45,
+                tx_weight: 46,
+                repayment_weight: 9,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(res_repayment_low, Err(Ok(GovernanceError::InvalidWeights)));
+
+        // Proposal with tx_weight = 10 (exact MIN_COMPONENT_WEIGHT bound) passes
+        let prop_id = gov_client.create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 50,
+                tx_weight: 10,
+                repayment_weight: 40,
+            },
+            &100,
+            &10,
+        );
+        assert_eq!(prop_id, 1);
+    }
+
+    #[test]
+    fn test_create_proposal_zero_period() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+
+        let res = gov_client.try_create_proposal(
+            &proposer,
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &0,
+            &10,
+        );
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidVotingPeriod)));
     }
 }

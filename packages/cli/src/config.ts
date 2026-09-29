@@ -2,14 +2,34 @@ import { existsSync, readFileSync } from "fs";
 import { resolve } from "path";
 import type { ProtocolConfig } from "@stellar-did-credit/sdk";
 
+export type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
+
 /**
- * Default network configuration — targets Stellar testnet when no overrides
- * are provided via environment variables or config files.
+ * Network configurations for Stellar networks.
  */
-const DEFAULTS: Partial<ProtocolConfig> = {
-  networkPassphrase: "Test SDF Network ; September 2015",
-  rpcUrl: "https://soroban-testnet.stellar.org",
-  simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+const NETWORK_CONFIGS: Record<NetworkType, Partial<ProtocolConfig>> = {
+  testnet: {
+    networkPassphrase: "Test SDF Network ; September 2015",
+    rpcUrl: "https://soroban-testnet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+  mainnet: {
+    networkPassphrase: "Public Global Stellar Network ; September 2015",
+    rpcUrl: "https://soroban-rpc.mainnet.stellarchain.io",
+    // Note: SIM_ACCOUNT for mainnet must be set via env var to a funded account
+    simAccount: "",
+  },
+  futurenet: {
+    networkPassphrase: "Test SDF Future Network ; October 2022",
+    rpcUrl: "https://rpc-futurenet.stellar.org",
+    simAccount: "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF",
+  },
+};
+
+/**
+ * Default configuration values that apply across all networks.
+ */
+const BASE_DEFAULTS: Partial<ProtocolConfig> = {
   timeoutSeconds: 30,
   maxRetries: 3,
 };
@@ -27,13 +47,18 @@ const CONFIG_FILE_NAMES = [
  * Load the CLI configuration by merging values from (in order of precedence):
  *   1. Environment variables (highest priority)
  *   2. A JSON config file (searched in cwd then $HOME)
- *   3. Built-in defaults (testnet)
+ *   3. Network-specific defaults (testnet/mainnet/futurenet)
+ *   4. Base defaults
  *
  * Required fields throw if not set anywhere.
  */
-export function loadConfig(): ProtocolConfig {
-  // 1. Start with defaults
-  const config: Record<string, unknown> = { ...DEFAULTS };
+export function loadConfig(network?: NetworkType): ProtocolConfig {
+  // 1. Start with base defaults and network-specific defaults
+  const selectedNetwork = network || getNetworkFromEnv() || 'testnet';
+  const config: Record<string, unknown> = { 
+    ...BASE_DEFAULTS,
+    ...NETWORK_CONFIGS[selectedNetwork],
+  };
 
   // 2. Try loading from a config file
   const configPath = findConfigFile();
@@ -57,15 +82,56 @@ export function loadConfig(): ProtocolConfig {
   // 3. Environment variables (highest priority)
   mergeEnvOverrides(config);
 
-  // 4. Validate required fields
-  assertRequired(config);
-
+  // 4. We no longer validate globally here. Validation is done per-command using validateConfig().
   return config as unknown as ProtocolConfig;
+}
+
+/**
+ * Validates that the provided configuration has the required fields.
+ * If any required fields are missing, it logs an actionable error and exits.
+ * 
+ * @param config - The loaded configuration object
+ * @param requiredFields - Array of required config keys
+ * @param requiresSimAccount - True if the command is a read-only operation requiring a simulation account
+ */
+export function validateConfig(
+  config: Partial<ProtocolConfig>,
+  requiredFields: (keyof ProtocolConfig)[],
+  requiresSimAccount = false
+): void {
+  const missing = requiredFields.filter((k) => !config[k]);
+
+  if (missing.length > 0) {
+    const missingEnvVars = missing.map(k => {
+      switch (k) {
+        case 'identityOracleId': return 'IDENTITY_ORACLE_ID';
+        case 'creditOracleId': return 'CREDIT_ORACLE_ID';
+        case 'revocationRegistryId': return 'REVOCATION_REGISTRY_ID';
+        case 'governanceId': return 'GOVERNANCE_ID';
+        default: return String(k).toUpperCase();
+      }
+    });
+    console.error(`Error: Missing required config: ${missingEnvVars.join(', ')}. Set via environment variable or stellar-did-config.json.`);
+    process.exit(1);
+  }
+
+  if (requiresSimAccount && !config.simAccount) {
+    console.error("Error: Missing required config: SIM_ACCOUNT. Set via environment variable or stellar-did-config.json.");
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
+function getNetworkFromEnv(): NetworkType | null {
+  const networkEnv = process.env['NETWORK']?.toLowerCase();
+  if (networkEnv === 'testnet' || networkEnv === 'mainnet' || networkEnv === 'futurenet') {
+    return networkEnv;
+  }
+  return null;
+}
 
 function findConfigFile(): string | null {
   const cwd = process.cwd();
@@ -90,6 +156,7 @@ function mergeFromContractsBlock(
     "identity-oracle": "identityOracleId",
     "credit-oracle": "creditOracleId",
     "revocation-registry": "revocationRegistryId",
+    "governance": "governanceId",
   };
   for (const [contractName, configKey] of Object.entries(mapping)) {
     if (contracts[contractName] && !config[configKey]) {
@@ -106,6 +173,7 @@ function mergeConfigOverrides(
     "identityOracleId",
     "creditOracleId",
     "revocationRegistryId",
+    "governanceId",
     "networkPassphrase",
     "rpcUrl",
     "simAccount",
@@ -126,6 +194,7 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
     IDENTITY_ORACLE_ID: "identityOracleId",
     CREDIT_ORACLE_ID: "creditOracleId",
     REVOCATION_REGISTRY_ID: "revocationRegistryId",
+    GOVERNANCE_ID: "governanceId",
     NETWORK_PASSPHRASE: "networkPassphrase",
     RPC_URL: "rpcUrl",
     SIM_ACCOUNT: "simAccount",
@@ -161,24 +230,5 @@ function mergeEnvOverrides(config: Record<string, unknown>): void {
 
   if (process.env["BASE_FEE"]) {
     config["baseFee"] = process.env["BASE_FEE"];
-  }
-}
-
-function assertRequired(config: Record<string, unknown>): void {
-  const required: string[] = [
-    "identityOracleId",
-    "creditOracleId",
-    "revocationRegistryId",
-  ];
-  const missing = required.filter((k) => !config[k]);
-  if (missing.length > 0) {
-    console.error(
-      `Error: Missing required configuration for: ${missing.join(", ")}`,
-    );
-    console.error(
-      "Set them via environment variables (IDENTITY_ORACLE_ID, CREDIT_ORACLE_ID, " +
-        "REVOCATION_REGISTRY_ID) or a config file (stellar-did-config.json).",
-    );
-    process.exit(1);
   }
 }

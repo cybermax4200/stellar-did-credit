@@ -9,14 +9,27 @@
  * @packageDocumentation
  */
 
-import { Command } from "commander";
-import { Keypair } from "@stellar/stellar-sdk";
+import { Command, InvalidArgumentError } from "commander";
+import {
+  Account,
+  Address,
+  BASE_FEE,
+  Contract,
+  Keypair,
+  nativeToScVal,
+  scValToNative,
+  SorobanRpc,
+  TransactionBuilder,
+  xdr,
+} from "@stellar/stellar-sdk";
 import {
   StellarDIDCreditSDK,
+  scoringWeightsToScVal,
   type VCRecord,
   type ScoringWeights,
 } from "@stellar-did-credit/sdk";
-import { loadConfig } from "./config";
+import { loadConfig, validateConfig, type NetworkType } from "./config";
+import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -30,7 +43,12 @@ program
     "CLI for the Stellar DID Credit Protocol — anchor DIDs, check scores, " +
       "verify credentials, and compute credit scores on-chain.",
   )
-  .version("0.1.0");
+  .version("0.1.0")
+  .option(
+    "--network <network>",
+    "Stellar network to use (testnet, mainnet, futurenet)",
+    "testnet"
+  );
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -77,6 +95,25 @@ function parseVcHash(hex: string): Buffer {
   return Buffer.from(hex, "hex");
 }
 
+function parseBatchVcHash(hex: string): Buffer {
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex)) {
+    throw new Error("vc_hash_hex must be a 64-character hex string (32 bytes)");
+  }
+  return Buffer.from(hex, "hex");
+}
+
+function validateBatchSubject(subject: string): string {
+  const upper = subject.toUpperCase();
+  if (!/^[G][A-Z2-7]{55}$/.test(upper)) {
+    throw new Error("subject must be a valid Stellar G... address");
+  }
+  return upper;
+}
+
+function sleep(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 /**
  * Formats a BigInt value that represents stroops into a human-readable XLM
  * string (e.g., "100.0000000 XLM").
@@ -94,6 +131,84 @@ function formatStroops(stroops: bigint): string {
 function formatTimestamp(ts: number): string {
   if (ts === 0) return "N/A";
   return new Date(ts * 1000).toISOString();
+}
+
+/**
+ * Simulates a contract transaction for --dry-run mode without broadcasting.
+ */
+async function simulateDryRun(params: {
+  rpcUrl: string;
+  networkPassphrase: string;
+  sourceKeypair: Keypair;
+  contractId: string;
+  operation: xdr.Operation;
+  label: string;
+}): Promise<void> {
+  const { rpcUrl, networkPassphrase, sourceKeypair, contractId, operation, label } = params;
+  const server = new SorobanRpc.Server(rpcUrl);
+  const publicKey = sourceKeypair.publicKey();
+
+  console.log(`\nSimulating ${label} (--dry-run)...`);
+  console.log(`  Source:   ${publicKey}`);
+  console.log(`  Contract: ${contractId}`);
+
+  try {
+    let sourceAccount: Account;
+    try {
+      const accountData = await server.getAccount(publicKey);
+      sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+    } catch {
+      sourceAccount = new Account(publicKey, "0");
+    }
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase,
+    })
+      .addOperation(operation)
+      .setTimeout(30)
+      .build();
+
+    const sim = await server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      console.error(`\n❌ Simulation Failed:`);
+      console.error(`  Error: ${sim.error || "Simulation returned error"}`);
+      process.exit(1);
+      return;
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      console.error(`\n❌ Simulation Failed:`);
+      console.error(`  Error: Unexpected simulation response`);
+      process.exit(1);
+      return;
+    }
+
+    const gasCost = sim.minResourceFee ? `${sim.minResourceFee} stroops` : "0 stroops";
+    console.log(`\n✅ Simulation Successful (Transaction will succeed without broadcasting)`);
+    console.log(`  Simulated Gas Cost (minResourceFee): ${gasCost}`);
+    if (sim.cost) {
+      console.log(`  CPU Instructions: ${sim.cost.cpuInsns}`);
+      console.log(`  Memory: ${sim.cost.memBytes} bytes`);
+    }
+
+    if (sim.result?.retval) {
+      try {
+        const val = scValToNative(sim.result.retval);
+        console.log(`  Expected Result: ${typeof val === "object" ? JSON.stringify(val) : val}`);
+      } catch {
+        console.log(`  Expected Result: success`);
+      }
+    } else {
+      console.log(`  Expected Result: success (void)`);
+    }
+
+    process.exit(0);
+  } catch (err) {
+    console.error(`\n❌ Simulation Failed:`, err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }
 
 /**
@@ -194,14 +309,36 @@ program
   )
   .argument("<subject-secret>", "Stellar secret key of the DID subject (starts with S)")
   .argument("<did-doc-cid>", "IPFS CID of the DID document (e.g. Qm...)")
-  .action(async (subjectSecret: string, didDocCid: string) => {
-    const config = loadConfig();
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(async (subjectSecret: string, didDocCid: string, cmdOptions: { dryRun?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId']);
     const keypair = parseSecret(subjectSecret);
     const publicKey = keypair.publicKey();
 
+    if (cmdOptions.dryRun) {
+      const contract = new Contract(config.identityOracleId!);
+      const operation = contract.call(
+        "anchor_did",
+        new Address(publicKey).toScVal(),
+        nativeToScVal(didDocCid),
+      );
+      await simulateDryRun({
+        rpcUrl: config.rpcUrl,
+        networkPassphrase: config.networkPassphrase,
+        sourceKeypair: keypair,
+        contractId: config.identityOracleId!,
+        operation,
+        label: "anchor-did",
+      });
+      return;
+    }
+
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Anchoring DID for ${publicKey}...`);
+    console.log(`Anchoring DID for ${publicKey} on ${network}...`);
     console.log(`  DID Doc CID: ${didDocCid}`);
 
     try {
@@ -209,8 +346,9 @@ program
       console.log();
       console.log("Success!");
       console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
       console.log(
-        `  Explorer:    https://stellar.expert/explorer/testnet/tx/${txHash}`,
+        `  Explorer:    ${explorerBase}/tx/${txHash}`,
       );
     } catch (err) {
       console.error(
@@ -233,23 +371,32 @@ program
   .argument("<subject-address>", "Stellar G... address of the subject")
   .option("--json", "Output the full ScoreRecord as JSON")
   .action(async (subjectAddress: string, options: { json?: boolean }) => {
-    const config = loadConfig();
+    const globalOptions = program.opts();
+    const network = globalOptions.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credit score for ${upperAddr}...`);
+    if (!options.json) {
+      console.log(`Fetching credit score for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const score = await sdk.getScore(upperAddr);
 
-      if (!score) {
-        console.log();
-        console.log("No score computed yet for this address.");
-        console.log(
-          'Run "stellar-did compute-score" to compute one, or ask a feeder to sync data first.',
-        );
+      if (score === null) {
+        if (options.json) {
+          console.log(JSON.stringify({ score: null }));
+        } else {
+          console.log();
+          console.log(
+            "No credit score has been computed for this subject yet. Run `compute-score` first.",
+          );
+        }
+        process.exit(0);
         return;
       }
 
@@ -258,6 +405,8 @@ program
           if (typeof value === "bigint") return value.toString();
           return value;
         }, 2));
+        process.exit(0);
+        return;
       } else {
         printScoreRecord(score);
       }
@@ -285,14 +434,17 @@ program
     "SHA-256 hash of the verifiable credential (64 hex characters)",
   )
   .action(async (subjectAddress: string, vcHashHex: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Verifying VC for ${upperAddr}...`);
+    console.log(`Verifying VC for ${upperAddr} on ${network}...`);
     console.log(`  VC Hash: ${vcHashHex}`);
 
     try {
@@ -326,32 +478,50 @@ program
   .argument("<payer-secret>", "Stellar secret key of the fee payer (starts with S)")
   .argument("<subject-address>", "Stellar G... address of the subject")
   .option("--json", "Output the full ScoreRecord as JSON")
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
   .action(
     async (
       payerSecret: string,
       subjectAddress: string,
-      options: { json?: boolean },
+      cmdOptions: { json?: boolean; dryRun?: boolean },
     ) => {
-      const config = loadConfig();
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['creditOracleId']);
       const keypair = parseSecret(payerSecret);
       const upperAddr = subjectAddress.toUpperCase();
       assertStellarAddress("subject-address", upperAddr);
 
+      if (cmdOptions.dryRun) {
+        const contract = new Contract(config.creditOracleId!);
+        const operation = contract.call(
+          "compute_score",
+          new Address(upperAddr).toScVal(),
+        );
+        await simulateDryRun({
+          rpcUrl: config.rpcUrl,
+          networkPassphrase: config.networkPassphrase,
+          sourceKeypair: keypair,
+          contractId: config.creditOracleId!,
+          operation,
+          label: "compute-score",
+        });
+        return;
+      }
+
       const sdk = new StellarDIDCreditSDK(config);
 
-      console.log(`Computing credit score for ${upperAddr}...`);
+      console.log(`Computing credit score for ${upperAddr} on ${network}...`);
       console.log(`  Payer: ${keypair.publicKey()}`);
 
       try {
         const score = await sdk.computeScore(keypair, upperAddr);
 
-        if (options.json) {
-          console.log(JSON.stringify(score, (key, value) => {
-            if (typeof value === "bigint") return value.toString();
-            return value;
-          }, 2));
+        if (cmdOptions.json) {
+          console.log(JSON.stringify({ score }, null, 2));
         } else {
-          printScoreRecord(score);
+          console.log(`\n✅ Computed Score: ${score}`);
         }
       } catch (err) {
         console.error(
@@ -373,23 +543,34 @@ program
     "Check whether a subject has at least one active, non-revoked verifiable credential.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Checking verification status for ${upperAddr}...`);
+    if (!cmdOptions.json) {
+      console.log(`Checking verification status for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const verified = await sdk.isVerified(upperAddr);
 
-      console.log();
-      if (verified) {
-        console.log("✅ Subject is VERIFIED.");
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ isVerified: verified }));
+        process.exit(0);
       } else {
-        console.log("❌ Subject is NOT verified — no active credentials found.");
+        console.log();
+        if (verified) {
+          console.log("✅ Subject is VERIFIED.");
+        } else {
+          console.log("❌ Subject is NOT verified — no active credentials found.");
+        }
       }
     } catch (err) {
       console.error(
@@ -410,20 +591,31 @@ program
     "Returns the number of active (non-revoked) verifiable credentials for a subject.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching active VC count for ${upperAddr}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching active VC count for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const count = await sdk.getVCCount(upperAddr);
 
-      console.log();
-      console.log(`Active VC count: ${count}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ vcCount: count }));
+        process.exit(0);
+      } else {
+        console.log();
+        console.log(`Active VC count: ${count}`);
+      }
     } catch (err) {
       console.error(
         "Failed:",
@@ -444,13 +636,16 @@ program
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
   .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching verifiable credentials for ${upperAddr}...`);
+    console.log(`Fetching verifiable credentials for ${upperAddr} on ${network}...`);
 
     try {
       const records = await sdk.getVCs(upperAddr);
@@ -479,14 +674,17 @@ program
     "SHA-256 hash of the verifiable credential (64 hex characters)",
   )
   .action(async (subjectAddress: string, vcHashHex: string) => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
     const vcHash = parseVcHash(vcHashHex);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching credential type for ${upperAddr}...`);
+    console.log(`Fetching credential type for ${upperAddr} on ${network}...`);
     console.log(`  VC Hash: ${vcHashHex}`);
 
     try {
@@ -513,23 +711,33 @@ program
     "Fetch the IPFS CID of the DID document anchored for a subject address.",
   )
   .argument("<subject-address>", "Stellar G... address of the subject")
-  .action(async (subjectAddress: string) => {
-    const config = loadConfig();
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
     const upperAddr = subjectAddress.toUpperCase();
     assertStellarAddress("subject-address", upperAddr);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log(`Fetching DID document for ${upperAddr}...`);
+    if (!cmdOptions.json) {
+      console.log(`Fetching DID document for ${upperAddr} on ${network}...`);
+    }
 
     try {
       const cid = await sdk.getDIDDocument(upperAddr);
 
-      console.log();
-      if (cid) {
-        console.log(`DID Document CID: ${cid}`);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify({ didDocument: cid || null }));
+        process.exit(0);
       } else {
-        console.log("No DID document anchored for this address.");
+        console.log();
+        if (cid) {
+          console.log(`DID Document CID: ${cid}`);
+        } else {
+          console.log("No DID document anchored for this address.");
+        }
       }
     } catch (err) {
       console.error(
@@ -548,14 +756,17 @@ program
   .command("issuers")
   .description("List all currently registered trusted credential issuers.")
   .action(async () => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log("Fetching registered issuers...");
+    console.log(`Fetching registered issuers on ${network}...`);
 
     try {
-      const issuers = await sdk.getRegisteredIssuers();
+      const issuers = await sdk.listIssuers();
 
       console.log();
       if (issuers.length === 0) {
@@ -584,11 +795,14 @@ program
     "Fetch the current scoring weights configured on the credit-oracle contract.",
   )
   .action(async () => {
-    const config = loadConfig();
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
 
     const sdk = new StellarDIDCreditSDK(config);
 
-    console.log("Fetching scoring weights...");
+    console.log(`Fetching scoring weights on ${network}...`);
 
     try {
       const weights = await sdk.getWeights();
@@ -603,6 +817,596 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Command: anchor-vc
+// ---------------------------------------------------------------------------
+
+/**
+ * Anchor a verifiable credential hash on-chain.
+ */
+program
+  .command("anchor-vc")
+  .description("Anchor a verifiable credential hash on-chain as a registered issuer.")
+  .argument("<issuer-secret>", "Stellar secret key of the registered issuer (starts with S)")
+  .argument("<subject-address>", "Stellar G... address of the credential subject")
+  .argument("<vc-hash>", "SHA-256 hash of the verifiable credential (64 hex characters)")
+  .option("--type <type>", "Optional credential type label (e.g. kyc, employment)")
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .addHelpText(
+    "after",
+    `
+Example:
+  $ stellar-did anchor-vc S... G... 5c4146... --type kyc
+`
+  )
+  .action(async (issuerSecret: string, subjectAddress: string, vcHashHex: string, cmdOptions: { type?: string; dryRun?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId']);
+    
+    const keypair = parseSecret(issuerSecret);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+    const vcHash = parseVcHash(vcHashHex);
+
+    if (cmdOptions.dryRun) {
+      const contract = new Contract(config.identityOracleId!);
+      const hashScVal = nativeToScVal(new Uint8Array(vcHash), { type: "bytes" });
+      const operation = cmdOptions.type
+        ? contract.call(
+            "anchor_vc_typed",
+            new Address(keypair.publicKey()).toScVal(),
+            new Address(upperAddr).toScVal(),
+            hashScVal,
+            nativeToScVal(cmdOptions.type),
+          )
+        : contract.call(
+            "anchor_vc",
+            new Address(keypair.publicKey()).toScVal(),
+            new Address(upperAddr).toScVal(),
+            hashScVal,
+          );
+      await simulateDryRun({
+        rpcUrl: config.rpcUrl,
+        networkPassphrase: config.networkPassphrase,
+        sourceKeypair: keypair,
+        contractId: config.identityOracleId!,
+        operation,
+        label: "anchor-vc",
+      });
+      return;
+    }
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    console.log(`Anchoring VC for ${upperAddr} on ${network}...`);
+    console.log(`  Issuer:  ${keypair.publicKey()}`);
+    console.log(`  VC Hash: ${vcHashHex}`);
+    if (cmdOptions.type) {
+      console.log(`  Type:    ${cmdOptions.type}`);
+    }
+
+    try {
+      const txHash = await sdk.issueVC(keypair, upperAddr, vcHash, cmdOptions.type);
+
+      console.log();
+      console.log("Success!");
+      console.log(`  Transaction: ${txHash}`);
+      const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+      console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
+    } catch (err) {
+      let msg = err instanceof Error ? err.message : String(err);
+      if (msg.includes("IssuerNotRegistered")) {
+         msg = "IssuerNotRegistered. Hint: Ensure this issuer is registered with the admin.";
+      } else if (msg.includes("DuplicateVC")) {
+         msg = "DuplicateVC. This VC hash has already been anchored.";
+      }
+      console.error("Failed:", msg);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: batch-anchor-vc
+// ---------------------------------------------------------------------------
+
+program
+  .command("batch-anchor-vc")
+  .description("Anchor verifiable credentials from a CSV file, one at a time.")
+  .argument("<csv-file>", "CSV containing subject,vc_hash_hex,credential_type")
+  .requiredOption(
+    "--issuer-secret <secret>",
+    "Stellar secret key of the registered issuer (starts with S)",
+    process.env["ISSUER_SECRET"],
+  )
+  .option("--delay-ms <milliseconds>", "Delay between transactions", "200")
+  .option("--result-file <path>", "Output JSON result path", "batch-result.json")
+  .action(async (
+    csvFile: string,
+    cmdOptions: { issuerSecret: string; delayMs: string; resultFile: string },
+  ) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["identityOracleId"]);
+    const issuer = parseSecret(cmdOptions.issuerSecret);
+    const delayMs = Number(cmdOptions.delayMs);
+    if (!Number.isInteger(delayMs) || delayMs < 0) {
+      console.error("Error: delay-ms must be a non-negative integer.");
+      process.exit(1);
+    }
+
+    let entries;
+    try {
+      entries = readBatchCsv(csvFile);
+    } catch (err) {
+      console.error("Failed to read CSV:", err instanceof Error ? err.message : String(err));
+      process.exit(1);
+      return;
+    }
+
+    const sdk = new StellarDIDCreditSDK(config);
+    const results: BatchResult[] = [];
+    console.log(`Processing ${entries.length} VC${entries.length === 1 ? "" : "s"} on ${network}...`);
+
+    for (const [index, entry] of entries.entries()) {
+      const progress = `${index + 1}/${entries.length}`;
+      const resultBase = { subject: entry.subject, vc_hash: entry.vcHashHex };
+      try {
+        const upperSubject = validateBatchSubject(entry.subject);
+        const vcHash = parseBatchVcHash(entry.vcHashHex);
+
+        if (await sdk.verifyVC(upperSubject, vcHash)) {
+          results.push({ ...resultBase, status: "skipped" });
+          console.log(`[${progress}] skipped ${upperSubject} (already anchored)`);
+        } else {
+          const txHash = await sdk.issueVC(issuer, upperSubject, vcHash);
+          results.push({ ...resultBase, status: "success", txHash });
+          console.log(`[${progress}] success ${upperSubject} (${entry.credentialType})`);
+        }
+      } catch (err) {
+        const error = err instanceof Error ? err.message : String(err);
+        results.push({ ...resultBase, status: "failed", error });
+        console.error(`[${progress}] failed ${entry.subject}: ${error}`);
+      }
+
+      writeBatchResults(cmdOptions.resultFile, results);
+      if (index < entries.length - 1 && delayMs > 0) {
+        await sleep(delayMs);
+      }
+    }
+
+    const summary = results.reduce(
+      (counts, result) => ({ ...counts, [result.status]: counts[result.status] + 1 }),
+      { success: 0, failed: 0, skipped: 0 },
+    );
+    console.log(`Completed: ${summary.success} succeeded, ${summary.skipped} skipped, ${summary.failed} failed.`);
+    console.log(`Results written to ${cmdOptions.resultFile}`);
+  });
+
+program
+  .command("prove-score")
+  .description("Generate and submit a zero-knowledge proof for a credit score threshold")
+  .requiredOption("-s, --subject <address>", "Subject public key")
+  .requiredOption("-t, --threshold <number>", "Threshold score to prove", parseFloat)
+  .requiredOption("-v, --verifier <contractId>", "Contract ID of the score-range-verifier")
+  .option("-b, --blinding <number>", "Blinding factor (default: random)", parseFloat)
+  .action(async (cmdOptions) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['identityOracleId', 'creditOracleId', 'rpcUrl', 'networkPassphrase'], false);
+    
+    const sdk = new StellarDIDCreditSDK(config);
+    const secretKey = process.env.STELLAR_SECRET || config.simAccount;
+    const kp = parseSecret(secretKey);
+    const subject = cmdOptions.subject.toUpperCase();
+    assertStellarAddress("subject", subject);
+
+    const blinding = cmdOptions.blinding !== undefined ? cmdOptions.blinding : Math.floor(Math.random() * 1000000);
+
+    console.log(`Generating score proof for ${subject} with threshold ${cmdOptions.threshold}...`);
+    let proof: Uint8Array;
+    try {
+      proof = await sdk.generateScoreProof(subject, cmdOptions.threshold, blinding);
+      console.log(`Proof generated successfully. (${proof.length} bytes)`);
+    } catch (err: unknown) {
+      console.error(`Error generating proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+
+    console.log(`Submitting proof to verifier contract ${cmdOptions.verifier}...`);
+    try {
+      const result = await sdk.verifyScoreProof(
+        kp,
+        subject,
+        cmdOptions.threshold,
+        proof,
+        cmdOptions.verifier
+      );
+      if (result) {
+        console.log(`Proof successfully verified by the contract!`);
+      } else {
+        console.log(`Proof verification failed!`);
+        process.exit(1);
+      }
+    } catch (err: unknown) {
+      console.error(`Error verifying proof: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command group: governance
+// ---------------------------------------------------------------------------
+
+const governance = program
+  .command("governance")
+  .description("Protocol governance commands.");
+
+governance
+  .command("list")
+  .description("List governance proposals.")
+  .option("--from <id>", "Starting proposal ID (default: 1)", (val) => BigInt(val))
+  .option("--limit <n>", "Maximum number of proposals to fetch", parseInt)
+  .action(
+    async (cmdOptions: { from?: bigint; limit?: number }) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['governanceId']);
+
+      const sdk = new StellarDIDCreditSDK(config);
+      console.log(`Fetching governance proposals on ${network}...`);
+
+      try {
+        const proposals = await sdk.governance.listProposals(
+          cmdOptions.from,
+          cmdOptions.limit,
+        );
+
+        console.log();
+        if (proposals.length === 0) {
+          console.log("No proposals found.");
+          return;
+        }
+
+        for (const p of proposals) {
+          const status = p.executed
+            ? "EXECUTED"
+            : p.cancelled
+            ? "CANCELLED"
+            : "ACTIVE";
+          console.log(`Proposal #${p.id.toString()} [${status}]`);
+          console.log(`  Proposer:        ${p.proposer}`);
+          console.log(
+            `  Weights:         VC: ${p.proposedWeights.vcWeight}%, TX: ${p.proposedWeights.txWeight}%, Repayment: ${p.proposedWeights.repaymentWeight}%`,
+          );
+          console.log(
+            `  Votes:           For: ${p.votesFor.toString()} | Against: ${p.votesAgainst.toString()} | Quorum: ${p.quorumRequired.toString()}`,
+          );
+          console.log(
+            `  Expiry Ledger:   ${p.expiryLedger} (Delay: ${p.executionDelayLedgers} ledgers)`,
+          );
+          console.log();
+        }
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+governance
+  .command("create-proposal")
+  .description("Create a scoring-weight proposal.")
+  .argument("<proposer-secret>", "Stellar secret key of the proposer (starts with S)")
+  .argument("<vc-weight>", "VC score weight (0-100)", parseInt)
+  .argument("<tx-weight>", "Transaction history score weight (0-100)", parseInt)
+  .argument("<repay-weight>", "Repayment score weight (0-100)", parseInt)
+  .option("--voting-period <ledgers>", "Voting period in ledgers", parseInt, 17280)
+  .option("--delay <ledgers>", "Execution delay in ledgers", parseInt, 0)
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      proposerSecret: string,
+      vcWeight: number,
+      txWeight: number,
+      repayWeight: number,
+      cmdOptions: { votingPeriod: number; delay: number; dryRun?: boolean },
+    ) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['governanceId']);
+      const keypair = parseSecret(proposerSecret);
+
+      const weights: ScoringWeights = {
+        vcWeight,
+        txWeight,
+        repaymentWeight: repayWeight,
+      };
+
+      if (cmdOptions.dryRun) {
+        const contract = new Contract(config.governanceId!);
+        const operation = contract.call(
+          "create_proposal",
+          new Address(keypair.publicKey()).toScVal(),
+          scoringWeightsToScVal(weights),
+          nativeToScVal(cmdOptions.votingPeriod, { type: "u32" }),
+          nativeToScVal(cmdOptions.delay, { type: "u32" }),
+        );
+        await simulateDryRun({
+          rpcUrl: config.rpcUrl,
+          networkPassphrase: config.networkPassphrase,
+          sourceKeypair: keypair,
+          contractId: config.governanceId!,
+          operation,
+          label: "governance create-proposal",
+        });
+        return;
+      }
+
+      const sdk = new StellarDIDCreditSDK(config);
+      console.log(`Creating governance proposal on ${network}...`);
+      console.log(`  Proposer: ${keypair.publicKey()}`);
+
+      try {
+        const proposalId = await sdk.governance.createProposal(
+          keypair,
+          weights,
+          cmdOptions.votingPeriod,
+          cmdOptions.delay,
+        );
+        console.log();
+        console.log("Success!");
+        console.log(`  Proposal ID: ${proposalId.toString()}`);
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+governance
+  .command("execute")
+  .description("Execute an approved governance proposal.")
+  .argument("<payer-secret>", "Stellar secret key of the fee payer (starts with S)")
+  .argument("<proposal-id>", "ID of the proposal to execute")
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      payerSecret: string,
+      proposalId: string,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['governanceId']);
+      const keypair = parseSecret(payerSecret);
+
+      if (cmdOptions.dryRun) {
+        const contract = new Contract(config.governanceId!);
+        const operation = contract.call(
+          "execute",
+          nativeToScVal(BigInt(proposalId), { type: "u64" }),
+        );
+        await simulateDryRun({
+          rpcUrl: config.rpcUrl,
+          networkPassphrase: config.networkPassphrase,
+          sourceKeypair: keypair,
+          contractId: config.governanceId!,
+          operation,
+          label: "governance execute",
+        });
+        return;
+      }
+
+      const sdk = new StellarDIDCreditSDK(config);
+      console.log(`Executing governance proposal ${proposalId} on ${network}...`);
+
+      try {
+        const txHash = await sdk.governance.execute(keypair, BigInt(proposalId));
+        console.log();
+        console.log("Success!");
+        console.log(`  Transaction: ${txHash}`);
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+governance
+  .command("apply-weights")
+  .description("Apply queued scoring weights after the credit-oracle timelock expires.")
+  .argument("<payer-secret>", "Stellar secret key of the fee payer (starts with S)")
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      payerSecret: string,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ['governanceId']);
+      const keypair = parseSecret(payerSecret);
+
+      if (cmdOptions.dryRun) {
+        const contract = new Contract(config.governanceId!);
+        const operation = contract.call("apply_weights");
+        await simulateDryRun({
+          rpcUrl: config.rpcUrl,
+          networkPassphrase: config.networkPassphrase,
+          sourceKeypair: keypair,
+          contractId: config.governanceId!,
+          operation,
+          label: "governance apply-weights",
+        });
+        return;
+      }
+
+      const sdk = new StellarDIDCreditSDK(config);
+      console.log(`Applying governance weights on ${network}...`);
+
+      try {
+        const txHash = await sdk.governance.applyWeights(keypair);
+        console.log();
+        console.log("Success!");
+        console.log(`  Transaction: ${txHash}`);
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+/**
+ * Parses a voter weight into a bigint. Weights must be non-negative integers;
+ * when `allowZero` is false, zero is rejected too.
+ */
+function parseVoterWeight(value: string, allowZero: boolean): bigint {
+  if (!/^\d+$/.test(value)) {
+    throw new InvalidArgumentError("weight must be a non-negative integer.");
+  }
+  const weight = BigInt(value);
+  if (!allowZero && weight === 0n) {
+    throw new InvalidArgumentError(
+      "weight must be greater than 0 (use update-voter-weight with 0 to deregister).",
+    );
+  }
+  return weight;
+}
+
+function parseRegisterWeight(value: string): bigint {
+  return parseVoterWeight(value, false);
+}
+
+function parseUpdateWeight(value: string): bigint {
+  return parseVoterWeight(value, true);
+}
+
+/**
+ * Shared implementation for the voter-admin governance commands.
+ */
+async function runVoterAdminCommand(params: {
+  method: "registerVoter" | "updateVoterWeight";
+  contractFn: "register_voter" | "update_voter_weight";
+  label: string;
+  progress: string;
+  adminSecret: string;
+  voter: string;
+  weight: bigint;
+  dryRun?: boolean;
+}): Promise<void> {
+  const { method, contractFn, label, progress, adminSecret, voter, weight } = params;
+  const network = program.opts().network as NetworkType;
+  const config = loadConfig(network);
+  validateConfig(config, ['governanceId']);
+  const keypair = parseSecret(adminSecret);
+  assertStellarAddress("voter", voter);
+
+  if (params.dryRun) {
+    const contract = new Contract(config.governanceId!);
+    const operation = contract.call(
+      contractFn,
+      new Address(keypair.publicKey()).toScVal(),
+      new Address(voter).toScVal(),
+      nativeToScVal(weight, { type: "i128" }),
+    );
+    await simulateDryRun({
+      rpcUrl: config.rpcUrl,
+      networkPassphrase: config.networkPassphrase,
+      sourceKeypair: keypair,
+      contractId: config.governanceId!,
+      operation,
+      label,
+    });
+    return;
+  }
+
+  const sdk = new StellarDIDCreditSDK(config);
+  console.log(`${progress} on ${network}...`);
+  console.log(`  Admin:  ${keypair.publicKey()}`);
+  console.log(`  Voter:  ${voter}`);
+  console.log(`  Weight: ${weight.toString()}`);
+
+  try {
+    const txHash = await sdk.governance[method](keypair, voter, weight);
+    const explorerBase = network === 'mainnet' ? 'https://stellar.expert/explorer/public' : 'https://stellar.expert/explorer/testnet';
+    console.log();
+    console.log("Success!");
+    console.log(`  Transaction: ${txHash}`);
+    console.log(`  Explorer:    ${explorerBase}/tx/${txHash}`);
+  } catch (err) {
+    console.error("Failed:", err instanceof Error ? err.message : err);
+    process.exit(1);
+  }
+}
+
+governance
+  .command("register-voter")
+  .description(
+    "Register a new governance voter with a voting weight (admin only). " +
+      "Voters must be registered before proposals can reach quorum.",
+  )
+  .argument("<admin-secret>", "Stellar secret key of the governance admin (starts with S)")
+  .argument("<voter-address>", "Stellar address of the voter (G...)")
+  .argument("<weight>", "Voting weight to assign (positive integer)", parseRegisterWeight)
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      adminSecret: string,
+      voter: string,
+      weight: bigint,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      await runVoterAdminCommand({
+        method: "registerVoter",
+        contractFn: "register_voter",
+        label: "governance register-voter",
+        progress: "Registering governance voter",
+        adminSecret,
+        voter,
+        weight,
+        dryRun: cmdOptions.dryRun,
+      });
+    },
+  );
+
+governance
+  .command("update-voter-weight")
+  .description(
+    "Update the voting weight of a registered voter (admin only). " +
+      "Set weight to 0 to deregister the voter.",
+  )
+  .argument("<admin-secret>", "Stellar secret key of the governance admin (starts with S)")
+  .argument("<voter-address>", "Stellar address of the voter (G...)")
+  .argument("<weight>", "New voting weight (non-negative integer; 0 deregisters)", parseUpdateWeight)
+  .option("--dry-run", "Simulate transaction execution without broadcasting")
+  .action(
+    async (
+      adminSecret: string,
+      voter: string,
+      weight: bigint,
+      cmdOptions: { dryRun?: boolean },
+    ) => {
+      await runVoterAdminCommand({
+        method: "updateVoterWeight",
+        contractFn: "update_voter_weight",
+        label: "governance update-voter-weight",
+        progress: "Updating governance voter weight",
+        adminSecret,
+        voter,
+        weight,
+        dryRun: cmdOptions.dryRun,
+      });
+    },
+  );
+
+// ---------------------------------------------------------------------------
 // Parse
 // ---------------------------------------------------------------------------
 
@@ -610,3 +1414,6 @@ program
 if (require.main === module) {
   program.parse();
 }
+
+export { program };
+
