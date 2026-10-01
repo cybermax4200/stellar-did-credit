@@ -9,7 +9,7 @@ description = "Groth16 circuit for score > threshold using arkworks-rs (BLS12-38
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-ark-ff = "0.4"
+ark-ff = "0.6"
 ark-ec = "0.4"
 ark-bls12-381 = "0.4"
 ark-r1cs-std = { version = "0.4", features = ["parallel"] }
