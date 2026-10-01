@@ -267,6 +267,7 @@ const GOVERNANCE_ERROR_CODES: Record<number, string> = {
   17: "VoteTallyOverflow",
   18: "ProposalRejected",
   19: "InvalidVotingPeriod",
+  20: "NoPendingAdmin",
 };
 
 const ERROR_CODE_MAPS: Record<string, Record<number, string>> = {
@@ -790,6 +791,134 @@ export class GovernanceClient {
         "applyWeights",
       )
     ).hash;
+  }
+
+  /**
+   * Propose a new contract admin (step 1 of two-step admin transfer).
+   *
+   * Stores `newAdmin` under `PendingAdmin` in the governance contract's
+   * instance storage. The transfer only completes once `newAdmin` calls
+   * `acceptAdmin`.
+   *
+   * @param adminKeypair - Stellar keypair of the governance admin
+   * @param newAdmin - Stellar G... address of the proposed new admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async proposeNewAdmin(
+    adminKeypair: KeypairLike,
+    newAdmin: string,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = this.governanceContract();
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "propose_new_admin",
+          new Address(newAdmin).toScVal(),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "proposeNewAdmin",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
+  }
+
+  /**
+   * Accept a pending admin proposal (step 2 of two-step admin transfer).
+   *
+   * Reads `PendingAdmin` from instance storage and verifies that
+   * `newAdmin` matches, then promotes `newAdmin` to `Admin` and
+   * clears the pending entry.
+   *
+   * @param adminKeypair - Stellar keypair of the proposed new admin
+   * @returns Transaction hash after successful ledger confirmation
+   */
+  async acceptAdmin(
+    adminKeypair: KeypairLike,
+  ): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
+    const contract = this.governanceContract();
+    const accountData = await this.server.getAccount(publicKey);
+    const sourceAccount = new Account(publicKey, accountData.sequenceNumber());
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee ?? BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "accept_admin",
+          new Address(adminKeypair.publicKey).toScVal(),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "governance");
+    }
+
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const preparedTx = SorobanRpc.assembleTransaction(tx, sim).build();
+    preparedTx.sign(adminKeypair as Keypair);
+
+    const txHash = await sendTransactionWithRetry(
+      this.server,
+      preparedTx,
+      this.config.maxRetries,
+      (response) =>
+        new Error(`Transaction submission failed: ${response.errorResult}`),
+    );
+
+    await waitForTransactionConfirmation(
+      this.server,
+      txHash,
+      "acceptAdmin",
+      getConfirmationTimeoutMs(this.config),
+      getTransactionPollIntervalMs(this.config),
+    );
+
+    return txHash;
   }
 
   /**
