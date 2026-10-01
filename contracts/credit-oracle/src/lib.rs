@@ -161,13 +161,26 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
     ((points as u64).saturating_mul(recency_bps as u64) / BPS_DENOMINATOR as u64) as u32
 }
 
-/// Pure scoring function that computes a credit score from input parameters.
+/// Scoring components returned by [`compute_score_components`].
+///
+/// All component fields are in the 0–100 range (before final clamping to
+/// [`MIN_SCORE`]–[`MAX_SCORE`]).  The `score` field is the final clamped value.
+pub struct ScoreComponents {
+    pub vc_score: u32,
+    pub tx_score: u32,
+    pub repay_score: u32,
+    pub composite: u32,
+    pub score: u32,
+}
+
+/// Pure scoring function that computes all intermediate components from
+/// input parameters.
 ///
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
-/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+/// The final score is always clamped to [`MIN_SCORE`]–[`MAX_SCORE`].
 #[allow(clippy::too_many_arguments)]
-pub fn compute_score_pure(
+pub fn compute_score_components(
     vc_points: u32,
     volume_30d: i128,
     avg_counterparties: u32,
@@ -177,7 +190,7 @@ pub fn compute_score_pure(
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
-) -> u32 {
+) -> ScoreComponents {
     let vc_score = (vc_points).min(100) as u128;
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
     let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
@@ -193,8 +206,46 @@ pub fn compute_score_pure(
         + tx_score * tx_weight as u128
         + repay_score * repayment_weight as u128)
         / 100;
-    let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let raw = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
+    let score = raw.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
+    ScoreComponents {
+        vc_score: vc_score as u32,
+        tx_score: tx_score as u32,
+        repay_score: repay_score as u32,
+        composite: composite as u32,
+        score,
+    }
+}
+
+/// Pure scoring function that computes a credit score from input parameters.
+///
+/// This is a thin wrapper around [`compute_score_components`] kept for
+/// backwards compatibility with fuzz targets and external callers.
+/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_score_pure(
+    vc_points: u32,
+    volume_30d: i128,
+    avg_counterparties: u32,
+    on_time_count: u32,
+    total_count: u32,
+    total_repaid: i128,
+    vc_weight: u32,
+    tx_weight: u32,
+    repayment_weight: u32,
+) -> u32 {
+    compute_score_components(
+        vc_points,
+        volume_30d,
+        avg_counterparties,
+        on_time_count,
+        total_count,
+        total_repaid,
+        vc_weight,
+        tx_weight,
+        repayment_weight,
+    )
+    .score
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -246,6 +297,31 @@ pub struct ScoreRecord {
     /// comparing `computed_at_ledger` against the current ledger
     /// sequence. Always `false` for a freshly computed score.
     pub stale: bool,
+}
+
+/// Detailed breakdown of scoring components emitted as an optional verbose event.
+///
+/// Only emitted when `verbose_events` is `true` (set via `set_verbose_events`).
+/// Consumers can use these fields to reconstruct how the final score was derived
+/// without having to re-run the scoring formula with the weights active at
+/// compute time.
+#[contracttype]
+#[derive(Clone)]
+pub struct ScoreDetail {
+    /// Subject whose score was computed.
+    pub subject: Address,
+    /// VC component score (0–100), before weighting.
+    pub vc_score: u32,
+    /// Transaction component score (0–100), before weighting.
+    pub tx_score: u32,
+    /// Repayment component score (0–100), before weighting.
+    pub repay_score: u32,
+    /// Weighted composite score (0–100) used to derive the final score.
+    pub composite: u32,
+    /// Final clamped credit score ([MIN_SCORE, MAX_SCORE]).
+    pub score: u32,
+    /// Scoring weights that were active at compute time.
+    pub weights: ScoringWeights,
 }
 
 /// Transaction statistics for a user
@@ -1189,7 +1265,7 @@ impl CreditOracle {
             .get(&DataKey::Config)
             .ok_or(CreditOracleError::NotInitialized)?;
 
-        let score = compute_score_pure(
+        let components = compute_score_components(
             vc_points,
             tx_stats.volume_30d,
             tx_stats.avg_counterparties,
@@ -1200,6 +1276,7 @@ impl CreditOracle {
             weights.tx_weight,
             weights.repayment_weight,
         );
+        let score = components.score;
 
         // Compute the repayment rate in basis points. The counters are u32, so
         // the product must be widened to u64: `on_time_count * 10000` overflows
@@ -1258,6 +1335,27 @@ impl CreditOracle {
 
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
+
+        // Emit ScoreDetail when verbose events are enabled.
+        let verbose: bool = env
+            .storage()
+            .instance()
+            .get(&DataKey::VerboseEvents)
+            .unwrap_or(false);
+        if verbose {
+            env.events().publish(
+                (symbol_short!("ScoreDtl"),),
+                ScoreDetail {
+                    subject: subject.clone(),
+                    vc_score: components.vc_score,
+                    tx_score: components.tx_score,
+                    repay_score: components.repay_score,
+                    composite: components.composite,
+                    score,
+                    weights,
+                },
+            );
+        }
 
         Ok(score)
     }
@@ -1460,6 +1558,46 @@ impl CreditOracle {
     /// Returns `None` if cross-contract VC count lookup is not configured.
     pub fn get_identity_oracle(env: Env) -> Option<Address> {
         env.storage().instance().get(&DataKey::IdentityOracleId)
+    }
+
+    /// Enable or disable verbose `ScoreDetail` events on `compute_score`.
+    ///
+    /// When `enabled` is `true`, every successful call to `compute_score`
+    /// emits an additional `ScoreDetail` event containing the intermediate
+    /// component scores (`vc_score`, `tx_score`, `repay_score`, `composite`)
+    /// and the active [`ScoringWeights`] at compute time.
+    ///
+    /// Default: `false` (no `ScoreDetail` events emitted).
+    ///
+    /// Auth: admin only.
+    pub fn set_verbose_events(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::VerboseEvents, &enabled);
+        env.events()
+            .publish((symbol_short!("VbsEvt"),), enabled);
+        Ok(())
+    }
+
+    /// Returns whether verbose `ScoreDetail` events are currently enabled.
+    pub fn get_verbose_events(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&DataKey::VerboseEvents)
+            .unwrap_or(false)
     }
 
     /// Get pending weights (if any)
