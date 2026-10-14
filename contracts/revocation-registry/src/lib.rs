@@ -772,6 +772,21 @@ mod tests {
     }
 
     #[test]
+    fn test_upgrade_fails_for_non_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        let res = client.try_upgrade(&BytesN::from_array(&env, &[0u8; 32]));
+        assert!(res.is_err());
+    }
+
+    #[test]
     fn test_get_revocation_count_and_list_revoked_single_and_batch() {
         let env = Env::default();
         env.mock_all_auths();
