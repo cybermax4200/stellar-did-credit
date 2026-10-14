@@ -239,4 +239,24 @@ describe("CLI --dry-run option", () => {
     expect(errOutput).toContain("Simulation Failed");
     expect(errOutput).toContain("Error(Contract, #1)");
   });
+
+  it("reports an active cooldown for compute-score --dry-run", async () => {
+    mockSimulateTransaction.mockResolvedValue({
+      error: "HostError: Error(Contract, #7)",
+    });
+
+    await program.parseAsync([
+      "node",
+      "stellar-did",
+      "compute-score",
+      "--dry-run",
+      secret,
+      subject,
+    ]);
+
+    expect(mockProcessExit).toHaveBeenCalledWith(1);
+    const errOutput = mockConsoleError.mock.calls.map((c) => c.join(" ")).join("\n");
+    expect(errOutput).toContain("Cooldown Active");
+    expect(errOutput).toContain("Error(Contract, #7)");
+  });
 });

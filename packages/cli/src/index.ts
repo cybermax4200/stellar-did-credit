@@ -114,6 +114,14 @@ function sleep(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function isComputeCooldownError(error: unknown): boolean {
+  if (typeof error !== "string") {
+    return false;
+  }
+
+  return /cooldown|error\(contract,\s*#7\)/i.test(error);
+}
+
 /**
  * Formats a BigInt value that represents stroops into a human-readable XLM
  * string (e.g., "100.0000000 XLM").
@@ -172,7 +180,9 @@ async function simulateDryRun(params: {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
-      console.error(`\n❌ Simulation Failed:`);
+      const isCooldownError =
+        label === "compute-score" && isComputeCooldownError(sim.error);
+      console.error(`\n❌ ${isCooldownError ? "Cooldown Active" : "Simulation Failed"}:`);
       console.error(`  Error: ${sim.error || "Simulation returned error"}`);
       process.exit(1);
       return;
@@ -1416,4 +1426,3 @@ if (require.main === module) {
 }
 
 export { program };
-
