@@ -161,6 +161,47 @@ const config: FeederConfig = {
 // Tests
 // ---------------------------------------------------------------------------
 
+describe("Feeder configuration validation", () => {
+  it("rejects maxConsecutiveFailures less than 1", () => {
+    expect(() => {
+      new Feeder(
+        { ...config, maxConsecutiveFailures: 0 },
+        {} as Keypair,
+      );
+    }).toThrow("maxConsecutiveFailures must be at least 1, received 0");
+
+    expect(() => {
+      new Feeder(
+        { ...config, maxConsecutiveFailures: -5 },
+        {} as Keypair,
+      );
+    }).toThrow("maxConsecutiveFailures must be at least 1, received -5");
+  });
+
+  it("accepts maxConsecutiveFailures >= 1 or undefined", () => {
+    expect(() => {
+      new Feeder(
+        { ...config, maxConsecutiveFailures: 1 },
+        {} as Keypair,
+      );
+    }).not.toThrow();
+
+    expect(() => {
+      new Feeder(
+        { ...config, maxConsecutiveFailures: 10 },
+        {} as Keypair,
+      );
+    }).not.toThrow();
+
+    expect(() => {
+      new Feeder(
+        { ...config, maxConsecutiveFailures: undefined },
+        {} as Keypair,
+      );
+    }).not.toThrow();
+  });
+});
+
 describe("Feeder graceful shutdown", () => {
   it("stop() mid-cycle lets the in-progress subject finish but starts no new subject or cycle", async () => {
     const feeder = new Feeder(config, {} as Keypair);

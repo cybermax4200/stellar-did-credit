@@ -872,6 +872,14 @@ export class Feeder {
     private config: FeederConfig,
     private feederKeypair: Keypair,
   ) {
+    if (
+      config.maxConsecutiveFailures !== undefined &&
+      config.maxConsecutiveFailures < 1
+    ) {
+      throw new Error(
+        `maxConsecutiveFailures must be at least 1, received ${config.maxConsecutiveFailures}`,
+      );
+    }
     this.server = new SorobanRpc.Server(config.rpcUrl);
   }
 
