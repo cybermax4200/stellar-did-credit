@@ -1433,6 +1433,52 @@ describe("StellarDIDCreditSDK", () => {
       });
     });
 
+    it("safely ignores a duplicate issuer and VC hash pair", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const vcHash = Buffer.alloc(32, 9);
+      mockSendTransaction
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "first-vc-hash",
+        })
+        .mockResolvedValueOnce({
+          status: "PENDING",
+          hash: "duplicate-vc-hash",
+        });
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
+      ).resolves.toBe("first-vc-hash");
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
+      ).resolves.toBe("duplicate-vc-hash");
+
+      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
+      expect(mockGetTransaction).toHaveBeenCalledWith("first-vc-hash");
+      expect(mockGetTransaction).toHaveBeenCalledWith("duplicate-vc-hash");
+      expect(mockContractCalls).toHaveLength(2);
+      expect(mockContractCalls[0]).toMatchObject({
+        method: "anchor_vc",
+      });
+      expect(mockContractCalls[1]).toMatchObject({
+        method: "anchor_vc",
+      });
+      expect(mockContractCalls[0]?.args[0]).toEqual(
+        mockContractCalls[1]?.args[0],
+      );
+      expect(mockContractCalls[0]?.args[1]).toEqual(
+        mockContractCalls[1]?.args[1],
+      );
+      expect(mockContractCalls[0]?.args[2]).toMatchObject({
+        type: "bytes",
+        value: new Uint8Array(vcHash),
+      });
+      expect(mockContractCalls[1]?.args[2]).toMatchObject({
+        type: "bytes",
+        value: new Uint8Array(vcHash),
+      });
+    });
+
     it("retries TRY_AGAIN_LATER responses before confirming the transaction", async () => {
       jest.useFakeTimers();
       mockSendTransaction
