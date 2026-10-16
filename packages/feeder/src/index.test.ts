@@ -8,6 +8,7 @@ import {
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
+import { HealthTracker } from "./health";
 
 // ---------------------------------------------------------------------------
 // Shared mock instances so individual tests can reconfigure behaviour.
@@ -805,9 +806,11 @@ describe("Dead-letter queue", () => {
   });
 
   it("subject appears in dead-letter after MAX_CONSECUTIVE_FAILURES consecutive failures", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -824,6 +827,10 @@ describe("Dead-letter queue", () => {
     const deadLetters = feeder.getDeadLetterSubjects();
     expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567231");
     expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567232");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 2,
+      deadLetterSubjects: config.subjects,
+    });
 
     // Should have logged ERROR with [dead-letter] prefix
     const deadLetterErrors = consoleErrorSpy.mock.calls.filter(
@@ -833,9 +840,11 @@ describe("Dead-letter queue", () => {
   });
 
   it("subject is cleared from dead-letter after a successful feed", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -855,6 +864,10 @@ describe("Dead-letter queue", () => {
 
     // Dead-letter should be cleared
     expect(feeder.getDeadLetterSubjects()).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
 
     // Should have logged recovery message
     const recoveryLogs = consoleLogSpy.mock.calls.filter(
@@ -864,9 +877,11 @@ describe("Dead-letter queue", () => {
   });
 
   it("logs sub-threshold failures at warn level with failure count", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -882,6 +897,10 @@ describe("Dead-letter queue", () => {
     // Subject should NOT be in dead-letter yet
     const deadLetters = feeder.getDeadLetterSubjects();
     expect(deadLetters).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
 
     // Should have logged warn with failure count
     const warnLogs = consoleWarnSpy.mock.calls.filter(
