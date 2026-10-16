@@ -93,9 +93,10 @@ describe("HealthTracker", () => {
 describe("createHealthServer", () => {
   let server: http.Server;
   let port: number;
+  let tracker: HealthTracker;
 
   beforeEach((done) => {
-    const tracker = new HealthTracker();
+    tracker = new HealthTracker();
     server = createHealthServer(0, tracker);
     server.on("listening", () => {
       const address = server.address();
@@ -118,6 +119,48 @@ describe("createHealthServer", () => {
       lastCycleAt: null,
       successCount: 0,
       failureCount: 0,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
+  });
+
+  it("GET /health includes current dead-letter subjects after failures", async () => {
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    tracker.recordCycleResult(1, 2);
+
+    const res = await httpGet(port, "/health");
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      status: "ok",
+      lastCycleAt: expect.any(String),
+      successCount: 1,
+      failureCount: 2,
+      deadLetterCount: 2,
+      deadLetterSubjects: ["subject-a", "subject-b"],
+    });
+  });
+
+  it("GET /health reflects recovery while preserving cumulative failures", async () => {
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    tracker.recordCycleResult(0, 2);
+    tracker.setDeadLetterSubjects(["subject-b"]);
+    tracker.recordCycleResult(1, 1);
+
+    const partialRecovery = await httpGet(port, "/health");
+    expect(partialRecovery.statusCode).toBe(200);
+    expect(JSON.parse(partialRecovery.body)).toMatchObject({
+      failureCount: 3,
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects([]);
+    tracker.recordCycleResult(2, 0);
+
+    const fullRecovery = await httpGet(port, "/health");
+    expect(fullRecovery.statusCode).toBe(200);
+    expect(JSON.parse(fullRecovery.body)).toMatchObject({
+      failureCount: 3,
       deadLetterCount: 0,
       deadLetterSubjects: [],
     });
