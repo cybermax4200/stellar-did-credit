@@ -6,6 +6,9 @@ export interface HealthSnapshot {
   lastCycleAt: string | null;
   successCount: number;
   failureCount: number;
+  /** Number of subjects in dead-letter at the end of the latest cycle. */
+  deadLetterCount: number;
+  deadLetterSubjects: string[];
 }
 
 /**
@@ -16,10 +19,16 @@ export class HealthTracker {
   private lastCycleAt: string | null = null;
   private successCount = 0;
   private failureCount = 0;
+  private deadLetterSubjects: string[] = [];
   /** null = no cycle has completed yet */
   private lastCycleSucceeded: boolean | null = null;
   /** True once a successful cycle (zero failures) has completed at least once */
   private cycleCompleted = false;
+
+  /** Replace the current dead-letter subjects with a defensive copy. */
+  setDeadLetterSubjects(subjects: readonly string[]): void {
+    this.deadLetterSubjects = [...subjects];
+  }
 
   /** Record the outcome of a completed feed cycle. */
   recordCycleResult(succeeded: number, failed: number): void {
@@ -38,6 +47,8 @@ export class HealthTracker {
       lastCycleAt: this.lastCycleAt,
       successCount: this.successCount,
       failureCount: this.failureCount,
+      deadLetterCount: this.deadLetterSubjects.length,
+      deadLetterSubjects: [...this.deadLetterSubjects],
     };
   }
 

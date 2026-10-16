@@ -30,6 +30,8 @@ describe("HealthTracker", () => {
       lastCycleAt: null,
       successCount: 0,
       failureCount: 0,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
     });
     expect(tracker.isReady()).toBe(false);
   });
@@ -81,6 +83,8 @@ describe("createHealthServer", () => {
       lastCycleAt: null,
       successCount: 0,
       failureCount: 0,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
     });
   });
 
