@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Feeder: `/health` now includes `deadLetterCount` and `deadLetterSubjects`, refreshed after each polling cycle to reflect failures and recovery (#953).
 - TypeScript SDK: pause, unpause, and upgrade helpers for contracts (#701)
 - TypeScript SDK (`@stellar-did-credit/sdk`): added polling subscriptions for `VCAnch`, `Score`, and `Revoked` events with typed callbacks and unsubscribe support (#502)
 - TypeScript SDK (`@stellar-did-credit/sdk`): `revokeVC(issuerKeypair, vcHash)` now submits issuer-signed revocations through the revocation registry, validates 32-byte hashes and registry configuration with typed `SDKError` codes, and polls pending transactions with configurable confirmation timeouts. The issuer example can demonstrate the flow with `--revoke` (#499)
