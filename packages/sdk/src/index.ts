@@ -2191,10 +2191,13 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * Fetch a subject's RepaymentRecord from the credit-oracle.
+   * Fetch a subject's repayment record from the credit-oracle.
    *
-   * @param subjectAddress - Stellar G... address of the subject
-   * @returns RepaymentRecord or null if not found
+   * Legacy V1 records contain only the on-time and total counts, so their
+   * cumulative repaid amount is returned as `0n`.
+   *
+   * @param subjectAddress - Stellar address of the subject
+   * @returns The repayment record, or `null` if no record exists
    */
   async getRepaymentRecord(subjectAddress: string): Promise<RepaymentRecord | null> {
     const server = this.server;
@@ -2233,7 +2236,10 @@ export class StellarDIDCreditSDK {
     return {
       onTimeCount: Number(raw["on_time_count"]),
       totalCount: Number(raw["total_count"]),
-      totalRepaid: BigInt(raw["total_repaid"] as bigint),
+      totalRepaid:
+        raw["total_repaid"] === undefined || raw["total_repaid"] === null
+          ? 0n
+          : BigInt(raw["total_repaid"] as bigint),
     };
   }
 

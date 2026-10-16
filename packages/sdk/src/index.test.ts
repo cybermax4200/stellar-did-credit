@@ -2701,6 +2701,26 @@ describe("StellarDIDCreditSDK", () => {
       });
     });
 
+    it("defaults the cumulative amount to zero for a legacy V1 record", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              on_time_count: 8,
+              total_count: 10,
+            },
+          },
+        },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRepaymentRecord(subjectAddress)).resolves.toEqual({
+        onTimeCount: 8,
+        totalCount: 10,
+        totalRepaid: 0n,
+      });
+    });
+
     it("returns null if not found", async () => {
       mockSimulateTransaction.mockResolvedValueOnce({
         result: { retval: { value: null } },
