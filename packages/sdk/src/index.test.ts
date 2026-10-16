@@ -3500,6 +3500,59 @@ describe("batchRevokeVC", () => {
     });
   });
 
+  describe("credential type weight", () => {
+    const adminKeypair = { publicKey: () => "GADMIN" };
+
+    it("returns the default weight for an unregistered credential type", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: 100 } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(sdk.getCredentialTypeWeight("unregistered-type")).resolves.toBe(100);
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_credential_type_weight",
+        args: [{ value: "unregistered-type" }],
+      });
+    });
+
+    it("sets a credential type weight using the admin signer", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: null } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.setCredentialTypeWeight(adminKeypair as never, "employment", 125),
+      ).resolves.toBe("mock-tx-hash");
+      expect(mockGetAccount).toHaveBeenCalledWith("GADMIN");
+      expect(mockContractCalls[0]).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "set_credential_type_weight",
+      });
+      expect(mockContractCalls[0]?.args[0]).toMatchObject({ address: "GADMIN" });
+      expect(mockContractCalls[0]?.args[1]).toMatchObject({ value: "employment" });
+      expect(mockContractCalls[0]?.args[2]).toMatchObject({ value: 125, type: "u32" });
+      expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+    });
+
+    it("rejects a setter call that is not authorized by the contract admin", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        error: "Error(Contract, #1)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.setCredentialTypeWeight(adminKeypair as never, "employment", 125),
+      ).rejects.toMatchObject({
+        name: "CreditOracleError",
+        contractName: "credit-oracle",
+      });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+  });
+
   describe("compute cooldown", () => {
     const adminKeypair = { publicKey: () => "GADMIN" };
 

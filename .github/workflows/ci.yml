@@ -214,6 +214,7 @@ jobs:
 
       - name: Check Node.js dependencies for vulnerabilities
         run: pnpm audit --audit-level=high --prod
+        run: node scripts/check-dependency-audit.cjs
 
   smoke-test:
     name: Testnet smoke test

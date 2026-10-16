@@ -4,6 +4,15 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+overrides:
+  js-yaml@>=3.0.0 <3.15.2: 3.15.2
+  js-yaml@>=4.0.0 <4.3.2: 4.3.2
+  toml@<4.2.0: 4.2.0
+  axios: '>=1.20.0'
+  brace-expansion@1: 1.1.20
+  brace-expansion@2: 2.1.6
+  handlebars: '>=4.7.10'
+
 importers:
 
   .:
@@ -789,6 +798,11 @@ packages:
 
   brace-expansion@2.1.7:
     resolution: {integrity: sha512-uZbew1NqdmPDTMJ8ah1y+b+9QEJrfkXFk3RcTQw3X0jW/xRUvFKsg1CfQdSYGdTbXZWExtU3J3ccxtnfw1Fi0g==}
+  brace-expansion@1.1.20:
+    resolution: {integrity: sha512-5/qk29RyvatwgzNMrvGjkIhKYzpJ0OUnPK+9TU+zS/CMJqzmb+UD0irWu42JfpUvO636fxd8IstgiydZRM/76A==}
+
+  brace-expansion@2.1.6:
+    resolution: {integrity: sha512-pi/WFpBvCBmB/NsURt7hW5sDvuOqvJaDMDai7CrlT9xoehzWRzo/dhQRKqOhpPvlnicVaTzHCbzGnnTgpvMTFw==}
 
   braces@3.0.3:
     resolution: {integrity: sha512-yQbXgO/OSZVD2IsiLlro+7Hf6Q18EJrKSEsdoMzKePKXct3gvD8oLcOQdIzGupr5Fj+EDe8gO/lxc1BzfMpxvA==}
@@ -3011,11 +3025,13 @@ snapshots:
   bignumber.js@9.3.1: {}
 
   brace-expansion@1.1.21:
+  brace-expansion@1.1.20:
     dependencies:
       balanced-match: 1.0.2
       concat-map: 0.0.1
 
   brace-expansion@2.1.7:
+  brace-expansion@2.1.6:
     dependencies:
       balanced-match: 1.0.2
 
@@ -4103,6 +4119,11 @@ snapshots:
   minimatch@9.0.9:
     dependencies:
       brace-expansion: 2.1.7
+      brace-expansion: 1.1.20
+
+  minimatch@9.0.9:
+    dependencies:
+      brace-expansion: 2.1.6
 
   minimist@1.2.8: {}
 
