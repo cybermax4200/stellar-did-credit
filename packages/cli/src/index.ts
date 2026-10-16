@@ -27,6 +27,7 @@ import {
   scoringWeightsToScVal,
   type VCRecord,
   type ScoringWeights,
+  type RepaymentRecord,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -295,6 +296,35 @@ function printVCRecords(records: VCRecord[]): void {
     );
     console.log("└─────────────────────────────────────┘");
   }
+  console.log();
+}
+
+/**
+ * Print a RepaymentRecord as a human-readable table to stdout.
+ * Repayment rate is expressed in basis points (bps): (on_time_count / total_count) * 10_000.
+ */
+function printRepaymentRecord(record: RepaymentRecord): void {
+  const repaymentRate =
+    record.totalCount > 0
+      ? Math.round((record.onTimeCount / record.totalCount) * 10_000)
+      : 0;
+  console.log();
+  console.log("┌─────────────────────────────────────┐");
+  console.log("│  Repayment History                  │");
+  console.log("├─────────────────────────────────────┤");
+  console.log(
+    `│  On-Time Count:       ${String(record.onTimeCount).padStart(13)} │`,
+  );
+  console.log(
+    `│  Total Count:         ${String(record.totalCount).padStart(13)} │`,
+  );
+  console.log(
+    `│  Total Repaid:        ${formatStroops(record.totalRepaid).padStart(14)} │`,
+  );
+  console.log(
+    `│  Repayment Rate:      ${String(repaymentRate).padStart(10)} bps │`,
+  );
+  console.log("└─────────────────────────────────────┘");
   console.log();
 }
 
@@ -902,6 +932,79 @@ Example:
          msg = "DuplicateVC. This VC hash has already been anchored.";
       }
       console.error("Failed:", msg);
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: repayment
+// ---------------------------------------------------------------------------
+
+program
+  .command("repayment")
+  .description(
+    "Fetch the on-chain repayment history for a subject address from the credit-oracle.",
+  )
+  .argument("<subject-address>", "Stellar G... address of the subject")
+  .option("--json", "Output the full RepaymentRecord as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const globalOptions = program.opts();
+    const network = globalOptions.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    if (!cmdOptions.json) {
+      console.log(`Fetching repayment history for ${upperAddr} on ${network}...`);
+    }
+
+    try {
+      const record = await sdk.getRepaymentRecord(upperAddr);
+
+      if (record === null) {
+        if (cmdOptions.json) {
+          console.log(JSON.stringify({ repayment: null }));
+        } else {
+          console.log();
+          console.log(
+            "No repayment history found for this subject.",
+          );
+        }
+        process.exit(0);
+        return;
+      }
+
+      const repaymentRate =
+        record.totalCount > 0
+          ? Math.round((record.onTimeCount / record.totalCount) * 10_000)
+          : 0;
+
+      if (cmdOptions.json) {
+        console.log(
+          JSON.stringify(
+            {
+              onTimeCount: record.onTimeCount,
+              totalCount: record.totalCount,
+              totalRepaid: record.totalRepaid.toString(),
+              repaymentRateBps: repaymentRate,
+            },
+            null,
+            2,
+          ),
+        );
+        process.exit(0);
+        return;
+      } else {
+        printRepaymentRecord(record);
+      }
+    } catch (err) {
+      console.error(
+        "Failed:",
+        err instanceof Error ? err.message : err,
+      );
       process.exit(1);
     }
   });
