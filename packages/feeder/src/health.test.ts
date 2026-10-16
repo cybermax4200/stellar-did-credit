@@ -36,6 +36,41 @@ describe("HealthTracker", () => {
     expect(tracker.isReady()).toBe(false);
   });
 
+  it("replaces dead-letter state instead of accumulating subjects", () => {
+    const tracker = new HealthTracker();
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 2,
+      deadLetterSubjects: ["subject-a", "subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects(["subject-b"]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects([]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
+  });
+
+  it("isolates dead-letter state from mutations of inputs and snapshots", () => {
+    const tracker = new HealthTracker();
+    const subjects = ["subject-a"];
+    tracker.setDeadLetterSubjects(subjects);
+
+    subjects.push("subject-b");
+    tracker.getSnapshot().deadLetterSubjects.push("subject-c");
+
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-a"],
+    });
+  });
+
   it("records cycle results and updates readiness", () => {
     const tracker = new HealthTracker();
     tracker.recordCycleResult(2, 0);
