@@ -832,7 +832,9 @@ describe("Dead-letter queue", () => {
         new Promise((resolve, reject) => {
           http.get(healthUrl, (res) => {
             let body = "";
-            res.on("data", (chunk) => { body += chunk; });
+            res.on("data", (chunk) => {
+              body += chunk;
+            });
             res.on("error", reject);
             res.on("end", () => {
               try {
@@ -886,7 +888,10 @@ describe("Dead-letter queue", () => {
       });
     } finally {
       await new Promise<void>((resolve, reject) => {
-        server.close((err) => err ? reject(err) : resolve());
+        server.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
       });
     }
   });

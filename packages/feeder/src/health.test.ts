@@ -172,6 +172,26 @@ describe("createHealthServer", () => {
     expect(JSON.parse(res.body)).toEqual({ status: "not ready" });
   });
 
+  it("dead-letter metrics preserve readiness before and after a successful cycle", async () => {
+    tracker.setDeadLetterSubjects(["subject-a"]);
+    tracker.recordCycleResult(0, 1);
+    expect((await httpGet(port, "/ready")).statusCode).toBe(503);
+
+    tracker.setDeadLetterSubjects([]);
+    tracker.recordCycleResult(1, 0);
+    tracker.setDeadLetterSubjects(["subject-a"]);
+    tracker.recordCycleResult(0, 1);
+
+    const ready = await httpGet(port, "/ready");
+    expect(ready.statusCode).toBe(200);
+    expect(JSON.parse(ready.body)).toEqual({ status: "ready" });
+    expect(JSON.parse((await httpGet(port, "/health")).body)).toMatchObject({
+      status: "ok",
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-a"],
+    });
+  });
+
   it("GET /ready returns 200 after a successful cycle", async () => {
     const tracker = new HealthTracker();
     tracker.recordCycleResult(1, 0);
