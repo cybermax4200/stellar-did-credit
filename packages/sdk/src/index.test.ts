@@ -2498,7 +2498,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("list_issuers");
     });
 
-    it("returns empty array when no issuers registered", async () => {
+    it("returns empty list on fresh contract", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: [] },
@@ -2509,6 +2509,25 @@ describe("StellarDIDCreditSDK", () => {
       const result = await sdk.listIssuers();
 
       expect(result).toEqual([]);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
+    });
+
+    it("excludes deregistered issuers from returned list", async () => {
+      const activeIssuers = ["GISSUER2", "GISSUER3"];
+      const deregisteredIssuer = "GISSUER1";
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: activeIssuers },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.listIssuers();
+
+      expect(result).toEqual(activeIssuers);
+      expect(result).not.toContain(deregisteredIssuer);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
     });
 
     it("throws on simulation error", async () => {
@@ -2522,6 +2541,28 @@ describe("StellarDIDCreditSDK", () => {
         contractName: "identity-oracle",
         message: "rpc error",
       });
+    });
+
+    it("throws when simulation is unsuccessful", async () => {
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.listIssuers()).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+    });
+
+    it("throws when simulation result has no return value", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {},
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.listIssuers()).rejects.toThrow(
+        "No return value in simulation result",
+      );
     });
   });
 
@@ -2541,7 +2582,7 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockLastContractCall?.method).toBe("list_issuers");
     });
 
-    it("returns empty array when no issuers registered", async () => {
+    it("returns empty list on fresh contract", async () => {
       mockSimulateTransaction.mockResolvedValue({
         result: {
           retval: { value: [] },
@@ -2552,6 +2593,25 @@ describe("StellarDIDCreditSDK", () => {
       const result = await sdk.getRegisteredIssuers();
 
       expect(result).toEqual([]);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
+    });
+
+    it("excludes deregistered issuers from returned list", async () => {
+      const activeIssuers = ["GISSUER2", "GISSUER3"];
+      const deregisteredIssuer = "GISSUER1";
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: { value: activeIssuers },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.getRegisteredIssuers();
+
+      expect(result).toEqual(activeIssuers);
+      expect(result).not.toContain(deregisteredIssuer);
+      expect(mockLastContractCall?.method).toBe("list_issuers");
     });
 
     it("throws on simulation error", async () => {
@@ -2565,6 +2625,28 @@ describe("StellarDIDCreditSDK", () => {
         contractName: "identity-oracle",
         message: "rpc error",
       });
+    });
+
+    it("throws when simulation is unsuccessful", async () => {
+      mockSimulateTransaction.mockResolvedValue({});
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "Simulation returned unexpected response",
+      );
+    });
+
+    it("throws when simulation result has no return value", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {},
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      await expect(sdk.getRegisteredIssuers()).rejects.toThrow(
+        "No return value in simulation result",
+      );
     });
   });
 
