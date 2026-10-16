@@ -8,7 +8,9 @@ import {
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
-import { HealthTracker } from "./health";
+import * as http from "http";
+import { HealthTracker, createHealthServer } from "./health";
+import type { HealthSnapshot } from "./health";
 
 // ---------------------------------------------------------------------------
 // Shared mock instances so individual tests can reconfigure behaviour.
@@ -803,6 +805,90 @@ describe("Dead-letter queue", () => {
     consoleLogSpy.mockRestore();
     consoleErrorSpy.mockRestore();
     consoleWarnSpy.mockRestore();
+  });
+
+  it("publishes cycle failures and partial recovery through GET /health", async () => {
+    const healthTracker = new HealthTracker();
+    const feeder = new Feeder(
+      { ...config, maxConsecutiveFailures: 2, healthTracker },
+      { publicKey: () => "GFEEDER" } as Keypair,
+    );
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+    const server = createHealthServer(0, healthTracker);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected health server to listen on a TCP port");
+      }
+      const healthUrl = `http://127.0.0.1:${address.port}/health`;
+      const readHealth = (): Promise<HealthSnapshot> =>
+        new Promise((resolve, reject) => {
+          http.get(healthUrl, (res) => {
+            let body = "";
+            res.on("data", (chunk) => { body += chunk; });
+            res.on("error", reject);
+            res.on("end", () => {
+              try {
+                expect(res.statusCode).toBe(200);
+                expect(res.headers["content-type"]).toBe("application/json");
+                resolve(JSON.parse(body) as HealthSnapshot);
+              } catch (err) {
+                reject(err);
+              }
+            });
+          }).on("error", reject);
+        });
+
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 0,
+        deadLetterSubjects: [],
+      });
+
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 2,
+        deadLetterSubjects: config.subjects,
+      });
+
+      // Further failures must not count a subject more than once.
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 2,
+        deadLetterSubjects: config.subjects,
+      });
+
+      feedSubjectSpy.mockImplementation(async (subject) => {
+        if (subject === config.subjects[1]) {
+          throw new Error("still failing");
+        }
+      });
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        failureCount: 7,
+        deadLetterCount: 1,
+        deadLetterSubjects: [config.subjects[1]],
+      });
+
+      feedSubjectSpy.mockResolvedValue(undefined);
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        failureCount: 7,
+        deadLetterCount: 0,
+        deadLetterSubjects: [],
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => err ? reject(err) : resolve());
+      });
+    }
   });
 
   it("subject appears in dead-letter after MAX_CONSECUTIVE_FAILURES consecutive failures", async () => {
