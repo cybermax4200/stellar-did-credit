@@ -1110,6 +1110,14 @@ impl IdentityOracle {
             .unwrap_or(DEFAULT_ISSUER_TIER_BPS)
     }
 
+    /// Returns all anchored VC records for `subject`, including revoked entries.
+    pub fn get_vc_details(env: Env, subject: Address) -> Vec<VCRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VCAnchors(subject))
+            .unwrap_or(Vec::new(&env))
+    }
+
     /// Backwards-compatible wrapper.
     ///
     /// **Deprecated:** This function includes revoked entries in its count.
