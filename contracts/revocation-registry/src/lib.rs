@@ -883,6 +883,33 @@ mod tests {
     }
 
     #[test]
+    fn test_list_revoked_pagination_edge_cases() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+
+        assert_eq!(client.list_revoked(&issuer, &0, &10), Vec::new(&env));
+
+        let hash1 = BytesN::from_array(&env, &[10u8; 32]);
+        let hash2 = BytesN::from_array(&env, &[20u8; 32]);
+        let hash3 = BytesN::from_array(&env, &[30u8; 32]);
+        let subject = Address::generate(&env);
+        client.revoke(&issuer, &subject, &hash1);
+        client.revoke(&issuer, &subject, &hash2);
+        client.revoke(&issuer, &subject, &hash3);
+
+        assert_eq!(client.list_revoked(&issuer, &3, &10), Vec::new(&env));
+        assert_eq!(client.list_revoked(&issuer, &4, &10), Vec::new(&env));
+        assert_eq!(client.list_revoked(&issuer, &0, &0), Vec::new(&env));
+
+        let final_page = client.list_revoked(&issuer, &2, &10);
+        assert_eq!(final_page.len(), 1);
+        assert_eq!(final_page.get(0).unwrap(), hash3);
+    }
+
+    #[test]
     fn test_list_revoked_for_issuer() {
         let env = Env::default();
         env.mock_all_auths();
