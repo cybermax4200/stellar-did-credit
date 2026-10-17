@@ -213,7 +213,6 @@ jobs:
         uses: pnpm/action-setup@v4
 
       - name: Check Node.js dependencies for vulnerabilities
-        run: pnpm audit --audit-level=high --prod
         run: node scripts/check-dependency-audit.cjs
 
   smoke-test:

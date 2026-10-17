@@ -28,7 +28,6 @@ import {
   type DisputeRecord,
   type VCRecord,
   type ScoringWeights,
-  type RepaymentRecord,
   type TxStats,
   type RecencyDecayConfig,
   type CredentialTypeWeight,
@@ -1728,79 +1727,6 @@ Example:
          msg = "DuplicateVC. This VC hash has already been anchored.";
       }
       console.error("Failed:", msg);
-      process.exit(1);
-    }
-  });
-
-// ---------------------------------------------------------------------------
-// Command: repayment
-// ---------------------------------------------------------------------------
-
-program
-  .command("repayment")
-  .description(
-    "Fetch the on-chain repayment history for a subject address from the credit-oracle.",
-  )
-  .argument("<subject-address>", "Stellar G... address of the subject")
-  .option("--json", "Output the full RepaymentRecord as JSON")
-  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
-    const globalOptions = program.opts();
-    const network = globalOptions.network as NetworkType;
-    const config = loadConfig(network);
-    validateConfig(config, ['creditOracleId'], true);
-    const upperAddr = subjectAddress.toUpperCase();
-    assertStellarAddress("subject-address", upperAddr);
-
-    const sdk = new StellarDIDCreditSDK(config);
-
-    if (!cmdOptions.json) {
-      console.log(`Fetching repayment history for ${upperAddr} on ${network}...`);
-    }
-
-    try {
-      const record = await sdk.getRepaymentRecord(upperAddr);
-
-      if (record === null) {
-        if (cmdOptions.json) {
-          console.log(JSON.stringify({ repayment: null }));
-        } else {
-          console.log();
-          console.log(
-            "No repayment history found for this subject.",
-          );
-        }
-        process.exit(0);
-        return;
-      }
-
-      const repaymentRate =
-        record.totalCount > 0
-          ? Math.round((record.onTimeCount / record.totalCount) * 10_000)
-          : 0;
-
-      if (cmdOptions.json) {
-        console.log(
-          JSON.stringify(
-            {
-              onTimeCount: record.onTimeCount,
-              totalCount: record.totalCount,
-              totalRepaid: record.totalRepaid.toString(),
-              repaymentRateBps: repaymentRate,
-            },
-            null,
-            2,
-          ),
-        );
-        process.exit(0);
-        return;
-      } else {
-        printRepaymentRecord(record);
-      }
-    } catch (err) {
-      console.error(
-        "Failed:",
-        err instanceof Error ? err.message : err,
-      );
       process.exit(1);
     }
   });
