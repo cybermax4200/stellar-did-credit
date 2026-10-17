@@ -70,6 +70,14 @@ export interface VCRecord {
   revoked: boolean;
 }
 
+export interface DisputeRecord {
+  subject: string;
+  inputKey: string;
+  reason: string;
+  filedAtLedger: number;
+  status: DisputeStatus;
+}
+
 export interface GovernanceProposal {
   id: bigint;
   proposer: string;
@@ -1490,6 +1498,84 @@ export class StellarDIDCreditSDK {
     throw new Error("Simulation returned unexpected response");
   }
 
+  /** Fetch a subject's dispute record for one score input, or null if absent. */
+  async getDispute(
+    subjectAddress: string,
+    inputKey: string,
+  ): Promise<DisputeRecord | null> {
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "get_dispute",
+          new Address(subjectAddress).toScVal(),
+          nativeToScVal(inputKey, { type: "symbol" }),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const retval = sim.result?.retval;
+    if (!retval) {
+      throw new Error("No return value in simulation result");
+    }
+    const native = scValToNative(retval);
+    return native === null || native === undefined
+      ? null
+      : parseDisputeRecord(native);
+  }
+
+  /** List the latest dispute record for each disputed score input of a subject. */
+  async listDisputes(subjectAddress: string): Promise<DisputeRecord[]> {
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: this.config.baseFee || BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(
+        contract.call(
+          "list_disputes",
+          new Address(subjectAddress).toScVal(),
+        ),
+      )
+      .setTimeout(this.config.timeoutSeconds ?? 30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throwContractError(sim.error, "credit-oracle");
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Simulation returned unexpected response");
+    }
+
+    const retval = sim.result?.retval;
+    if (!retval) {
+      throw new Error("No return value in simulation result");
+    }
+    const native = scValToNative(retval);
+    if (native === null || native === undefined) {
+      return [];
+    }
+    if (!Array.isArray(native)) {
+      throw new Error("list_disputes returned an invalid result");
+    }
+    return native.map(parseDisputeRecord);
+  }
+
   /**
    * Fetch the DID document CID anchored for a subject address from the identity-oracle.
    *
@@ -1869,13 +1955,13 @@ export class StellarDIDCreditSDK {
 
     const sourceAccount = new Account(this.config.simAccount, "0");
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee: this.config.baseFee || BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
         contract.call("is_verified", new Address(subjectAddress).toScVal()),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     const sim = await server.simulateTransaction(tx);
@@ -1970,7 +2056,7 @@ export class StellarDIDCreditSDK {
     const sourceAccount = new Account(this.config.simAccount, "0");
 
     const tx = new TransactionBuilder(sourceAccount, {
-      fee: BASE_FEE,
+      fee: this.config.baseFee || BASE_FEE,
       networkPassphrase: this.config.networkPassphrase,
     })
       .addOperation(
@@ -1979,7 +2065,7 @@ export class StellarDIDCreditSDK {
           new Address(subjectAddress).toScVal(),
         ),
       )
-      .setTimeout(30)
+      .setTimeout(this.config.timeoutSeconds ?? 30)
       .build();
 
     const sim = await server.simulateTransaction(tx);
@@ -1997,7 +2083,12 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    return scValToNative(resultScVal) as number;
+    const count = scValToNative(resultScVal);
+    if (typeof count !== "number" || !Number.isInteger(count) || count < 0) {
+      throw new Error("get_active_vc_count returned an invalid count");
+    }
+
+    return count;
   }
 
   /**
@@ -2160,10 +2251,11 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * Fetch a subject's TxStats from the credit-oracle.
+   * Fetch a subject's 30-day transaction statistics from the credit-oracle.
    *
-   * @param subjectAddress - Stellar G... address of the subject
-   * @returns TxStats or null if not found
+   * @param subjectAddress - Stellar public-key address of the subject
+   * @returns Transaction volume (in stroops), transaction count, and average
+   * counterparties, or null if no statistics are recorded for the subject
    */
   async getTxStats(subjectAddress: string): Promise<TxStats | null> {
     const server = this.server;
@@ -3932,6 +4024,20 @@ function parseVCRecordList(scVal: xdr.ScVal): VCRecord[] {
       revoked: Boolean(raw["revoked"]),
     };
   });
+}
+
+function parseDisputeRecord(native: unknown): DisputeRecord {
+  if (typeof native !== "object" || native === null) {
+    throw new Error("Dispute query returned an invalid record");
+  }
+  const raw = native as Record<string, unknown>;
+  return {
+    subject: String(raw["subject"]),
+    inputKey: String(raw["input_key"]),
+    reason: String(raw["reason"]),
+    filedAtLedger: Number(raw["filed_at_ledger"]),
+    status: String(raw["status"]) as DisputeStatus,
+  };
 }
 
 /**

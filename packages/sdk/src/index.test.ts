@@ -630,22 +630,43 @@ describe("StellarDIDCreditSDK", () => {
       const { SorobanRpc } = jest.requireMock("@stellar/stellar-sdk");
       const serverMock = SorobanRpc.Server as jest.Mock;
 
-      mockSimulateTransaction.mockResolvedValue({
-        result: {
-          retval: {
-            value: {
-              score: 612,
-              last_updated: 1_700_000_000,
-              vc_count: 3,
-              repayment_rate: 8000,
-              tx_volume_30d: 1_000_000n,
-              previous_score: null,
-              computed_at_ledger: 1234567,
-              stale: false,
+      mockSimulateTransaction
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                score: 612,
+                last_updated: 1_700_000_000,
+                vc_count: 3,
+                repayment_rate: 8000,
+                tx_volume_30d: 1_000_000n,
+                previous_score: null,
+                computed_at_ledger: 1234567,
+                stale: false,
+              },
             },
           },
-        },
-      });
+        })
+        .mockResolvedValueOnce({
+          result: { retval: { value: "ipfs://QmTestDID123" } },
+        })
+        .mockResolvedValueOnce({
+          result: { retval: { value: 3 } },
+        })
+        .mockResolvedValueOnce({
+          result: {
+            retval: {
+              value: {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+              },
+            },
+          },
+        })
+        .mockResolvedValueOnce({
+          result: { retval: { value: true } },
+        });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
       expect(serverMock).toHaveBeenCalledTimes(1);
@@ -2842,6 +2863,12 @@ describe("StellarDIDCreditSDK", () => {
         txCount30d: 5,
         avgCounterparties: 2,
       });
+      expect(mockLastContractCall).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_tx_stats",
+        args: [{ address: subjectAddress }],
+      });
+      expect(mockSimulateTransaction).toHaveBeenCalledTimes(1);
     });
 
     it("returns null if not found", async () => {
@@ -2851,6 +2878,11 @@ describe("StellarDIDCreditSDK", () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const stats = await sdk.getTxStats(subjectAddress);
       expect(stats).toBeNull();
+      expect(mockLastContractCall).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_tx_stats",
+        args: [{ address: subjectAddress }],
+      });
     });
   });
 
@@ -3601,6 +3633,52 @@ describe("batchRevokeVC", () => {
     ).toHaveLength(2);
   });
 
+  it("sends all hashes in a single batch_revoke call when get_batch_limit is unavailable", async () => {
+    // When the contract's `get_batch_limit` read fails (or the contract has no
+    // BatchLimit set), `batchRevokeVC` sends everything in one `batch_revoke`
+    // call. Unlike `batchAnchorVCs` — which uses the compile-time
+    // BATCH_ANCHOR_MAX_SIZE for its own chunking — `batchRevokeVC` relies
+    // exclusively on the contract-configured limit. Without a limit the
+    // fallback is a single call; the contract itself enforces `MAX_BATCH_SIZE`
+    // (see `contracts/revocation-registry/src/lib.rs`), so an oversized batch
+    // fails at the contract layer with `BatchTooLarge`.
+    //
+    // This test pins that documented behavior. If a future change ever starts
+    // chunking the fallback at BATCH_ANCHOR_MAX_SIZE, this assertion will fail
+    // and must be updated alongside the implementation.
+    const vcHashes = Array.from({ length: 25 }, (_, i) =>
+      Buffer.alloc(32, i + 1),
+    );
+
+    // First simulate call is the get_batch_limit read -> fail so the SDK
+    // exercises the fallback path.
+    mockSimulateTransaction
+      .mockResolvedValueOnce({ error: "not implemented" })
+      .mockResolvedValue({ result: {} });
+
+    const sdk = new StellarDIDCreditSDK(mockConfig);
+    const result: BatchResult = await sdk.batchRevokeVC(
+      issuerKeypair as never,
+      vcHashes,
+    );
+
+    // Exactly one batch_revoke call — no fallback chunking.
+    expect(result.results).toHaveLength(1);
+    const batchCalls = mockContractCalls.filter(
+      (call) => call.method === "batch_revoke",
+    );
+    expect(batchCalls).toHaveLength(1);
+
+    // And that single call carries ALL hashes, not a truncated batch.
+    const arg = batchCalls[0]?.args[1] as
+      | { value?: Buffer[] }
+      | Buffer[]
+      | undefined;
+    const sentHashes = Array.isArray(arg) ? arg : (arg?.value ?? []);
+    expect(sentHashes).toHaveLength(vcHashes.length);
+
+    expect(mockSendTransaction).toHaveBeenCalledTimes(1);
+  });
   it("chunks 100 hashes into two sequential transactions of 50 hashes each", async () => {
     const vcHashes = Array.from({ length: 100 }, (_, i) =>
       Buffer.alloc(32, i + 1),
@@ -4552,5 +4630,165 @@ describe("subscribeToScoreEvents", () => {
     expect(received[1]!.score).toBe(680);
 
     unsubscribe();
+  });
+});
+
+describe("event subscription convenience methods", () => {
+  const customContractId =
+    "CCUSTOMCONTRACTAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const issuer = "GISSUERAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
+  const vcHash = Buffer.alloc(32, 7);
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    mockGetLatestLedger.mockReset();
+    mockGetEvents.mockReset();
+    mockGetLatestLedger.mockResolvedValue({ sequence: 100 });
+    (
+      jest.requireMock("@stellar/stellar-sdk").SorobanRpc.Server as jest.Mock
+    ).mockClear();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  describe("onVCAnchored", () => {
+    it("polls the given contract for the VCAnch topic", async () => {
+      mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const unsubscribe = sdk.onVCAnchored(customContractId, jest.fn());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filters: [
+            {
+              type: "contract",
+              contractIds: [customContractId],
+              topics: [["symbol:VCAnch"]],
+            },
+          ],
+        }),
+      );
+      unsubscribe();
+    });
+
+    it("delivers typed (issuer, subject, vcHash) data to the callback", async () => {
+      mockGetEvents.mockResolvedValueOnce({
+        latestLedger: 100,
+        events: [
+          {
+            ledger: 100,
+            ledgerClosedAt: "2026-10-15T12:00:00Z",
+            value: { value: [issuer, subjectAddress, vcHash] },
+          },
+        ],
+      });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const callback = jest.fn();
+      const unsubscribe = sdk.onVCAnchored(customContractId, callback);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [gotIssuer, gotSubject, gotHash] = callback.mock.calls[0];
+      expect(gotIssuer).toBe(issuer);
+      expect(gotSubject).toBe(subjectAddress);
+      expect(Buffer.isBuffer(gotHash)).toBe(true);
+      expect((gotHash as Buffer).equals(vcHash)).toBe(true);
+      unsubscribe();
+    });
+  });
+
+  describe("onScoreComputed", () => {
+    it("polls the given contract for the Score topic", async () => {
+      mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const unsubscribe = sdk.onScoreComputed(customContractId, jest.fn());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filters: [
+            {
+              type: "contract",
+              contractIds: [customContractId],
+              topics: [["symbol:Score"]],
+            },
+          ],
+        }),
+      );
+      unsubscribe();
+    });
+
+    it("delivers typed (subject, score) data to the callback", async () => {
+      mockGetEvents.mockResolvedValueOnce({
+        latestLedger: 100,
+        events: [
+          {
+            ledger: 100,
+            ledgerClosedAt: "2026-10-15T12:00:00Z",
+            value: { value: [subjectAddress, 742] },
+          },
+        ],
+      });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const callback = jest.fn();
+      const unsubscribe = sdk.onScoreComputed(customContractId, callback);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [gotSubject, gotScore] = callback.mock.calls[0];
+      expect(gotSubject).toBe(subjectAddress);
+      expect(typeof gotScore).toBe("number");
+      expect(gotScore).toBe(742);
+      unsubscribe();
+    });
+  });
+
+  describe("onVCRevoked", () => {
+    it("polls the given contract for the Revoked topic", async () => {
+      mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const unsubscribe = sdk.onVCRevoked(customContractId, jest.fn());
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(mockGetEvents).toHaveBeenCalledWith(
+        expect.objectContaining({
+          filters: [
+            {
+              type: "contract",
+              contractIds: [customContractId],
+              topics: [["symbol:Revoked"]],
+            },
+          ],
+        }),
+      );
+      unsubscribe();
+    });
+
+    it("delivers typed (issuer, vcHash) data to the callback", async () => {
+      mockGetEvents.mockResolvedValueOnce({
+        latestLedger: 100,
+        events: [
+          {
+            ledger: 100,
+            ledgerClosedAt: "2026-10-15T12:00:00Z",
+            value: { value: [issuer, vcHash] },
+          },
+        ],
+      });
+      const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+      const callback = jest.fn();
+      const unsubscribe = sdk.onVCRevoked(customContractId, callback);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(callback).toHaveBeenCalledTimes(1);
+      const [gotIssuer, gotHash] = callback.mock.calls[0];
+      expect(gotIssuer).toBe(issuer);
+      expect(Buffer.isBuffer(gotHash)).toBe(true);
+      expect((gotHash as Buffer).equals(vcHash)).toBe(true);
+      unsubscribe();
+    });
   });
 });

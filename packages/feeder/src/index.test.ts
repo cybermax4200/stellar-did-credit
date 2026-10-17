@@ -1686,3 +1686,67 @@ describe("FEEDER_ALLOW_PARTIAL_STATS gating (#518)", () => {
     consoleLog.mockRestore();
   });
 });
+
+
+// ---------------------------------------------------------------------------
+// Issue #954: governanceId validation in the Feeder constructor
+// ---------------------------------------------------------------------------
+
+describe("Feeder governanceId validation (#954)", () => {
+  it("accepts a Feeder when governanceId is omitted (field is optional)", () => {
+    expect(
+      () => new Feeder(config, { publicKey: () => "GFEEDER" } as any),
+    ).not.toThrow();
+  });
+
+  it("accepts a well-formed governanceId", () => {
+    const validId = "C" + "A".repeat(55);
+    expect(
+      () =>
+        new Feeder(
+          { ...config, governanceId: validId },
+          { publicKey: () => "GFEEDER" } as any,
+        ),
+    ).not.toThrow();
+  });
+
+  it("rejects a governanceId that does not start with 'C'", () => {
+    expect(
+      () =>
+        new Feeder(
+          { ...config, governanceId: "G" + "A".repeat(55) },
+          { publicKey: () => "GFEEDER" } as any,
+        ),
+    ).toThrow(/Invalid governanceId/);
+  });
+
+  it("rejects a governanceId that is the wrong length", () => {
+    expect(
+      () =>
+        new Feeder(
+          { ...config, governanceId: "C" + "A".repeat(10) },
+          { publicKey: () => "GFEEDER" } as any,
+        ),
+    ).toThrow(/Invalid governanceId/);
+  });
+
+  it("rejects a governanceId that is not an address at all", () => {
+    expect(
+      () =>
+        new Feeder(
+          { ...config, governanceId: "not-a-contract" },
+          { publicKey: () => "GFEEDER" } as any,
+        ),
+    ).toThrow(/Invalid governanceId/);
+  });
+
+  it("names the field and the expected shape in the error message", () => {
+    expect(
+      () =>
+        new Feeder(
+          { ...config, governanceId: "bad" },
+          { publicKey: () => "GFEEDER" } as any,
+        ),
+    ).toThrow(/must start with 'C' and be 56 characters/);
+  });
+});

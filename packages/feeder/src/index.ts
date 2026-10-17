@@ -877,6 +877,20 @@ export class Feeder {
     private config: FeederConfig,
     private feederKeypair: Keypair,
   ) {
+    // #954: validate governanceId at construction time so both the CLI
+    // and programmatic callers (`new Feeder(config, keypair)`) fail fast on
+    // a malformed address. The CLI's own GOVERNANCE_ID check remains for
+    // env-var diagnostics, but this is the enforcement point every instance
+    // passes through.
+    if (
+      config.governanceId !== undefined &&
+      !isValidSorobanContractId(config.governanceId)
+    ) {
+      throw new Error(
+        `Invalid governanceId: "${config.governanceId}". Expected a valid ` +
+          `Soroban contract address (must start with 'C' and be 56 characters).`,
+      );
+    }
     this.server = new SorobanRpc.Server(config.rpcUrl);
   }
 

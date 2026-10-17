@@ -25,10 +25,12 @@ import {
 import {
   StellarDIDCreditSDK,
   scoringWeightsToScVal,
+  type DisputeRecord,
   type VCRecord,
   type ScoringWeights,
   type RepaymentRecord,
   type TxStats,
+  type RecencyDecayConfig,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -272,6 +274,22 @@ function printWeights(weights: ScoringWeights): void {
   console.log();
 }
 
+function printProtocolStats(title: string, stats: object): void {
+  const rows = Object.entries(stats).map(([field, value]) => [field, String(value)]);
+  const fieldWidth = Math.max("Counter".length, ...rows.map(([field]) => field.length));
+  const valueWidth = Math.max("Value".length, ...rows.map(([, value]) => value.length));
+  const border = `+${"-".repeat(fieldWidth + 2)}+${"-".repeat(valueWidth + 2)}+`;
+
+  console.log(title);
+  console.log(border);
+  console.log(`| ${"Counter".padEnd(fieldWidth)} | ${"Value".padEnd(valueWidth)} |`);
+  console.log(border);
+  rows.forEach(([field, value]) => {
+    console.log(`| ${field.padEnd(fieldWidth)} | ${value.padEnd(valueWidth)} |`);
+  });
+  console.log(border);
+}
+
 /**
  * Print a subject's on-chain TxStats as a human-readable table, in the same
  * boxed style used by printScoreRecord() for `get-score`.
@@ -311,6 +329,19 @@ function printTxStats(stats: TxStats): void {
 }
 
 /**
+ * Print the recency decay configuration as a short human-readable table.
+ */
+function printRecencyDecayConfig(config: RecencyDecayConfig): void {
+  console.log();
+  console.log("┌─────────────────────────────────────┐");
+  console.log(`│  Enabled:           ${String(config.enabled).padStart(15)} │`);
+  console.log(`│  decay_bps_per_day: ${String(config.decayBpsPerDay).padStart(15)} │`);
+  console.log(`│  min_recency_bps:   ${String(config.minRecencyBps).padStart(15)} │`);
+  console.log("└─────────────────────────────────────┘");
+  console.log();
+}
+
+/**
  * Print a list of credential anchors as a readable table.
  */
 function printVCRecords(records: VCRecord[]): void {
@@ -338,33 +369,11 @@ function printVCRecords(records: VCRecord[]): void {
   console.log();
 }
 
-/**
- * Print a RepaymentRecord as a human-readable table to stdout.
- * Repayment rate is expressed in basis points (bps): (on_time_count / total_count) * 10_000.
- */
-function printRepaymentRecord(record: RepaymentRecord): void {
-  const repaymentRate =
-    record.totalCount > 0
-      ? Math.round((record.onTimeCount / record.totalCount) * 10_000)
-      : 0;
-  console.log();
-  console.log("┌─────────────────────────────────────┐");
-  console.log("│  Repayment History                  │");
-  console.log("├─────────────────────────────────────┤");
-  console.log(
-    `│  On-Time Count:       ${String(record.onTimeCount).padStart(13)} │`,
-  );
-  console.log(
-    `│  Total Count:         ${String(record.totalCount).padStart(13)} │`,
-  );
-  console.log(
-    `│  Total Repaid:        ${formatStroops(record.totalRepaid).padStart(14)} │`,
-  );
-  console.log(
-    `│  Repayment Rate:      ${String(repaymentRate).padStart(10)} bps │`,
-  );
-  console.log("└─────────────────────────────────────┘");
-  console.log();
+function printDisputeRecord(record: DisputeRecord): void {
+  console.log(`Dispute for ${record.inputKey} [${record.status}]`);
+  console.log(`  Subject:      ${record.subject}`);
+  console.log(`  Reason:       ${record.reason}`);
+  console.log(`  Filed Ledger: ${record.filedAtLedger}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -729,6 +738,89 @@ program
   });
 
 // ---------------------------------------------------------------------------
+// Command group: disputes
+// ---------------------------------------------------------------------------
+
+const disputes = program
+  .command("disputes")
+  .description("List and fetch credit score input disputes.");
+
+disputes
+  .command("list")
+  .description("List disputes filed by a subject.")
+  .argument("<subject-address>", "Stellar G... address of the subject")
+  .option("--json", "Output as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const globalOptions = program.opts();
+    const network = globalOptions.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["creditOracleId"], true);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+
+    const sdk = new StellarDIDCreditSDK(config);
+    if (!cmdOptions.json) {
+      console.log(`Fetching disputes for ${upperAddr} on ${network}...`);
+    }
+
+    try {
+      const records = await sdk.listDisputes(upperAddr);
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(records, null, 2));
+      } else if (records.length === 0) {
+        console.log("No disputes found for this subject.");
+      } else {
+        console.log();
+        records.forEach(printDisputeRecord);
+      }
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+disputes
+  .command("get")
+  .description("Fetch a dispute for one of a subject's score inputs.")
+  .argument("<subject-address>", "Stellar G... address of the subject")
+  .argument("<input-key>", "Disputed input key: tx_stats, repayment, or vc_count")
+  .option("--json", "Output as JSON")
+  .action(
+    async (
+      subjectAddress: string,
+      inputKey: string,
+      cmdOptions: { json?: boolean },
+    ) => {
+      const globalOptions = program.opts();
+      const network = globalOptions.network as NetworkType;
+      const config = loadConfig(network);
+      validateConfig(config, ["creditOracleId"], true);
+      const upperAddr = subjectAddress.toUpperCase();
+      assertStellarAddress("subject-address", upperAddr);
+
+      const sdk = new StellarDIDCreditSDK(config);
+      if (!cmdOptions.json) {
+        console.log(`Fetching ${inputKey} dispute for ${upperAddr} on ${network}...`);
+      }
+
+      try {
+        const record = await sdk.getDispute(upperAddr, inputKey);
+        if (cmdOptions.json) {
+          console.log(JSON.stringify(record, null, 2));
+        } else if (record === null) {
+          console.log(`No dispute found for ${inputKey}.`);
+        } else {
+          console.log();
+          printDisputeRecord(record);
+        }
+      } catch (err) {
+        console.error("Failed:", err instanceof Error ? err.message : err);
+        process.exit(1);
+      }
+    },
+  );
+
+// ---------------------------------------------------------------------------
 // Command: credential-type
 // ---------------------------------------------------------------------------
 
@@ -858,6 +950,60 @@ program
 // Command: weights
 // ---------------------------------------------------------------------------
 
+const protocolStats = program
+  .command("protocol-stats")
+  .description("Fetch aggregate protocol counters.");
+
+protocolStats
+  .command("identity")
+  .description("Fetch aggregate identity-oracle counters.")
+  .option("--json", "Output as JSON")
+  .action(async (cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["identityOracleId"], true);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    try {
+      const stats: IdentityProtocolStats = await sdk.getIdentityProtocolStats();
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(stats));
+      } else {
+        printProtocolStats("Identity Protocol Stats", stats);
+      }
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+protocolStats
+  .command("credit")
+  .description("Fetch aggregate credit-oracle counters.")
+  .option("--json", "Output as JSON")
+  .action(async (cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["creditOracleId"], true);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    try {
+      const stats: CreditProtocolStats = await sdk.getCreditProtocolStats();
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(stats));
+      } else {
+        printProtocolStats("Credit Protocol Stats", stats);
+      }
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
 program
   .command("weights")
   .description(
@@ -938,6 +1084,57 @@ program
       } else {
         printTxStats(stats);
       }
+    } catch (err) {
+      console.error(
+        "Failed:",
+        err instanceof Error ? err.message : err,
+      );
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: recency-decay
+// ---------------------------------------------------------------------------
+
+program
+  .command("recency-decay")
+  .description(
+    "Fetch the recency decay configuration currently active on the credit-oracle contract.",
+  )
+  .option("--json", "Output as JSON")
+  .action(async (cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ["creditOracleId"], true);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    if (!cmdOptions.json) {
+      console.log(`Fetching recency decay configuration on ${network}...`);
+    }
+
+    try {
+      const decayConfig = await sdk.getRecencyDecayConfig();
+
+      if (cmdOptions.json) {
+        console.log(
+          JSON.stringify(
+            {
+              enabled: decayConfig.enabled,
+              decay_bps_per_day: decayConfig.decayBpsPerDay,
+              min_recency_bps: decayConfig.minRecencyBps,
+            },
+            null,
+            2,
+          ),
+        );
+        process.exit(0);
+        return;
+      }
+
+      printRecencyDecayConfig(decayConfig);
     } catch (err) {
       console.error(
         "Failed:",
@@ -1609,6 +1806,86 @@ governance
       });
     },
   );
+
+async function runPauseCommand(params: {
+  action: "pause" | "unpause";
+  target: "identity" | "credit" | "revocation";
+  adminSecret: string;
+  dryRun?: boolean;
+}): Promise<void> {
+  const { action, target, adminSecret } = params;
+  const network = program.opts().network as NetworkType;
+  const config = loadConfig(network);
+  const targetConfig = {
+    identity: { configKey: "identityOracleId", contractName: "identity-oracle" },
+    credit: { configKey: "creditOracleId", contractName: "credit-oracle" },
+    revocation: { configKey: "revocationRegistryId", contractName: "revocation-registry" },
+  }[target];
+  validateConfig(config, [targetConfig.configKey]);
+
+  const contractId = config[targetConfig.configKey]!;
+  const keypair = parseSecret(adminSecret);
+  if (params.dryRun) {
+    const contract = new Contract(contractId);
+    const operation = contract.call(
+      action,
+      ...(target === "credit" ? [new Address(keypair.publicKey()).toScVal()] : []),
+    );
+    await simulateDryRun({
+      rpcUrl: config.rpcUrl,
+      networkPassphrase: config.networkPassphrase,
+      sourceKeypair: keypair,
+      contractId,
+      operation,
+      label: `${action} ${targetConfig.contractName}`,
+    });
+    return;
+  }
+
+  const sdk = new StellarDIDCreditSDK(config);
+  let txHash: string;
+  if (target === "identity") {
+    txHash = action === "pause"
+      ? await sdk.pauseIdentityOracle(keypair)
+      : await sdk.unpauseIdentityOracle(keypair);
+  } else if (target === "credit") {
+    txHash = action === "pause"
+      ? await sdk.pauseCreditOracle(keypair)
+      : await sdk.unpauseCreditOracle(keypair);
+  } else {
+    txHash = action === "pause"
+      ? await sdk.pauseRevocationRegistry(keypair)
+      : await sdk.unpauseRevocationRegistry(keypair);
+  }
+
+  console.log(`${action === "pause" ? "Pausing" : "Unpausing"} ${targetConfig.contractName} on ${network}...`);
+  console.log(`  Admin: ${keypair.publicKey()}`);
+  console.log();
+  console.log("Success!");
+  console.log(`  Transaction: ${txHash}`);
+}
+
+for (const action of ["pause", "unpause"] as const) {
+  const commandGroup = program
+    .command(action)
+    .description(`${action === "pause" ? "Pause" : "Unpause"} contract write operations.`);
+
+  for (const target of ["identity", "credit", "revocation"] as const) {
+    commandGroup
+      .command(target)
+      .description(`${action === "pause" ? "Pause" : "Unpause"} the ${target} contract (admin only).`)
+      .argument("<admin-secret>", "Stellar secret key of the contract admin (starts with S)")
+      .option("--dry-run", "Simulate transaction execution without broadcasting")
+      .action(async (adminSecret: string, cmdOptions: { dryRun?: boolean }) => {
+        try {
+          await runPauseCommand({ action, target, adminSecret, dryRun: cmdOptions.dryRun });
+        } catch (err) {
+          console.error("Failed:", err instanceof Error ? err.message : err);
+          process.exit(1);
+        }
+      });
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Parse
