@@ -8,6 +8,9 @@ import {
 import type { FeederConfig } from "./index";
 import type { Keypair } from "@stellar/stellar-sdk";
 import * as sdk from "@stellar/stellar-sdk";
+import * as http from "http";
+import { HealthTracker, createHealthServer } from "./health";
+import type { HealthSnapshot } from "./health";
 
 // ---------------------------------------------------------------------------
 // Shared mock instances so individual tests can reconfigure behaviour.
@@ -468,18 +471,23 @@ describe("Address validation and error handling", () => {
     expect(count).toBe(0);
   });
 
-  it("getActiveVcCount returns 0 on simulation error", async () => {
+  it("getActiveVcCount throws on simulation error", async () => {
     const { getActiveVcCount } = await import("./index");
+    const subjectAddress =
+      "GBAD5234567234567234567234567234567234567234567234567235";
 
     mockServerInstance.simulateTransaction.mockResolvedValueOnce({
-      error: "Simulation failed",
+      error: "HostError: Missing contract",
     });
 
-    const count = await getActiveVcCount(mockServerInstance as any, config, "GBAD5234567234567234567234567234567234567234567234567235");
+    await expect(
+      getActiveVcCount(mockServerInstance as any, config, subjectAddress),
+    ).rejects.toThrow(
+      `get_active_vc_count contract error for ${subjectAddress}: HostError: Missing contract`,
+    );
 
-    expect(count).toBe(0);
     expect(consoleErrorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("get_active_vc_count simulation failed"),
+      expect.stringContaining("get_active_vc_count contract error"),
     );
   });
 
@@ -804,10 +812,101 @@ describe("Dead-letter queue", () => {
     consoleWarnSpy.mockRestore();
   });
 
+  it("publishes cycle failures and partial recovery through GET /health", async () => {
+    const healthTracker = new HealthTracker();
+    const feeder = new Feeder(
+      { ...config, maxConsecutiveFailures: 2, healthTracker },
+      { publicKey: () => "GFEEDER" } as Keypair,
+    );
+    const feedSubjectSpy = jest
+      .spyOn(feeder, "feedSubject")
+      .mockRejectedValue(new Error("transient failure"));
+    const server = createHealthServer(0, healthTracker);
+
+    try {
+      await new Promise<void>((resolve, reject) => {
+        server.once("listening", resolve);
+        server.once("error", reject);
+      });
+      const address = server.address();
+      if (!address || typeof address === "string") {
+        throw new Error("Expected health server to listen on a TCP port");
+      }
+      const healthUrl = `http://127.0.0.1:${address.port}/health`;
+      const readHealth = (): Promise<HealthSnapshot> =>
+        new Promise((resolve, reject) => {
+          http.get(healthUrl, (res) => {
+            let body = "";
+            res.on("data", (chunk) => {
+              body += chunk;
+            });
+            res.on("error", reject);
+            res.on("end", () => {
+              try {
+                expect(res.statusCode).toBe(200);
+                expect(res.headers["content-type"]).toBe("application/json");
+                resolve(JSON.parse(body) as HealthSnapshot);
+              } catch (err) {
+                reject(err);
+              }
+            });
+          }).on("error", reject);
+        });
+
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 0,
+        deadLetterSubjects: [],
+      });
+
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 2,
+        deadLetterSubjects: config.subjects,
+      });
+
+      // Further failures must not count a subject more than once.
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        deadLetterCount: 2,
+        deadLetterSubjects: config.subjects,
+      });
+
+      feedSubjectSpy.mockImplementation(async (subject) => {
+        if (subject === config.subjects[1]) {
+          throw new Error("still failing");
+        }
+      });
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        failureCount: 7,
+        deadLetterCount: 1,
+        deadLetterSubjects: [config.subjects[1]],
+      });
+
+      feedSubjectSpy.mockResolvedValue(undefined);
+      await feeder.runCycle();
+      expect(await readHealth()).toMatchObject({
+        failureCount: 7,
+        deadLetterCount: 0,
+        deadLetterSubjects: [],
+      });
+    } finally {
+      await new Promise<void>((resolve, reject) => {
+        server.close((err) => {
+          if (err) reject(err);
+          else resolve();
+        });
+      });
+    }
+  });
+
   it("subject appears in dead-letter after MAX_CONSECUTIVE_FAILURES consecutive failures", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -824,6 +923,10 @@ describe("Dead-letter queue", () => {
     const deadLetters = feeder.getDeadLetterSubjects();
     expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567231");
     expect(deadLetters).toContain("GBAD5234567234567234567234567234567234567234567234567232");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 2,
+      deadLetterSubjects: config.subjects,
+    });
 
     // Should have logged ERROR with [dead-letter] prefix
     const deadLetterErrors = consoleErrorSpy.mock.calls.filter(
@@ -833,9 +936,11 @@ describe("Dead-letter queue", () => {
   });
 
   it("subject is cleared from dead-letter after a successful feed", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -855,6 +960,10 @@ describe("Dead-letter queue", () => {
 
     // Dead-letter should be cleared
     expect(feeder.getDeadLetterSubjects()).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
 
     // Should have logged recovery message
     const recoveryLogs = consoleLogSpy.mock.calls.filter(
@@ -864,9 +973,11 @@ describe("Dead-letter queue", () => {
   });
 
   it("logs sub-threshold failures at warn level with failure count", async () => {
+    const healthTracker = new HealthTracker();
     const configWithThreshold: FeederConfig = {
       ...config,
       maxConsecutiveFailures: 5,
+      healthTracker,
     };
     const feeder = new Feeder(configWithThreshold, { publicKey: () => "GFEEDER" } as any);
 
@@ -882,6 +993,10 @@ describe("Dead-letter queue", () => {
     // Subject should NOT be in dead-letter yet
     const deadLetters = feeder.getDeadLetterSubjects();
     expect(deadLetters).not.toContain("GBAD5234567234567234567234567234567234567234567234567231");
+    expect(healthTracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
 
     // Should have logged warn with failure count
     const warnLogs = consoleWarnSpy.mock.calls.filter(

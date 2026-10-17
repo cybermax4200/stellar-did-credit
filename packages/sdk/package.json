@@ -44,6 +44,9 @@
         "statements": 80
       }
     },
+    "moduleNameMapper": {
+      "^@stellar-did-credit/zk-wasm$": "<rootDir>/__mocks__/@stellar-did-credit/zk-wasm.js"
+    },
     "globals": {
       "ts-jest": {
         "diagnostics": false

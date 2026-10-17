@@ -1,2 +1,4 @@
 contracts/tests/test_snapshots/** linguist-generated=true
 deployments.testnet.json linguist-generated=true
+
+*.json text eol=lf

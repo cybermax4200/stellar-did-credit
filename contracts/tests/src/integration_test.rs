@@ -2510,4 +2510,123 @@ mod tests {
             .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), baseline);
     }
+
+    /// Full cross-contract integration test for the governance → credit-oracle
+    /// weight update flow. Deploys all four contracts, transfers credit-oracle
+    /// admin to governance, creates a weight-change proposal, votes, executes
+    /// (which calls propose_weights on credit-oracle), advances past the
+    /// timelock, applies weights via governance, and verifies the credit-oracle
+    /// weights actually changed.
+    #[test]
+    fn test_governance_credit_oracle_weight_update_flow() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // 1. Deploy all four contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let gov_id = env.register_contract(None, Governance);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = Address::generate(&env);
+
+        // 2. Initialize all four contracts
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &1000);
+
+        // 3. Verify default weights before the proposal
+        let default_weights = credit.get_scoring_weights();
+        assert_eq!(default_weights.vc_weight, 40);
+        assert_eq!(default_weights.tx_weight, 30);
+        assert_eq!(default_weights.repayment_weight, 30);
+
+        // 4. Transfer credit-oracle admin to governance contract
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        // 5. Create a proposal with new weights
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        assert_eq!(proposal_id, 1);
+
+        // 6. Register voters and vote
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        gov.register_voter(&admin, &voter1, &1000);
+        gov.register_voter(&admin, &voter2, &400);
+
+        gov.vote(&voter1, &proposal_id, &true, &1000);
+        gov.vote(&voter2, &proposal_id, &false, &400);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.votes_for, 1000);
+        assert_eq!(proposal.votes_against, 400);
+        assert!(!proposal.executed);
+
+        // 7. Advance ledger past voting period
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+
+        // 8. Execute proposal — calls propose_weights on credit-oracle
+        gov.execute(&proposal_id);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.executed);
+
+        // 9. Verify weights are NOT changed yet (timelock in effect)
+        let weights_after_execute = credit.get_scoring_weights();
+        assert_eq!(weights_after_execute.vc_weight, 40);
+        assert_eq!(weights_after_execute.tx_weight, 30);
+        assert_eq!(weights_after_execute.repayment_weight, 30);
+
+        // 10. Verify pending weights exist
+        let pending = credit.get_pending_weights();
+        assert!(pending.is_some());
+        let pending_record = pending.unwrap();
+        assert_eq!(pending_record.weights.vc_weight, 50);
+        assert_eq!(pending_record.weights.tx_weight, 20);
+        assert_eq!(pending_record.weights.repayment_weight, 30);
+
+        // 11. Advance ledger past timelock (17,280 ledgers + 2 buffer)
+        let jump = 17_280 + 2;
+        // Extend TTL on all four contracts to prevent archival during the jump
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&revocation_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
+
+        // 12. Apply weights via governance (gov.apply_weights calls credit-oracle)
+        gov.apply_weights();
+
+        // 13. Verify credit-oracle weights actually changed
+        let active_weights = credit.get_scoring_weights();
+        assert_eq!(active_weights.vc_weight, 50);
+        assert_eq!(active_weights.tx_weight, 20);
+        assert_eq!(active_weights.repayment_weight, 30);
+    }
 }

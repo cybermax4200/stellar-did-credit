@@ -672,7 +672,8 @@ function getSequence(account: Account): string {
  * Reads the active (non-revoked) VC count from the identity-oracle.
  * Uses a read-only simulation — no signing or fees required.
  *
- * Returns 0 for unknown subjects without throwing.
+ * Unknown subjects return 0 from the contract. Simulation and RPC errors are
+ * surfaced so a missing or misconfigured identity-oracle is not mistaken for 0.
  */
 export async function getActiveVcCount(
   server: SorobanRpc.Server,
@@ -711,23 +712,27 @@ export async function getActiveVcCount(
     sim = await server.simulateTransaction(tx);
   } catch (err) {
     console.error(
-      `[feeder] Error simulating get_active_vc_count for ${subjectAddress}:`,
+      `[feeder] get_active_vc_count RPC error for ${subjectAddress}:`,
       err instanceof Error ? err.message : err,
     );
-    return 0;
+    throw err;
   }
 
   if (SorobanRpc.Api.isSimulationError(sim)) {
     console.error(
-      `[feeder] get_active_vc_count simulation failed for ${subjectAddress}: ${sim.error}`,
+      `[feeder] get_active_vc_count contract error for ${subjectAddress}: ${sim.error}`,
     );
-    return 0;
+    throw new Error(
+      `get_active_vc_count contract error for ${subjectAddress}: ${sim.error}`,
+    );
   }
   if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
     console.error(
       `[feeder] Unexpected simulation response for get_active_vc_count on ${subjectAddress}`,
     );
-    return 0;
+    throw new Error(
+      `Unexpected simulation response for get_active_vc_count on ${subjectAddress}`,
+    );
   }
 
   return Number(scValToNative(sim.result!.retval));
@@ -1201,6 +1206,7 @@ export class Feeder {
       `[feeder] Cycle complete: ${succeeded} succeeded, ${skipped} skipped, ${failed} failed`,
     );
 
+    this.config.healthTracker?.setDeadLetterSubjects(this.getDeadLetterSubjects());
     this.config.healthTracker?.recordCycleResult(succeeded, failed);
   }
 

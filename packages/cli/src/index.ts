@@ -28,6 +28,7 @@ import {
   type VCRecord,
   type ScoringWeights,
   type RepaymentRecord,
+  type TxStats,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -268,6 +269,44 @@ function printWeights(weights: ScoringWeights): void {
     `│  Repayment Weight: ${String(weights.repaymentWeight).padStart(13)} │`,
   );
   console.log("└─────────────────────────────────────┘");
+  console.log();
+}
+
+/**
+ * Print a subject's on-chain TxStats as a human-readable table, in the same
+ * boxed style used by printScoreRecord() for `get-score`.
+ *
+ * `volume30d` is denominated in stroops (the credit-oracle sums XLM volume
+ * on-chain), so it is rendered through formatStroops() like the TX volume
+ * line of the score table.
+ */
+function printTxStats(stats: TxStats): void {
+  // Matches the 37-character inner width used by printScoreRecord()/printWeights().
+  const width = 37;
+
+  const border = (left: string, right: string): string =>
+    `${left}${"─".repeat(width)}${right}`;
+
+  const row = (label: string, value: string): string => {
+    const prefix = `  ${label}:`;
+    const gap = Math.max(1, width - prefix.length - value.length - 1);
+    const trailing = Math.max(0, width - prefix.length - gap - value.length);
+    return `│${prefix}${" ".repeat(gap)}${value}${" ".repeat(trailing)}│`;
+  };
+
+  const titleRow = (title: string): string => {
+    const prefix = `  ${title}`;
+    return `│${prefix}${" ".repeat(Math.max(1, width - prefix.length))}│`;
+  };
+
+  console.log();
+  console.log(border("┌", "┐"));
+  console.log(titleRow("Transaction Statistics"));
+  console.log(border("├", "┤"));
+  console.log(row("Volume (30d)", formatStroops(stats.volume30d)));
+  console.log(row("TX Count (30d)", String(stats.txCount30d)));
+  console.log(row("Avg Counterparties", String(stats.avgCounterparties)));
+  console.log(border("└", "┘"));
   console.log();
 }
 
@@ -837,6 +876,68 @@ program
     try {
       const weights = await sdk.getWeights();
       printWeights(weights);
+    } catch (err) {
+      console.error(
+        "Failed:",
+        err instanceof Error ? err.message : err,
+      );
+      process.exit(1);
+    }
+  });
+
+// ---------------------------------------------------------------------------
+// Command: tx-stats
+// ---------------------------------------------------------------------------
+
+program
+  .command("tx-stats")
+  .description(
+    "Fetch the 30-day transaction statistics a feeder submitted for a subject via update_tx_stats.",
+  )
+  .argument("<subject-address>", "Stellar G... address of the subject")
+  .option("--json", "Output the full TxStats as JSON")
+  .action(async (subjectAddress: string, cmdOptions: { json?: boolean }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+    const config = loadConfig(network);
+    validateConfig(config, ['creditOracleId'], true);
+    const upperAddr = subjectAddress.toUpperCase();
+    assertStellarAddress("subject-address", upperAddr);
+
+    const sdk = new StellarDIDCreditSDK(config);
+
+    if (!cmdOptions.json) {
+      console.log(
+        `Fetching transaction statistics for ${upperAddr} on ${network}...`,
+      );
+    }
+
+    try {
+      const stats = await sdk.getTxStats(upperAddr);
+
+      if (stats === null) {
+        if (cmdOptions.json) {
+          console.log(JSON.stringify({ txStats: null }));
+        } else {
+          console.log();
+          console.log(
+            "No transaction statistics have been submitted for this subject yet.",
+          );
+        }
+        process.exit(0);
+        return;
+      }
+
+      if (cmdOptions.json) {
+        console.log(JSON.stringify(stats, (key, value) => {
+          if (typeof value === "bigint") return value.toString();
+          return value;
+        }, 2));
+        process.exit(0);
+        return;
+      } else {
+        printTxStats(stats);
+      }
     } catch (err) {
       console.error(
         "Failed:",

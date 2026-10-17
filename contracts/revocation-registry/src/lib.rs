@@ -109,6 +109,26 @@ impl RevocationRegistry {
         Ok(())
     }
 
+    pub fn pause(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&RevocationKey::Paused, &true);
+        env.events().publish((symbol_short!("Paused"),), ());
+        Ok(())
+    }
+
+    pub fn unpause(env: Env) -> Result<(), RevocationRegistryError> {
+        require_admin(&env);
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.storage().instance().set(&RevocationKey::Paused, &false);
+        env.events().publish((symbol_short!("Unpaused"),), ());
+        Ok(())
+    }
+
     pub fn get_batch_limit(env: Env) -> u32 {
         env.storage()
             .instance()
@@ -689,6 +709,41 @@ mod tests {
         client.propose_new_admin(&admin2);
 
         client.accept_admin(&non_admin);
+    }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        client.pause();
+        assert_eq!(
+            client.try_set_batch_limit(&admin, &10),
+            Err(Ok(RevocationRegistryError::ContractPaused))
+        );
+
+        client.unpause();
+        assert!(client.try_set_batch_limit(&admin, &10).is_ok());
+    }
+
+    #[test]
+    fn test_pause_requires_admin_auth() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        env.mock_auths(&[]);
+        assert!(client.try_pause().is_err());
+        assert!(client.try_unpause().is_err());
     }
 
     proptest! {

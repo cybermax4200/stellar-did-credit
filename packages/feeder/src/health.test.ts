@@ -30,8 +30,45 @@ describe("HealthTracker", () => {
       lastCycleAt: null,
       successCount: 0,
       failureCount: 0,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
     });
     expect(tracker.isReady()).toBe(false);
+  });
+
+  it("replaces dead-letter state instead of accumulating subjects", () => {
+    const tracker = new HealthTracker();
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 2,
+      deadLetterSubjects: ["subject-a", "subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects(["subject-b"]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects([]);
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
+  });
+
+  it("isolates dead-letter state from mutations of inputs and snapshots", () => {
+    const tracker = new HealthTracker();
+    const subjects = ["subject-a"];
+    tracker.setDeadLetterSubjects(subjects);
+
+    subjects.push("subject-b");
+    tracker.getSnapshot().deadLetterSubjects.push("subject-c");
+
+    expect(tracker.getSnapshot()).toMatchObject({
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-a"],
+    });
   });
 
   it("records cycle results and updates readiness", () => {
@@ -56,9 +93,10 @@ describe("HealthTracker", () => {
 describe("createHealthServer", () => {
   let server: http.Server;
   let port: number;
+  let tracker: HealthTracker;
 
   beforeEach((done) => {
-    const tracker = new HealthTracker();
+    tracker = new HealthTracker();
     server = createHealthServer(0, tracker);
     server.on("listening", () => {
       const address = server.address();
@@ -81,6 +119,50 @@ describe("createHealthServer", () => {
       lastCycleAt: null,
       successCount: 0,
       failureCount: 0,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
+    });
+  });
+
+  it("GET /health includes current dead-letter subjects after failures", async () => {
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    tracker.recordCycleResult(1, 2);
+
+    const res = await httpGet(port, "/health");
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body)).toEqual({
+      status: "ok",
+      lastCycleAt: expect.any(String),
+      successCount: 1,
+      failureCount: 2,
+      deadLetterCount: 2,
+      deadLetterSubjects: ["subject-a", "subject-b"],
+    });
+  });
+
+  it("GET /health reflects recovery while preserving cumulative failures", async () => {
+    tracker.setDeadLetterSubjects(["subject-a", "subject-b"]);
+    tracker.recordCycleResult(0, 2);
+    tracker.setDeadLetterSubjects(["subject-b"]);
+    tracker.recordCycleResult(1, 1);
+
+    const partialRecovery = await httpGet(port, "/health");
+    expect(partialRecovery.statusCode).toBe(200);
+    expect(JSON.parse(partialRecovery.body)).toMatchObject({
+      failureCount: 3,
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-b"],
+    });
+
+    tracker.setDeadLetterSubjects([]);
+    tracker.recordCycleResult(2, 0);
+
+    const fullRecovery = await httpGet(port, "/health");
+    expect(fullRecovery.statusCode).toBe(200);
+    expect(JSON.parse(fullRecovery.body)).toMatchObject({
+      failureCount: 3,
+      deadLetterCount: 0,
+      deadLetterSubjects: [],
     });
   });
 
@@ -88,6 +170,26 @@ describe("createHealthServer", () => {
     const res = await httpGet(port, "/ready");
     expect(res.statusCode).toBe(503);
     expect(JSON.parse(res.body)).toEqual({ status: "not ready" });
+  });
+
+  it("dead-letter metrics preserve readiness before and after a successful cycle", async () => {
+    tracker.setDeadLetterSubjects(["subject-a"]);
+    tracker.recordCycleResult(0, 1);
+    expect((await httpGet(port, "/ready")).statusCode).toBe(503);
+
+    tracker.setDeadLetterSubjects([]);
+    tracker.recordCycleResult(1, 0);
+    tracker.setDeadLetterSubjects(["subject-a"]);
+    tracker.recordCycleResult(0, 1);
+
+    const ready = await httpGet(port, "/ready");
+    expect(ready.statusCode).toBe(200);
+    expect(JSON.parse(ready.body)).toEqual({ status: "ready" });
+    expect(JSON.parse((await httpGet(port, "/health")).body)).toMatchObject({
+      status: "ok",
+      deadLetterCount: 1,
+      deadLetterSubjects: ["subject-a"],
+    });
   });
 
   it("GET /ready returns 200 after a successful cycle", async () => {
