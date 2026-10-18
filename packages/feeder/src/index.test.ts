@@ -369,6 +369,99 @@ describe("Horizon rate limiting handling", () => {
 
     consoleWarn.mockRestore();
   });
+
+  describe("edge cases", () => {
+    const subject = "GBAD5234567234567234567234567234567234567234567234567233";
+    let consoleWarn: jest.SpyInstance;
+    let setTimeoutSpy: jest.SpyInstance;
+    let sleepDelays: number[];
+
+    // Run sleep() callbacks immediately and record the requested delays.
+    beforeEach(() => {
+      consoleWarn = jest.spyOn(console, "warn").mockImplementation(() => {});
+      sleepDelays = [];
+      setTimeoutSpy = jest.spyOn(global, "setTimeout").mockImplementation(((
+        cb: () => void,
+        ms?: number,
+      ) => {
+        sleepDelays.push(ms ?? 0);
+        cb();
+        return 0 as unknown as NodeJS.Timeout;
+      }) as unknown as typeof setTimeout);
+    });
+
+    afterEach(() => {
+      consoleWarn.mockRestore();
+      setTimeoutSpy.mockRestore();
+    });
+
+    function rateLimitError(headers: Map<string, string>): any {
+      const err: any = new Error("429 Too Many Requests");
+      err.response = { status: 429, headers };
+      return err;
+    }
+
+    it("429 without Retry-After header uses exponential backoff", async () => {
+      // Pin jitter factor (0.5 + random) to exactly 1.
+      const randomSpy = jest.spyOn(Math, "random").mockReturnValue(0.5);
+
+      mockHorizonPaymentsCall
+        .mockImplementationOnce(() => Promise.reject(rateLimitError(new Map())))
+        .mockImplementationOnce(() => Promise.reject(rateLimitError(new Map())))
+        .mockImplementationOnce(() => Promise.resolve({ records: [] }));
+
+      const { fetchHorizonStats } = await import("./index");
+      const stats = await fetchHorizonStats("https://horizon.example", subject, {
+        maxRetries: 3,
+        retryBaseDelayMs: 10,
+      });
+
+      expect(stats.txCount30d).toBe(0);
+      expect(mockHorizonPaymentsCall).toHaveBeenCalledTimes(3);
+      expect(sleepDelays).toEqual([10, 20]);
+      expect(consoleWarn).toHaveBeenCalledTimes(2);
+      randomSpy.mockRestore();
+    });
+
+    it("429 with Retry-After=0 waits the 500ms floor and then succeeds", async () => {
+      mockHorizonPaymentsCall
+        .mockImplementationOnce(() =>
+          Promise.reject(rateLimitError(new Map([["retry-after", "0"]]))),
+        )
+        .mockImplementationOnce(() => Promise.resolve({ records: [] }));
+
+      const { fetchHorizonStats } = await import("./index");
+      const stats = await fetchHorizonStats("https://horizon.example", subject, {
+        maxRetries: 3,
+        retryBaseDelayMs: 10,
+      });
+
+      expect(stats.txCount30d).toBe(0);
+      expect(mockHorizonPaymentsCall).toHaveBeenCalledTimes(2);
+      expect(sleepDelays).toEqual([500]);
+    });
+
+    it("throws HorizonRateLimitError once max retries are exhausted", async () => {
+      mockHorizonPaymentsCall.mockImplementation(() =>
+        Promise.reject(rateLimitError(new Map([["retry-after", "1"]]))),
+      );
+
+      const { fetchHorizonStats } = await import("./index");
+      await expect(
+        fetchHorizonStats("https://horizon.example", subject, {
+          maxRetries: 2,
+          retryBaseDelayMs: 10,
+        }),
+      ).rejects.toMatchObject({
+        name: "HorizonRateLimitError",
+        message: "Horizon rate limit persisted after 2 retries",
+      });
+
+      // Initial attempt + 2 retries, each retry honouring Retry-After=1s.
+      expect(mockHorizonPaymentsCall).toHaveBeenCalledTimes(3);
+      expect(sleepDelays).toEqual([1000, 1000]);
+    });
+  });
 });
 
 
