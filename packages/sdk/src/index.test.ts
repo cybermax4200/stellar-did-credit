@@ -820,13 +820,30 @@ describe("StellarDIDCreditSDK", () => {
         value: { value: [eventSubject, inputKey] },
       });
 
-      it("fires the callback for all three dispute event types", async () => {
+      it.each<DisputeEvent>([
+        {
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        },
+        {
+          eventType: "DsptRslv",
+          subject: subjectAddress,
+          inputKey: "repayment",
+          status: "Resolved",
+        },
+        {
+          eventType: "DsptRjct",
+          subject: subjectAddress,
+          inputKey: "vc_count",
+          status: "Rejected",
+        },
+      ])("delivers $eventType with status $status", async (expected) => {
         mockGetEvents.mockResolvedValueOnce({
           latestLedger: 100,
           events: [
-            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
-            disputeEvent("DsptRslv", subjectAddress, "repayment"),
-            disputeEvent("DsptRjct", subjectAddress, "vc_count"),
+            disputeEvent(expected.eventType, subjectAddress, expected.inputKey),
           ],
         });
 
@@ -842,26 +859,7 @@ describe("StellarDIDCreditSDK", () => {
         await Promise.resolve();
         await Promise.resolve();
 
-        expect(received).toEqual([
-          {
-            eventType: "DsptFild",
-            subject: subjectAddress,
-            inputKey: "tx_stats",
-            status: "Pending",
-          },
-          {
-            eventType: "DsptRslv",
-            subject: subjectAddress,
-            inputKey: "repayment",
-            status: "Resolved",
-          },
-          {
-            eventType: "DsptRjct",
-            subject: subjectAddress,
-            inputKey: "vc_count",
-            status: "Rejected",
-          },
-        ]);
+        expect(received).toEqual([expected]);
 
         unsubscribe();
       });
