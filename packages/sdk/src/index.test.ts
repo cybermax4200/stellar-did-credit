@@ -1072,6 +1072,27 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
+      it("can unsubscribe while the initial ledger request is pending", async () => {
+        let resolveLedger!: (ledger: { sequence: number }) => void;
+        mockGetLatestLedger.mockReturnValueOnce(
+          new Promise<{ sequence: number }>((resolve) => {
+            resolveLedger = resolve;
+          }),
+        );
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        expect(mockGetLatestLedger).toHaveBeenCalledTimes(1);
+        unsubscribe();
+        resolveLedger({ sequence: 100 });
+        await jest.advanceTimersByTimeAsync(30);
+
+        expect(mockGetEvents).not.toHaveBeenCalled();
+        expect(callback).not.toHaveBeenCalled();
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents
           .mockResolvedValueOnce({ latestLedger: 100, events: [] })
