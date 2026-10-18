@@ -1093,6 +1093,36 @@ describe("StellarDIDCreditSDK", () => {
         expect(jest.getTimerCount()).toBe(0);
       });
 
+      it("ignores an in-flight dispute response after unsubscribe", async () => {
+        const response = {
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", subjectAddress, "repayment"),
+            disputeEvent("DsptRjct", subjectAddress, "vc_count"),
+          ],
+        };
+        let resolveEvents!: (value: typeof response) => void;
+        mockGetEvents.mockReturnValueOnce(
+          new Promise<typeof response>((resolve) => {
+            resolveEvents = resolve;
+          }),
+        );
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        unsubscribe();
+        resolveEvents(response);
+        await jest.advanceTimersByTimeAsync(30);
+
+        expect(callback).not.toHaveBeenCalled();
+        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents
           .mockResolvedValueOnce({ latestLedger: 100, events: [] })
