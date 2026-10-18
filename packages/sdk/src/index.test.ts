@@ -935,6 +935,33 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
+      it.each(["Score", "VCAnch", "Revoked", "Unknown"])(
+        "ignores the unrelated %s topic without skipping valid disputes",
+        async (topic) => {
+          mockGetEvents.mockResolvedValueOnce({
+            latestLedger: 100,
+            events: [
+              disputeEvent(topic, subjectAddress, "tx_stats"),
+              disputeEvent("DsptRslv", subjectAddress, "repayment"),
+            ],
+          });
+          const sdk = new StellarDIDCreditSDK(mockConfig);
+          const callback = jest.fn();
+          const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+          await jest.advanceTimersByTimeAsync(0);
+
+          expect(callback).toHaveBeenCalledTimes(1);
+          expect(callback).toHaveBeenCalledWith({
+            eventType: "DsptRslv",
+            subject: subjectAddress,
+            inputKey: "repayment",
+            status: "Resolved",
+          });
+          unsubscribe();
+        },
+      );
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
 
