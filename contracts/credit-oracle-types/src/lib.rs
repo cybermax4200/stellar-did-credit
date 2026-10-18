@@ -6,12 +6,22 @@
 //! Keeping them in a separate non-cdylib crate avoids WASM linker
 //! symbol collisions when both contracts are compiled for deployment.
 
-use soroban_sdk::{contracterror, contracttype, Address, Env, IntoVal, Symbol};
+use soroban_sdk::{contracterror, contracttype, Address, BytesN, Env, IntoVal, Symbol};
 
 /// Minimum weight allowed for any individual scoring weight component (10%).
 /// Every component must contribute at least 10% to prevent degenerate scoring
 /// (e.g., setting a component weight to 0 silently disables that metric).
 pub const MIN_COMPONENT_WEIGHT: u32 = 10;
+
+/// The label a credential carries for scoring purposes (e.g. `kyc`,
+/// `employment`), stored on-chain as a `Symbol`.
+///
+/// The identity-oracle returns this from `get_vc_credential_type`, and the
+/// credit-oracle uses it to look up the per-type weight when computing a
+/// score. Both contracts import the alias from here so the cross-contract
+/// call signature has a single definition instead of agreeing on a bare
+/// `Symbol` written out twice.
+pub type CredentialType = Symbol;
 
 /// Error types for the credit-oracle contract.
 ///
@@ -163,5 +173,34 @@ impl CreditOracleClient {
             Err(Ok(e)) => Err(e),
             _ => Err(CreditOracleError::NotInitialized),
         }
+    }
+}
+
+/// Cross-contract client for the identity-oracle calls the credit-oracle
+/// makes while scoring.
+///
+/// Kept here for the same reason as [`CreditOracleClient`]: the credit-oracle
+/// depends on the identity-oracle only through this shared, non-cdylib crate,
+/// so the two contracts never link each other's WASM. It also puts the
+/// [`CredentialType`] return type of `get_vc_credential_type` next to its
+/// cross-contract definition.
+pub struct IdentityOracleClient;
+
+impl IdentityOracleClient {
+    /// Read the credential type label for an anchored VC.
+    ///
+    /// Matches `identity-oracle`'s `get_vc_credential_type(subject, vc_hash)`,
+    /// which defaults to `generic` when no type was recorded at anchor time.
+    pub fn get_vc_credential_type(
+        env: &Env,
+        contract_id: &Address,
+        subject: &Address,
+        vc_hash: &BytesN<32>,
+    ) -> CredentialType {
+        env.invoke_contract(
+            contract_id,
+            &Symbol::new(env, "get_vc_credential_type"),
+            soroban_sdk::vec![env, subject.clone().into_val(env), vc_hash.clone().into_val(env)],
+        )
     }
 }

@@ -1,5 +1,7 @@
 #![no_std]
-pub use credit_oracle_types::{CreditOracleError, PendingWeightsRecord, ScoringWeights};
+pub use credit_oracle_types::{
+    CredentialType, CreditOracleError, IdentityOracleClient, PendingWeightsRecord, ScoringWeights,
+};
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
     Symbol, TryFromVal, Val, Vec,
@@ -33,7 +35,7 @@ pub enum DataKey {
     /// Global configuration
     Config,
     /// Registered weight for a VC credential type (default 100 when unset)
-    VcWeight(Symbol),
+    VcWeight(CredentialType),
     /// Whether the given address is a *currently* trusted transaction-stats
     /// feeder. Present and `true` while registered; present and `false` once
     /// deregistered (a tombstone, not removed) so re-registration can be told
@@ -1123,10 +1125,11 @@ impl CreditOracle {
                     continue;
                 }
                 vc_count += 1;
-                let vc_type = env.invoke_contract::<Symbol>(
+                let vc_type = IdentityOracleClient::get_vc_credential_type(
+                    &env,
                     &identity_oracle_id,
-                    &Symbol::new(&env, "get_vc_credential_type"),
-                    soroban_sdk::vec![&env, subject.clone().into_val(&env), record.vc_hash.clone().into_val(&env)],
+                    &subject,
+                    &record.vc_hash,
                 );
                 let weight = env
                     .storage()
@@ -1770,7 +1773,9 @@ mod prop_tests;
 mod tests {
     use super::*;
     use proptest::prelude::*;
-    use identity_oracle::{IdentityOracle, IdentityOracleClient};
+    // Qualified so it does not shadow the shared `IdentityOracleClient` imported
+    // from `credit-oracle-types` at the crate root.
+    use identity_oracle::IdentityOracle;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
     use soroban_sdk::TryIntoVal;
 
