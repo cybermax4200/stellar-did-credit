@@ -6,6 +6,7 @@
 //! and active-count queries used by the credit-oracle.
 #[cfg(test)]
 extern crate std;
+pub use credit_oracle_types::CredentialType;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, String, Symbol, TryFromVal, Val, Vec,
@@ -206,11 +207,11 @@ pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 /// Maximum allowed CID length in bytes.
 pub const MAX_CID_LENGTH: u32 = 128;
 
-fn generic_credential_type(_env: &Env) -> Symbol {
+fn generic_credential_type(_env: &Env) -> CredentialType {
     symbol_short!("generic")
 }
 
-fn get_stored_credential_type(env: &Env, subject: &Address, vc_hash: &BytesN<32>) -> Symbol {
+fn get_stored_credential_type(env: &Env, subject: &Address, vc_hash: &BytesN<32>) -> CredentialType {
     env.storage()
         .persistent()
         .get(&DataKey::VCCredentialType(subject.clone(), vc_hash.clone()))
@@ -222,7 +223,7 @@ fn store_credential_type(
     env: &Env,
     subject: &Address,
     vc_hash: &BytesN<32>,
-    credential_type: Symbol,
+    credential_type: CredentialType,
 ) {
     let key = DataKey::VCCredentialType(subject.clone(), vc_hash.clone());
     env.storage().persistent().set(&key, &credential_type);
@@ -1070,7 +1071,7 @@ impl IdentityOracle {
     }
 
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
-    pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> Symbol {
+    pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> CredentialType {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
@@ -2778,5 +2779,36 @@ mod tests {
         
         let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash_101, &credential_type);
         assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
+    }
+
+    #[test]
+    fn test_get_vc_credential_type_returns_shared_credential_type() {
+        // The credit-oracle reads this function cross-contract and treats the
+        // result as a `credential_type::CredentialType`. Anchoring a typed VC
+        // and reading it back through the shared alias pins that contract: an
+        // untyped VC must default to `generic`, a typed one must return its
+        // label, and both must round-trip through the shared type.
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let untyped_hash = BytesN::from_array(&env, &[1u8; 32]);
+        client.anchor_vc(&issuer, &subject, &untyped_hash);
+
+        let typed_hash = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc_typed(&issuer, &subject, &typed_hash, &Symbol::new(&env, "kyc"));
+
+        let default_type: CredentialType = client.get_vc_credential_type(&subject, &untyped_hash);
+        assert_eq!(default_type, symbol_short!("generic"));
+
+        let stored_type: CredentialType = client.get_vc_credential_type(&subject, &typed_hash);
+        assert_eq!(stored_type, Symbol::new(&env, "kyc"));
     }
 }

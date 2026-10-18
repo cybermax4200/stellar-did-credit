@@ -4464,7 +4464,16 @@ describe("batchRevokeVC", () => {
         contractId: mockConfig.identityOracleId,
         method: "upgrade",
       });
+      // The contract verifies the stored admin through require_admin(), so the
+      // only argument is the wasm hash, sent as bytes rather than an address.
       expect(mockContractCalls[0].args).toHaveLength(1);
+      expect(mockContractCalls[0].args[0]).toMatchObject({
+        value: new Uint8Array(validWasmHash),
+        type: "bytes",
+      });
+      // The admin keypair is the transaction source, which is what authorizes
+      // the upgrade on-chain.
+      expect(mockGetAccount).toHaveBeenCalledWith(adminKeypair.publicKey());
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
 
@@ -4500,6 +4509,11 @@ describe("batchRevokeVC", () => {
         method: "upgrade",
       });
       expect(mockContractCalls[0].args).toHaveLength(1);
+      expect(mockContractCalls[0].args[0]).toMatchObject({
+        value: new Uint8Array(validWasmHash),
+        type: "bytes",
+      });
+      expect(mockGetAccount).toHaveBeenCalledWith(adminKeypair.publicKey());
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
 
@@ -4534,7 +4548,17 @@ describe("batchRevokeVC", () => {
         contractId: mockConfig.creditOracleId,
         method: "upgrade",
       });
+      // credit-oracle::upgrade takes (admin, new_wasm_hash) explicitly and
+      // calls admin.require_auth() itself.
       expect(mockContractCalls[0].args).toHaveLength(2);
+      expect(mockContractCalls[0].args[0]).toMatchObject({
+        address: adminKeypair.publicKey(),
+      });
+      expect(mockContractCalls[0].args[1]).toMatchObject({
+        value: new Uint8Array(validWasmHash),
+        type: "bytes",
+      });
+      expect(mockGetAccount).toHaveBeenCalledWith(adminKeypair.publicKey());
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
 
@@ -4551,6 +4575,65 @@ describe("batchRevokeVC", () => {
           "not-a-buffer" as unknown as Buffer,
         ),
       ).rejects.toThrow("newWasmHash must be a 32-byte Buffer");
+    });
+
+    it("rejects empty and oversized wasm hashes for all three contracts", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const emptyHash = Buffer.alloc(0);
+      const oversizedHash = Buffer.alloc(33, 1);
+      const hexString = "a".repeat(64);
+
+      for (const hash of [emptyHash, oversizedHash, hexString]) {
+        await expect(
+          sdk.upgradeIdentityOracle(adminKeypair as never, hash as Buffer),
+        ).rejects.toThrow("newWasmHash must be a 32-byte Buffer");
+        await expect(
+          sdk.upgradeRevocationRegistry(adminKeypair as never, hash as Buffer),
+        ).rejects.toThrow("newWasmHash must be a 32-byte Buffer");
+        await expect(
+          sdk.upgradeCreditOracle(adminKeypair as never, hash as Buffer),
+        ).rejects.toThrow("newWasmHash must be a 32-byte Buffer");
+      }
+
+      // A rejected hash must never reach the network.
+      expect(mockSimulateTransaction).not.toHaveBeenCalled();
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("upgradeIdentityOracle surfaces a non-admin simulation failure as IdentityOracleError", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        error: "HostError: Error(Contract, #2)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.upgradeIdentityOracle(adminKeypair as never, validWasmHash),
+      ).rejects.toThrow(IdentityOracleError);
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("upgradeCreditOracle surfaces a non-admin simulation failure as CreditOracleError", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        error: "HostError: Error(Contract, #2)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.upgradeCreditOracle(adminKeypair as never, validWasmHash),
+      ).rejects.toThrow(CreditOracleError);
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("upgradeRevocationRegistry surfaces a non-admin simulation failure as RevocationRegistryError", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        error: "HostError: Error(Contract, #2)",
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.upgradeRevocationRegistry(adminKeypair as never, validWasmHash),
+      ).rejects.toThrow(RevocationRegistryError);
+      expect(mockSendTransaction).not.toHaveBeenCalled();
     });
 
     it("throws typed ContractError if simulation fails", async () => {

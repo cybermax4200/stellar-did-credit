@@ -1750,3 +1750,45 @@ describe("Feeder governanceId validation (#954)", () => {
     ).toThrow(/must start with 'C' and be 56 characters/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// #930: revocationRegistryId config validation
+// ---------------------------------------------------------------------------
+
+describe("Feeder config: revocationRegistryId validation", () => {
+  const baseConfig: FeederConfig = { ...config };
+  const keypair = { publicKey: () => "GAAAA" } as unknown as Keypair;
+
+  it("throws when revocationRegistryId is not a valid C-address", () => {
+    expect(() => new Feeder({ ...baseConfig, revocationRegistryId: "not-a-contract" }, keypair)).toThrow(
+      /revocationRegistryId must be a valid Soroban contract ID \(C-address\)/,
+    );
+  });
+
+  it("throws when revocationRegistryId is a G-address", () => {
+    expect(
+      () =>
+        new Feeder(
+          { ...baseConfig, revocationRegistryId: "GBUQWP3BOUZX34ULNQG23RQ6F4YUSXHTQSXE7XDZT4A65XJLQRGEZSM" },
+          keypair,
+        ),
+    ).toThrow(/revocationRegistryId must be a valid Soroban contract ID/);
+  });
+
+  it("accepts a valid C-address", () => {
+    expect(
+      () =>
+        new Feeder(
+          {
+            ...baseConfig,
+            revocationRegistryId: "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABSC4",
+          },
+          keypair,
+        ),
+    ).not.toThrow();
+  });
+
+  it("accepts an omitted revocationRegistryId (optional field)", () => {
+    expect(() => new Feeder(baseConfig, keypair)).not.toThrow();
+  });
+});

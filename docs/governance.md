@@ -525,6 +525,7 @@ number of read-only simulations performed by the client.
 
 - The governance `admin` registers/deregisters voters, sets voter weights, sets the default quorum, and triggers `accept_oracle_admin`.
 - After `accept_oracle_admin` runs, the governance **contract address** is itself the credit-oracle admin. This means governance admin = credit-oracle admin (transitive).
+- Off-chain tools can discover the governance contract from the oracle: `credit-oracle.get_governance()` returns the contract address that accepted the admin role (`None` if the admin is an account). No new event is emitted; the existing `AdmAccept` event already fires on acceptance.
 - A malicious or compromised governance admin can:
   - Register themselves (or sybil addresses) with arbitrarily high vote weight and push through any quorum.
   - Deregister all opposing voters.

@@ -32,6 +32,7 @@ import {
   type RecencyDecayConfig,
   type CredentialTypeWeight,
   type IssuerTier,
+  type ProtocolConfig,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -98,6 +99,21 @@ function parseVcHash(hex: string): Buffer {
       "Error: vc-hash must be a 64-character hex string (32 bytes).",
     );
     process.exit(1);
+  }
+  return Buffer.from(hex, "hex");
+}
+
+/**
+ * Parses a hex-encoded WASM hash (as printed by `stellar contract upload`)
+ * into a 32-byte Buffer, or returns undefined after reporting the error.
+ */
+function parseWasmHash(hex: string): Buffer | undefined {
+  if (hex.length !== 64 || !/^[0-9a-fA-F]{64}$/.test(hex)) {
+    console.error(
+      "Error: wasm-hash must be a 64-character hex string (32 bytes).",
+    );
+    process.exit(1);
+    return undefined;
   }
   return Buffer.from(hex, "hex");
 }
@@ -2340,6 +2356,120 @@ for (const action of ["pause", "unpause"] as const) {
         }
       });
   }
+}
+
+// ---------------------------------------------------------------------------
+// Command group: upgrade
+// ---------------------------------------------------------------------------
+
+async function runUpgradeCommand(params: {
+  target: "identity" | "credit" | "revocation";
+  adminSecret: string;
+  wasmHashHex: string;
+  dryRun?: boolean;
+}): Promise<void> {
+  const { target, adminSecret, wasmHashHex } = params;
+  const network = program.opts().network as NetworkType;
+  const config = loadConfig(network);
+  const targetConfig: {
+    configKey: keyof ProtocolConfig;
+    contractName: string;
+  } = {
+    identity: { configKey: "identityOracleId", contractName: "identity-oracle" },
+    credit: { configKey: "creditOracleId", contractName: "credit-oracle" },
+    revocation: { configKey: "revocationRegistryId", contractName: "revocation-registry" },
+  }[target];
+  validateConfig(config, [targetConfig.configKey]);
+
+  const contractId = config[targetConfig.configKey]!;
+  const keypair = parseSecret(adminSecret);
+  const wasmHash = parseWasmHash(wasmHashHex);
+  if (!wasmHash) {
+    return;
+  }
+  if (params.dryRun) {
+    const contract = new Contract(contractId);
+    const hashScVal = nativeToScVal(new Uint8Array(wasmHash), {
+      type: "bytes",
+    });
+    // credit-oracle takes the admin address explicitly; the other two verify
+    // the stored admin through require_admin() and take only the hash.
+    const operation = contract.call(
+      "upgrade",
+      ...(target === "credit"
+        ? [new Address(keypair.publicKey()).toScVal(), hashScVal]
+        : [hashScVal]),
+    );
+    await simulateDryRun({
+      rpcUrl: config.rpcUrl,
+      networkPassphrase: config.networkPassphrase,
+      sourceKeypair: keypair,
+      contractId,
+      operation,
+      label: `upgrade ${targetConfig.contractName}`,
+    });
+    return;
+  }
+
+  const sdk = new StellarDIDCreditSDK(config);
+  let txHash: string;
+  if (target === "identity") {
+    txHash = await sdk.upgradeIdentityOracle(keypair, wasmHash);
+  } else if (target === "credit") {
+    txHash = await sdk.upgradeCreditOracle(keypair, wasmHash);
+  } else {
+    txHash = await sdk.upgradeRevocationRegistry(keypair, wasmHash);
+  }
+
+  console.log(`Upgrading ${targetConfig.contractName} on ${network}...`);
+  console.log(`  Admin:     ${keypair.publicKey()}`);
+  console.log(`  WASM Hash: ${wasmHashHex.toLowerCase()}`);
+  console.log();
+  console.log("Success!");
+  console.log(`  Transaction: ${txHash}`);
+}
+
+const upgrade = program
+  .command("upgrade")
+  .description(
+    "Upgrade contract WASM bytecode in-place, preserving the contract address " +
+      "and all stored state (admin only). Upgrades are irreversible once " +
+      "confirmed on-chain.",
+  );
+
+for (const target of ["identity", "credit", "revocation"] as const) {
+  upgrade
+    .command(target)
+    .description(`Upgrade the ${target} contract (admin only).`)
+    .argument("<admin-secret>", "Stellar secret key of the contract admin (starts with S)")
+    .argument("<wasm-hash>", "SHA-256 hash of the new WASM bytecode (64 hex characters)")
+    .option("--dry-run", "Simulate transaction execution without broadcasting")
+    .addHelpText(
+      "after",
+      `
+Example:
+  $ stellar-did upgrade ${target} S... 5c4146...
+`
+    )
+    .action(
+      async (
+        adminSecret: string,
+        wasmHash: string,
+        cmdOptions: { dryRun?: boolean },
+      ) => {
+        try {
+          await runUpgradeCommand({
+            target,
+            adminSecret,
+            wasmHashHex: wasmHash,
+            dryRun: cmdOptions.dryRun,
+          });
+        } catch (err) {
+          console.error("Failed:", err instanceof Error ? err.message : err);
+          process.exit(1);
+        }
+      },
+    );
 }
 
 // ---------------------------------------------------------------------------

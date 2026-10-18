@@ -903,6 +903,36 @@ mod tests {
         assert_eq!(list2.get(0).unwrap(), hash_d);
     }
 
+    /// Issue #933: once the governance contract accepts the credit-oracle admin
+    /// role through `accept_oracle_admin`, `credit-oracle.get_governance()`
+    /// reports it (the reverse lookup of governance's stored credit-oracle).
+    #[test]
+    fn test_get_governance_reports_governance_after_accept_oracle_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+        assert_eq!(credit.get_governance(), None);
+
+        credit.propose_new_admin(&gov_id);
+        assert_eq!(
+            credit.get_governance(),
+            None,
+            "proposing governance as admin must not record it yet"
+        );
+
+        gov.accept_oracle_admin();
+        assert_eq!(credit.get_governance(), Some(gov_id.clone()));
+        assert_eq!(credit.get_admin(), Some(gov_id));
+    }
+
     /// Integration test: create a proposal, cancel it, then verify execute fails
     /// with ProposalAlreadyCancelled.
     ///

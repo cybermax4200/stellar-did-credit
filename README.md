@@ -132,6 +132,7 @@ Computes and stores credit scores based on on-chain data.
 | `propose_weights(weights)`                           | Proposes new weights with 24h timelock             |
 | `apply_weights()`                                    | Applies pending weights after timelock expires     |
 | `get_scoring_weights()`                              | Returns current scoring weights                    |
+| `get_governance()`                                   | Returns the governance contract holding the admin role, or None |
 
 ### governance
 

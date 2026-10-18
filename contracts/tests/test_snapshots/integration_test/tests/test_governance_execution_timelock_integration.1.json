@@ -307,6 +307,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "GovernanceId"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "StorageVersion"
                             }
                           ]

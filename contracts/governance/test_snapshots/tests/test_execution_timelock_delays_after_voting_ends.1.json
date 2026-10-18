@@ -470,6 +470,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "GovernanceId"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "PendingWeights"
                             }
                           ]

@@ -125,7 +125,34 @@ export interface FeederConfig {
    * wait for a complete pass on the next cycle.
    */
   allowPartialStats?: boolean;
-  /** Whether to skip legacy set_vc_count calls when identity oracle is configured */
+  /**
+   * Whether to skip the legacy `set_vc_count` write on every sync cycle.
+   *
+   * Defaults to `false`, which means the feeder submits `set_vc_count` unless
+   * the credit-oracle reports that a cross-contract identity-oracle is
+   * configured (checked via `get_identity_oracle` on each cycle). When that
+   * lookup is configured, the count is read from the identity-oracle at
+   * `compute_score` time and the feeder's write is skipped automatically —
+   * setting this flag then makes no difference.
+   *
+   * Set to `true` to opt out of the legacy write explicitly, before the
+   * credit-oracle's identity-oracle is configured. This is useful for
+   * operators who have already migrated scoring to the cross-contract path
+   * and want the feeder to stop issuing the legacy write immediately.
+   *
+   * Do not use this as a substitute for configuring the identity-oracle on
+   * the credit-oracle: while the oracle is unconfigured, `compute_score`
+   * still falls back to the cached `vc_count`, and skipping feeder updates
+   * leaves that cached value stale. See `docs/set_vc_count-migration.md`.
+   *
+   * @example
+   * ```ts
+   * const config: FeederConfig = {
+   *   ...existingConfig,
+   *   skipLegacyVcCount: true, // never submit set_vc_count
+   * };
+   * ```
+   */
   skipLegacyVcCount?: boolean;
   /** Max consecutive failures before a subject enters dead-letter state (default: 5) */
   maxConsecutiveFailures?: number;
@@ -877,6 +904,20 @@ export class Feeder {
     private config: FeederConfig,
     private feederKeypair: Keypair,
   ) {
+    // #930: validate revocationRegistryId at construction time so both the CLI
+    // and programmatic callers (`new Feeder(config, keypair)`) fail fast on
+    // a malformed address. The CLI's own REVOCATION_REGISTRY_ID check remains
+    // for env-var diagnostics, but this is the enforcement point every
+    // instance passes through.
+    if (
+      config.revocationRegistryId !== undefined &&
+      !isValidSorobanContractId(config.revocationRegistryId)
+    ) {
+      throw new Error(
+        `revocationRegistryId must be a valid Soroban contract ID (C-address): "${config.revocationRegistryId}"`,
+      );
+    }
+
     // #954: validate governanceId at construction time so both the CLI
     // and programmatic callers (`new Feeder(config, keypair)`) fail fast on
     // a malformed address. The CLI's own GOVERNANCE_ID check remains for
