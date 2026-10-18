@@ -31,6 +31,7 @@ import {
   type TxStats,
   type RecencyDecayConfig,
   type CredentialTypeWeight,
+  type IssuerTier,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -399,6 +400,36 @@ function printCredentialTypeWeights(
     console.log(`│ ${typeCol} │ ${weightCol} │ ${multCol} │`);
   }
   console.log("└───────────────────────┴──────────────┴────────────┘");
+  console.log();
+}
+
+function formatIssuerTierMultiplier(bps: number): string {
+  return `${bps} bps = ${(bps / 100).toFixed(2)}x`;
+}
+
+function printIssuerTier(issuer: string, bps: number): void {
+  console.log();
+  console.log(`  Issuer:     ${issuer}`);
+  console.log(`  Tier (bps): ${bps}`);
+  console.log(`  Multiplier: ${formatIssuerTierMultiplier(bps)}`);
+  console.log();
+}
+
+function printIssuerTiers(tiers: IssuerTier[]): void {
+  if (tiers.length === 0) {
+    console.log("No issuers registered.");
+    return;
+  }
+
+  console.log();
+  console.log(
+    "Issuer                                                   │ Tier (bps) │ Multiplier",
+  );
+  for (const tier of tiers) {
+    console.log(
+      `${tier.issuer.padEnd(56)} │ ${String(tier.bps).padStart(10)} │ ${formatIssuerTierMultiplier(tier.bps)}`,
+    );
+  }
   console.log();
 }
 
