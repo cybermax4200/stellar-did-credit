@@ -1073,24 +1073,32 @@ describe("StellarDIDCreditSDK", () => {
       });
 
       it("stops polling after unsubscribe", async () => {
-        mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
+        mockGetEvents
+          .mockResolvedValueOnce({ latestLedger: 100, events: [] })
+          .mockResolvedValueOnce({ latestLedger: 101, events: [] })
+          .mockResolvedValue({
+            latestLedger: 102,
+            events: [{ ...disputeEvent("DsptFild", subjectAddress, "tx_stats"), ledger: 102 }],
+          });
 
         const sdk = new StellarDIDCreditSDK({
           ...mockConfig,
           pollIntervalMs: 10,
         });
-        const unsubscribe = sdk.subscribeToDisputeEvents(
-          subjectAddress,
-          jest.fn(),
-        );
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
         expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        await jest.advanceTimersByTimeAsync(10);
+        expect(mockGetEvents).toHaveBeenCalledTimes(2);
+        expect(jest.getTimerCount()).toBe(1);
 
         unsubscribe();
+        expect(jest.getTimerCount()).toBe(0);
         await jest.advanceTimersByTimeAsync(30);
-        expect(mockGetEvents).toHaveBeenCalledTimes(1);
+        expect(mockGetEvents).toHaveBeenCalledTimes(2);
+        expect(callback).not.toHaveBeenCalled();
       });
     });
 
