@@ -95,6 +95,13 @@ export interface GovernanceProposal {
   quorumRequired: bigint;
 }
 
+/** An issuer and its configured trust multiplier, returned by listIssuerTiers. */
+export interface IssuerTier {
+  issuer: string;
+  bps: number;
+  multiplier: string;
+}
+
 export interface IdentityProtocolStats {
   totalDIDsAnchored: number;
   totalVCsAnchored: number;
