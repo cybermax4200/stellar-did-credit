@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `credit-oracle-types`: `CredentialType` (an alias for `Symbol`) now defines the credential type label shared by both contracts, along with an `IdentityOracleClient::get_vc_credential_type` helper. `identity-oracle` imports the alias for `get_vc_credential_type`, its storage key and its internal helpers, and `credit-oracle` uses the same alias for its per-type weight key and the cross-contract call, so the two sides of that call share one definition instead of two bare `Symbol`s (#955)
+- `packages/cli` (`@stellar-did-credit/cli`): added an `upgrade` command group with `identity`, `credit`, and `revocation` subcommands to upgrade contract WASM bytecode in-place (admin only). Each takes `<admin-secret> <wasm-hash>`, validates that the hash is 64 hex characters (32 bytes), and supports `--dry-run` to simulate the upgrade without broadcasting. Contract upgrades are irreversible once confirmed on-chain (#963)
 - Feeder: `/health` now includes `deadLetterCount` and `deadLetterSubjects`, refreshed after each polling cycle to reflect failures and recovery (#953).
 - `packages/cli` (`@stellar-did-credit/cli`): added `cooldown` command to view compute score cooldown in ledgers and approximate wall-clock time from the credit-oracle with formatted table output and `--json` support (#949)
 - `packages/cli` (`@stellar-did-credit/cli`): added `recency-decay` command to view recency decay configuration (`enabled`, `decay_bps_per_day`, `min_recency_bps`) from the credit-oracle with formatted table output and `--json` support (#948)
