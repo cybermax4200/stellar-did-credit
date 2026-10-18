@@ -989,6 +989,49 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
+      it("delivers a mixed dispute batch in order for the requested subject", async () => {
+        mockGetEvents.mockResolvedValueOnce({
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", otherSubject, "tx_stats"),
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRslv", otherSubject, "repayment"),
+            disputeEvent("DsptRslv", subjectAddress, "tx_stats"),
+            disputeEvent("DsptRjct", otherSubject, "vc_count"),
+            disputeEvent("DsptRjct", subjectAddress, "repayment"),
+          ],
+        });
+        const sdk = new StellarDIDCreditSDK(mockConfig);
+        const received: DisputeEvent[] = [];
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, (event) =>
+          received.push(event),
+        );
+
+        await jest.advanceTimersByTimeAsync(0);
+
+        expect(received).toEqual([
+          {
+            eventType: "DsptFild",
+            subject: subjectAddress,
+            inputKey: "tx_stats",
+            status: "Pending",
+          },
+          {
+            eventType: "DsptRslv",
+            subject: subjectAddress,
+            inputKey: "tx_stats",
+            status: "Resolved",
+          },
+          {
+            eventType: "DsptRjct",
+            subject: subjectAddress,
+            inputKey: "repayment",
+            status: "Rejected",
+          },
+        ]);
+        unsubscribe();
+      });
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
 
