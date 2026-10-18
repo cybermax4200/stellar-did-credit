@@ -900,13 +900,17 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
-      it("ignores disputes from other subjects and unrelated topics", async () => {
+      it.each([
+        ["DsptFild", "Pending"],
+        ["DsptRslv", "Resolved"],
+        ["DsptRjct", "Rejected"],
+      ])("filters %s disputes by subject", async (eventType, status) => {
         mockGetEvents.mockResolvedValueOnce({
           latestLedger: 100,
           events: [
-            disputeEvent("DsptFild", otherSubject, "tx_stats"),
-            disputeEvent("Score", subjectAddress, "tx_stats"),
-            disputeEvent("DsptFild", subjectAddress, "vc_count"),
+            disputeEvent(eventType, otherSubject, "tx_stats"),
+            disputeEvent(eventType, subjectAddress, "vc_count"),
+            disputeEvent(eventType, otherSubject, "repayment"),
           ],
         });
 
@@ -922,10 +926,10 @@ describe("StellarDIDCreditSDK", () => {
 
         expect(callback).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledWith({
-          eventType: "DsptFild",
+          eventType,
           subject: subjectAddress,
           inputKey: "vc_count",
-          status: "Pending",
+          status,
         });
 
         unsubscribe();
