@@ -1149,6 +1149,54 @@ describe("StellarDIDCreditSDK", () => {
         expect(jest.getTimerCount()).toBe(0);
       });
 
+      it("keeps another subject subscribed when one subscription is stopped", async () => {
+        const initialResponse = {
+          latestLedger: 100,
+          events: [
+            disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+            disputeEvent("DsptFild", otherSubject, "repayment"),
+          ],
+        };
+        mockGetEvents
+          .mockResolvedValueOnce(initialResponse)
+          .mockResolvedValueOnce(initialResponse)
+          .mockResolvedValueOnce({
+            latestLedger: 101,
+            events: [
+              { ...disputeEvent("DsptRslv", subjectAddress, "tx_stats"), ledger: 101 },
+              { ...disputeEvent("DsptRjct", otherSubject, "repayment"), ledger: 101 },
+            ],
+          });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const firstCallback = jest.fn();
+        const secondCallback = jest.fn();
+        const stopFirst = sdk.subscribeToDisputeEvents(subjectAddress, firstCallback);
+        const stopSecond = sdk.subscribeToDisputeEvents(otherSubject, secondCallback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(firstCallback).toHaveBeenCalledTimes(1);
+        expect(secondCallback).toHaveBeenCalledTimes(1);
+        expect(jest.getTimerCount()).toBe(2);
+
+        stopFirst();
+        expect(jest.getTimerCount()).toBe(1);
+        await jest.advanceTimersByTimeAsync(10);
+        expect(firstCallback).toHaveBeenCalledTimes(1);
+        expect(secondCallback).toHaveBeenCalledTimes(2);
+        expect(secondCallback).toHaveBeenLastCalledWith({
+          eventType: "DsptRjct",
+          subject: otherSubject,
+          inputKey: "repayment",
+          status: "Rejected",
+        });
+        expect(mockGetEvents).toHaveBeenCalledTimes(3);
+
+        stopSecond();
+        await jest.advanceTimersByTimeAsync(30);
+        expect(mockGetEvents).toHaveBeenCalledTimes(3);
+        expect(jest.getTimerCount()).toBe(0);
+      });
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents
           .mockResolvedValueOnce({ latestLedger: 100, events: [] })
