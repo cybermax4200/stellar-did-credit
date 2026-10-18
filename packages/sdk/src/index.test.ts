@@ -856,8 +856,7 @@ describe("StellarDIDCreditSDK", () => {
           received.push(event),
         );
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
         expect(received).toEqual([expected]);
 
@@ -867,8 +866,11 @@ describe("StellarDIDCreditSDK", () => {
       it("queries all three dispute topics on the credit-oracle in one poll", async () => {
         mockGetEvents.mockResolvedValueOnce({ latestLedger: 100, events: [] });
 
+        const creditOracleId =
+          "CCREDITORACLEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA";
         const sdk = new StellarDIDCreditSDK({
           ...mockConfig,
+          creditOracleId,
           pollIntervalMs: 10,
         });
         const unsubscribe = sdk.subscribeToDisputeEvents(
@@ -876,8 +878,7 @@ describe("StellarDIDCreditSDK", () => {
           jest.fn(),
         );
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
         expect(mockGetEvents).toHaveBeenCalledTimes(1);
         expect(mockGetEvents).toHaveBeenCalledWith(
@@ -886,7 +887,7 @@ describe("StellarDIDCreditSDK", () => {
             filters: [
               {
                 type: "contract",
-                contractIds: [mockConfig.creditOracleId],
+                contractIds: [creditOracleId],
                 topics: [
                   ["symbol:DsptFild"],
                   ["symbol:DsptRslv"],
@@ -921,8 +922,7 @@ describe("StellarDIDCreditSDK", () => {
         const callback = jest.fn();
         const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
 
-        await Promise.resolve();
-        await Promise.resolve();
+        await jest.advanceTimersByTimeAsync(0);
 
         expect(callback).toHaveBeenCalledTimes(1);
         expect(callback).toHaveBeenCalledWith({
