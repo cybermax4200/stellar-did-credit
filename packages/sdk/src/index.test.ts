@@ -1032,6 +1032,46 @@ describe("StellarDIDCreditSDK", () => {
         unsubscribe();
       });
 
+      it.each([
+        ["DsptRslv", "Resolved"],
+        ["DsptRjct", "Rejected"],
+      ])("delivers filing followed by %s across polls", async (eventType, status) => {
+        mockGetEvents
+          .mockResolvedValueOnce({
+            latestLedger: 100,
+            events: [disputeEvent("DsptFild", subjectAddress, "tx_stats")],
+          })
+          .mockResolvedValueOnce({
+            latestLedger: 101,
+            events: [{ ...disputeEvent(eventType, subjectAddress, "tx_stats"), ledger: 101 }],
+          });
+        const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
+        const callback = jest.fn();
+        const unsubscribe = sdk.subscribeToDisputeEvents(subjectAddress, callback);
+
+        await jest.advanceTimersByTimeAsync(0);
+        expect(callback).toHaveBeenCalledTimes(1);
+        expect(callback).toHaveBeenNthCalledWith(1, {
+          eventType: "DsptFild",
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status: "Pending",
+        });
+
+        await jest.advanceTimersByTimeAsync(10);
+        expect(callback).toHaveBeenCalledTimes(2);
+        expect(callback).toHaveBeenNthCalledWith(2, {
+          eventType,
+          subject: subjectAddress,
+          inputKey: "tx_stats",
+          status,
+        });
+        expect(mockGetEvents).toHaveBeenNthCalledWith(2,
+          expect.objectContaining({ startLedger: 101 }),
+        );
+        unsubscribe();
+      });
+
       it("stops polling after unsubscribe", async () => {
         mockGetEvents.mockResolvedValue({ latestLedger: 100, events: [] });
 
