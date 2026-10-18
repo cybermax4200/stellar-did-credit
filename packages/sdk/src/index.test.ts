@@ -967,7 +967,12 @@ describe("StellarDIDCreditSDK", () => {
           .mockResolvedValueOnce({ latestLedger: 100, events: [] })
           .mockResolvedValueOnce({
             latestLedger: 101,
-            events: [{ ...disputeEvent("DsptFild", subjectAddress, "tx_stats"), ledger: 101 }],
+            events: [
+              {
+                ...disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+            ],
           });
         const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
         const callback = jest.fn();
@@ -1043,7 +1048,12 @@ describe("StellarDIDCreditSDK", () => {
           })
           .mockResolvedValueOnce({
             latestLedger: 101,
-            events: [{ ...disputeEvent(eventType, subjectAddress, "tx_stats"), ledger: 101 }],
+            events: [
+              {
+                ...disputeEvent(eventType, subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+            ],
           });
         const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
         const callback = jest.fn();
@@ -1066,7 +1076,8 @@ describe("StellarDIDCreditSDK", () => {
           inputKey: "tx_stats",
           status,
         });
-        expect(mockGetEvents).toHaveBeenNthCalledWith(2,
+        expect(mockGetEvents).toHaveBeenNthCalledWith(
+          2,
           expect.objectContaining({ startLedger: 101 }),
         );
         unsubscribe();
@@ -1163,15 +1174,27 @@ describe("StellarDIDCreditSDK", () => {
           .mockResolvedValueOnce({
             latestLedger: 101,
             events: [
-              { ...disputeEvent("DsptRslv", subjectAddress, "tx_stats"), ledger: 101 },
-              { ...disputeEvent("DsptRjct", otherSubject, "repayment"), ledger: 101 },
+              {
+                ...disputeEvent("DsptRslv", subjectAddress, "tx_stats"),
+                ledger: 101,
+              },
+              {
+                ...disputeEvent("DsptRjct", otherSubject, "repayment"),
+                ledger: 101,
+              },
             ],
           });
         const sdk = new StellarDIDCreditSDK({ ...mockConfig, pollIntervalMs: 10 });
         const firstCallback = jest.fn();
         const secondCallback = jest.fn();
-        const stopFirst = sdk.subscribeToDisputeEvents(subjectAddress, firstCallback);
-        const stopSecond = sdk.subscribeToDisputeEvents(otherSubject, secondCallback);
+        const stopFirst = sdk.subscribeToDisputeEvents(
+          subjectAddress,
+          firstCallback,
+        );
+        const stopSecond = sdk.subscribeToDisputeEvents(
+          otherSubject,
+          secondCallback,
+        );
 
         await jest.advanceTimersByTimeAsync(0);
         expect(firstCallback).toHaveBeenCalledTimes(1);
@@ -1203,7 +1226,12 @@ describe("StellarDIDCreditSDK", () => {
           .mockResolvedValueOnce({ latestLedger: 101, events: [] })
           .mockResolvedValue({
             latestLedger: 102,
-            events: [{ ...disputeEvent("DsptFild", subjectAddress, "tx_stats"), ledger: 102 }],
+            events: [
+              {
+                ...disputeEvent("DsptFild", subjectAddress, "tx_stats"),
+                ledger: 102,
+              },
+            ],
           });
 
         const sdk = new StellarDIDCreditSDK({
