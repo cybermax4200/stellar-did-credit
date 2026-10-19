@@ -1433,50 +1433,62 @@ describe("StellarDIDCreditSDK", () => {
       });
     });
 
-    it("safely ignores a duplicate issuer and VC hash pair", async () => {
+    it("returns a typed error for a duplicate anchor_vc simulation response", async () => {
       const sdk = new StellarDIDCreditSDK(mockConfig);
       const vcHash = Buffer.alloc(32, 9);
-      mockSendTransaction
-        .mockResolvedValueOnce({
-          status: "PENDING",
-          hash: "first-vc-hash",
-        })
-        .mockResolvedValueOnce({
-          status: "PENDING",
-          hash: "duplicate-vc-hash",
-        });
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #6)",
+      });
 
       await expect(
         sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
-      ).resolves.toBe("first-vc-hash");
-      await expect(
-        sdk.issueVC(issuerKeypair as never, subjectAddress, vcHash),
-      ).resolves.toBe("duplicate-vc-hash");
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "DUPLICATE_VC",
+        message: "This verifiable credential is already anchored for the subject",
+      });
 
-      expect(mockSendTransaction).toHaveBeenCalledTimes(2);
-      expect(mockGetTransaction).toHaveBeenCalledWith("first-vc-hash");
-      expect(mockGetTransaction).toHaveBeenCalledWith("duplicate-vc-hash");
-      expect(mockContractCalls).toHaveLength(2);
-      expect(mockContractCalls[0]).toMatchObject({
-        method: "anchor_vc",
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+      expect(mockGetTransaction).not.toHaveBeenCalled();
+    });
+
+    it("handles duplicate anchor_vc_typed simulation responses consistently", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #6)",
       });
-      expect(mockContractCalls[1]).toMatchObject({
-        method: "anchor_vc",
+
+      await expect(
+        sdk.issueVC(
+          issuerKeypair as never,
+          subjectAddress,
+          Buffer.alloc(32, 10),
+          "kyc",
+        ),
+      ).rejects.toMatchObject({
+        name: "SDKError",
+        code: "DUPLICATE_VC",
       });
-      expect(mockContractCalls[0]?.args[0]).toEqual(
-        mockContractCalls[1]?.args[0],
-      );
-      expect(mockContractCalls[0]?.args[1]).toEqual(
-        mockContractCalls[1]?.args[1],
-      );
-      expect(mockContractCalls[0]?.args[2]).toMatchObject({
-        type: "bytes",
-        value: new Uint8Array(vcHash),
+
+      expect(mockContractCalls[0]).toMatchObject({ method: "anchor_vc_typed" });
+      expect(mockSendTransaction).not.toHaveBeenCalled();
+    });
+
+    it("keeps unrelated identity-oracle simulation errors typed and failing", async () => {
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      mockSimulateTransaction.mockResolvedValue({
+        error: "Error(Contract, #3)",
       });
-      expect(mockContractCalls[1]?.args[2]).toMatchObject({
-        type: "bytes",
-        value: new Uint8Array(vcHash),
+
+      await expect(
+        sdk.issueVC(issuerKeypair as never, subjectAddress, Buffer.alloc(32, 11)),
+      ).rejects.toMatchObject({
+        name: "IdentityOracleError",
+        code: 3,
+        message: "IssuerNotRegistered (code 3)",
       });
+
+      expect(mockSendTransaction).not.toHaveBeenCalled();
     });
 
     it("retries TRY_AGAIN_LATER responses before confirming the transaction", async () => {

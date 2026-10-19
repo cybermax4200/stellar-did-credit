@@ -147,6 +147,7 @@ const DISPUTE_EVENT_TOPICS: DisputeEventType[] = [
 
 export type SDKErrorCode =
   | "INVALID_VC_HASH"
+  | "DUPLICATE_VC"
   | "MISSING_REVOCATION_REGISTRY"
   | "NOT_REGISTERED_ISSUER"
   | "TRANSACTION_FAILED"
@@ -1203,6 +1204,12 @@ export class StellarDIDCreditSDK {
     const sim = await server.simulateTransaction(tx);
 
     if (SorobanRpc.Api.isSimulationError(sim)) {
+      if (parseContractErrorCode(sim.error) === 6) {
+        throw new SDKError(
+          "DUPLICATE_VC",
+          "This verifiable credential is already anchored for the subject",
+        );
+      }
       throwContractError(sim.error, "identity-oracle");
     }
 
