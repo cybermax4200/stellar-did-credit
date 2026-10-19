@@ -2128,6 +2128,61 @@ mod tests {
         );
     }
 
+    /// Deploy credit-oracle alongside identity-oracle, then verify the default
+    /// compute cooldown blocks a rapid re-computation and allows it once the
+    /// ledger advances past the cooldown window.
+    #[test]
+    fn test_compute_score_cooldown_with_identity_oracle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmCooldownTestDID");
+        identity.anchor_did(&subject, &cid);
+        let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        // Deploy credit-oracle with identity-oracle as its live data source.
+        credit.set_identity_oracle(&admin, &identity_id);
+        assert_eq!(credit.get_compute_cooldown_ledgers(), 1);
+
+        let first_score = credit.compute_score(&subject);
+        let first_ledger = env.ledger().sequence();
+        let record = credit.get_score(&subject).unwrap();
+        assert_eq!(record.computed_at_ledger, first_ledger);
+
+        // Recomputing in the same ledger must fail with ComputeCooldownActive.
+        let result = credit.try_compute_score(&subject);
+        assert_eq!(
+            result,
+            Err(Ok(CreditOracleError::ComputeCooldownActive)),
+            "expected ComputeCooldownActive while cooldown is active"
+        );
+
+        // Advance one ledger past the cooldown window (default 1 ledger).
+        env.ledger().set_sequence_number(first_ledger + 1);
+
+        // Recomputation now succeeds and returns the same score for unchanged inputs.
+        let second_score = credit.compute_score(&subject);
+        assert_eq!(
+            second_score, first_score,
+            "expected recomputation to succeed with unchanged inputs"
+        );
+    }
+
     /// cooldown = 0: two compute_score calls within the same ledger both succeed.
     #[test]
     fn test_compute_score_no_cooldown_allows_same_ledger() {
