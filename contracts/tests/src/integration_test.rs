@@ -2183,6 +2183,55 @@ mod tests {
         );
     }
 
+    /// identity-oracle's `get_last_state_change_ledger` advances on mutations and
+    /// credit-oracle's `get_score` uses it (cross-contract) to flag stale scores.
+    #[test]
+    fn test_last_state_change_ledger_drives_stale_detection() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        assert_eq!(identity.get_last_state_change_ledger(&subject), None);
+
+        env.ledger().set_sequence_number(10);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleDID"));
+        let did_ledger = identity.get_last_state_change_ledger(&subject).unwrap();
+        assert_eq!(did_ledger, 10);
+
+        env.ledger().set_sequence_number(20);
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[1u8; 32]));
+        let vc_ledger = identity.get_last_state_change_ledger(&subject).unwrap();
+        assert_eq!(vc_ledger, 20);
+        assert!(vc_ledger > did_ledger, "ledger should increase after VC anchor");
+
+        // Score computed after the last mutation is fresh.
+        env.ledger().set_sequence_number(30);
+        credit.compute_score(&subject);
+        assert!(!credit.get_score(&subject).unwrap().stale);
+
+        // A later identity mutation makes the cached score stale.
+        env.ledger().set_sequence_number(40);
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[2u8; 32]));
+        assert_eq!(identity.get_last_state_change_ledger(&subject), Some(40));
+        assert!(
+            credit.get_score(&subject).unwrap().stale,
+            "score computed before the latest state change must be stale"
+        );
+    }
+
     /// cooldown = 0: two compute_score calls within the same ledger both succeed.
     #[test]
     fn test_compute_score_no_cooldown_allows_same_ledger() {
