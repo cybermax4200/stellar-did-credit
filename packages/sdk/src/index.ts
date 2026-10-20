@@ -2166,13 +2166,20 @@ export class StellarDIDCreditSDK {
    * Fetch the list of verifiable credential anchors for a subject from the
    * identity-oracle, including revoked entries.
    *
-   * Uses a read-only simulation (no signing required).
+   * Uses a read-only simulation (no signing required). Supports client-side
+   * pagination via optional `limit` and `offset` parameters.
    *
    * @param subjectAddress - Stellar G... address of the subject
+   * @param limit - Optional maximum number of records to return
+   * @param offset - Optional starting index offset for pagination
    * @returns Array of VCRecord entries, or an empty array if the subject has
    *          no anchored credentials
    */
-  async getVCs(subjectAddress: string): Promise<VCRecord[]> {
+  async getVCs(
+    subjectAddress: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<VCRecord[]> {
     const server = this.server;
     const contract = new Contract(this.config.identityOracleId);
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -2202,19 +2209,31 @@ export class StellarDIDCreditSDK {
       throw new Error("No return value in simulation result");
     }
 
-    return parseVCRecordList(resultScVal);
+    const records = parseVCRecordList(resultScVal);
+    const startIndex = offset !== undefined ? Math.max(0, offset) : 0;
+    if (limit !== undefined && limit >= 0) {
+      return records.slice(startIndex, startIndex + limit);
+    }
+    return startIndex > 0 ? records.slice(startIndex) : records;
   }
 
   /**
    * List all verifiable credential records for a subject, including revoked ones.
    *
-   * Alias for `getVCs` for CLI/SDK consumers expecting `listVCs`.
+   * Alias for `getVCs` for CLI/SDK consumers expecting `listVCs`. Supports client-side
+   * pagination via optional `limit` and `offset` parameters.
    *
    * @param subjectAddress - Stellar G... address of the subject
+   * @param limit - Optional maximum number of records to return
+   * @param offset - Optional starting index offset for pagination
    * @returns Array of VCRecord entries, or an empty array if none exist
    */
-  async listVCs(subjectAddress: string): Promise<VCRecord[]> {
-    return this.getVCs(subjectAddress);
+  async listVCs(
+    subjectAddress: string,
+    limit?: number,
+    offset?: number,
+  ): Promise<VCRecord[]> {
+    return this.getVCs(subjectAddress, limit, offset);
   }
 
   /**

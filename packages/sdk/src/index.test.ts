@@ -2322,6 +2322,62 @@ describe("StellarDIDCreditSDK", () => {
       expect(result).toEqual([]);
     });
 
+    it("supports client-side pagination with limit and offset", async () => {
+      const records = [
+        {
+          vc_hash: Buffer.alloc(32, 1),
+          issuer: issuerKeypair.publicKey(),
+          anchored_at: 1_700_000_001,
+          revoked: false,
+        },
+        {
+          vc_hash: Buffer.alloc(32, 2),
+          issuer: issuerKeypair.publicKey(),
+          anchored_at: 1_700_000_002,
+          revoked: false,
+        },
+        {
+          vc_hash: Buffer.alloc(32, 3),
+          issuer: issuerKeypair.publicKey(),
+          anchored_at: 1_700_000_003,
+          revoked: true,
+        },
+        {
+          vc_hash: Buffer.alloc(32, 4),
+          issuer: issuerKeypair.publicKey(),
+          anchored_at: 1_700_000_004,
+          revoked: false,
+        },
+      ];
+
+      mockSimulateTransaction.mockResolvedValue({
+        result: { retval: { value: records } },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+
+      // Limit only
+      const limitOnly = await sdk.getVCs(subjectAddress, 2);
+      expect(limitOnly).toHaveLength(2);
+      expect(limitOnly[0]?.anchoredAt).toBe(1_700_000_001);
+      expect(limitOnly[1]?.anchoredAt).toBe(1_700_000_002);
+
+      // Offset only
+      const offsetOnly = await sdk.getVCs(subjectAddress, undefined, 2);
+      expect(offsetOnly).toHaveLength(2);
+      expect(offsetOnly[0]?.anchoredAt).toBe(1_700_000_003);
+      expect(offsetOnly[1]?.anchoredAt).toBe(1_700_000_004);
+
+      // Both limit and offset
+      const paginated = await sdk.getVCs(subjectAddress, 1, 1);
+      expect(paginated).toHaveLength(1);
+      expect(paginated[0]?.anchoredAt).toBe(1_700_000_002);
+
+      // Offset out of bounds
+      const outOfBounds = await sdk.getVCs(subjectAddress, 10, 100);
+      expect(outOfBounds).toEqual([]);
+    });
+
     it("throws on simulation error", async () => {
       mockSimulateTransaction.mockResolvedValue({ error: "rpc error" });
 
@@ -2366,6 +2422,35 @@ describe("StellarDIDCreditSDK", () => {
       expect(result).toHaveLength(2);
       expect(result[1]?.revoked).toBe(true);
       expect(mockLastContractCall?.method).toBe("get_vc_details");
+    });
+
+    it("forwards limit and offset pagination parameters to getVCs", async () => {
+      mockSimulateTransaction.mockResolvedValue({
+        result: {
+          retval: {
+            value: [
+              {
+                vc_hash: Buffer.alloc(32, 1),
+                issuer: issuerKeypair.publicKey(),
+                anchored_at: 1_700_000_001,
+                revoked: false,
+              },
+              {
+                vc_hash: Buffer.alloc(32, 2),
+                issuer: issuerKeypair.publicKey(),
+                anchored_at: 1_700_000_002,
+                revoked: false,
+              },
+            ],
+          },
+        },
+      });
+
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const result = await sdk.listVCs(subjectAddress, 1, 1);
+
+      expect(result).toHaveLength(1);
+      expect(result[0]?.anchoredAt).toBe(1_700_000_002);
     });
   });
 
