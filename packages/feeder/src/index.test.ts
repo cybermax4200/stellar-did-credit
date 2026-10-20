@@ -2319,3 +2319,36 @@ describe("Feeder config: revocationRegistryId optional", () => {
     expect(() => new Feeder(baseConfig, keypair)).not.toThrow();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #968: eventPollIntervalMs config validation
+// ---------------------------------------------------------------------------
+
+describe("Feeder config: eventPollIntervalMs validation", () => {
+  const baseConfig: FeederConfig = { ...config };
+  const keypair = { publicKey: () => "GAAAA" } as unknown as Keypair;
+
+  it("throws when eventPollIntervalMs is below the minimum (0)", () => {
+    expect(() => new Feeder({ ...baseConfig, eventPollIntervalMs: 0 }, keypair)).toThrow(
+      /eventPollIntervalMs must be at least 1000/,
+    );
+  });
+
+  it("throws when eventPollIntervalMs is below the minimum (999)", () => {
+    expect(() => new Feeder({ ...baseConfig, eventPollIntervalMs: 999 }, keypair)).toThrow(
+      /eventPollIntervalMs must be at least 1000 \(1 second\)/,
+    );
+  });
+
+  it("accepts eventPollIntervalMs at the minimum boundary (1000)", () => {
+    expect(() => new Feeder({ ...baseConfig, eventPollIntervalMs: 1000 }, keypair)).not.toThrow();
+  });
+
+  it("accepts eventPollIntervalMs above the minimum", () => {
+    expect(() => new Feeder({ ...baseConfig, eventPollIntervalMs: 5000 }, keypair)).not.toThrow();
+  });
+
+  it("accepts an omitted eventPollIntervalMs (optional field)", () => {
+    expect(() => new Feeder(baseConfig, keypair)).not.toThrow();
+  });
+});

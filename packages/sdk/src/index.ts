@@ -4145,12 +4145,22 @@ function parseDisputeRecord(native: unknown): DisputeRecord {
     throw new Error("Dispute query returned an invalid record");
   }
   const raw = native as Record<string, unknown>;
+  let status: DisputeStatus;
+  const rawStatus = raw["status"];
+  if (typeof rawStatus === "string") {
+    status = rawStatus as DisputeStatus;
+  } else if (typeof rawStatus === "object" && rawStatus !== null) {
+    const keys = Object.keys(rawStatus as Record<string, unknown>);
+    status = (keys[0] || String(rawStatus)) as DisputeStatus;
+  } else {
+    status = String(rawStatus) as DisputeStatus;
+  }
   return {
     subject: String(raw["subject"]),
     inputKey: String(raw["input_key"]),
     reason: String(raw["reason"]),
     filedAtLedger: Number(raw["filed_at_ledger"]),
-    status: String(raw["status"]) as DisputeStatus,
+    status,
   };
 }
 

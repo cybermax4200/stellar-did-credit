@@ -3186,6 +3186,113 @@ describe("StellarDIDCreditSDK", () => {
     });
   });
 
+  describe("getDispute", () => {
+    it("returns null when simulation result is void", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: xdr.ScVal.scvVoid() },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const dispute = await sdk.getDispute(subjectAddress, "tx_stats");
+      expect(dispute).toBeNull();
+      expect(mockLastContractCall).toMatchObject({
+        contractId: mockConfig.creditOracleId,
+        method: "get_dispute",
+      });
+    });
+
+    it("returns parsed DisputeRecord on success", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: {
+              subject: subjectAddress,
+              input_key: "tx_stats",
+              reason: "incorrect value",
+              filed_at_ledger: 12345,
+              status: { Pending: null },
+            },
+          },
+        },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const dispute = await sdk.getDispute(subjectAddress, "tx_stats");
+      expect(dispute).toEqual({
+        subject: subjectAddress,
+        inputKey: "tx_stats",
+        reason: "incorrect value",
+        filedAtLedger: 12345,
+        status: "Pending",
+      });
+    });
+
+    it("throws on simulation error", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        error: "bad dispute",
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(
+        sdk.getDispute(subjectAddress, "tx_stats"),
+      ).rejects.toMatchObject({
+        name: "CreditOracleError",
+        contractName: "credit-oracle",
+        message: "bad dispute",
+      });
+    });
+  });
+
+  describe("listDisputes", () => {
+    it("returns empty array when simulation result is void/null", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: xdr.ScVal.scvVoid() },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const disputes = await sdk.listDisputes(subjectAddress);
+      expect(disputes).toEqual([]);
+    });
+
+    it("returns parsed DisputeRecord array on success", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: {
+          retval: {
+            value: [
+              {
+                subject: subjectAddress,
+                input_key: "tx_stats",
+                reason: "err",
+                filed_at_ledger: 111,
+                status: { Resolved: null },
+              },
+              {
+                subject: subjectAddress,
+                input_key: "vc_count",
+                reason: "wrong",
+                filed_at_ledger: 222,
+                status: { Pending: null },
+              },
+            ],
+          },
+        },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      const disputes = await sdk.listDisputes(subjectAddress);
+      expect(disputes).toHaveLength(2);
+      expect(disputes[0].inputKey).toBe("tx_stats");
+      expect(disputes[0].status).toBe("Resolved");
+      expect(disputes[1].inputKey).toBe("vc_count");
+      expect(disputes[1].status).toBe("Pending");
+    });
+
+    it("throws if result is not an array", async () => {
+      mockSimulateTransaction.mockResolvedValueOnce({
+        result: { retval: { value: {} } },
+      });
+      const sdk = new StellarDIDCreditSDK(mockConfig);
+      await expect(sdk.listDisputes(subjectAddress)).rejects.toThrow(
+        "list_disputes returned an invalid result",
+      );
+    });
+  });
+
   describe("getRepaymentRecord", () => {
     it("returns RepaymentRecord on success", async () => {
       mockSimulateTransaction.mockResolvedValueOnce({

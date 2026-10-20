@@ -904,6 +904,16 @@ export class Feeder {
     private config: FeederConfig,
     private feederKeypair: Keypair,
   ) {
+    // #968: event-driven polling must not be more aggressive than once per second.
+    if (
+      config.eventPollIntervalMs !== undefined &&
+      config.eventPollIntervalMs < 1000
+    ) {
+      throw new Error(
+        `eventPollIntervalMs must be at least 1000 (1 second) (got ${config.eventPollIntervalMs}).`,
+      );
+    }
+
     // #930: validate revocationRegistryId at construction time so both the CLI
     // and programmatic callers (`new Feeder(config, keypair)`) fail fast on
     // a malformed address. The CLI's own REVOCATION_REGISTRY_ID check remains
