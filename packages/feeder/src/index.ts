@@ -59,7 +59,7 @@ import { HealthTracker, createHealthServer, parseHealthPort } from "./health";
 
 type NetworkType = "testnet" | "mainnet" | "futurenet";
 
-const NETWORK_CONFIGS: Record<
+export const NETWORK_CONFIGS: Record<
   NetworkType,
   {
     networkPassphrase: string;

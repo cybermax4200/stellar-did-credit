@@ -29,6 +29,9 @@ importers:
 
   packages/cli:
     dependencies:
+      '@stellar-did-credit/feeder':
+        specifier: workspace:*
+        version: link:../feeder
       '@stellar-did-credit/sdk':
         specifier: workspace:*
         version: link:../sdk
