@@ -5,6 +5,15 @@ import type { ProtocolConfig } from "@stellar-did-credit/sdk";
 export type NetworkType = 'testnet' | 'mainnet' | 'futurenet';
 
 /**
+ * CLI configuration: the protocol config plus fields that only the CLI's
+ * feeder commands consume but that may still be supplied by the config file.
+ */
+export interface CliConfig extends ProtocolConfig {
+  /** Subject G... addresses synced by `stellar-did feeder start|run-cycle`. */
+  subjects?: string[];
+}
+
+/**
  * Network configurations for Stellar networks.
  */
 const NETWORK_CONFIGS: Record<NetworkType, Partial<ProtocolConfig>> = {
@@ -52,7 +61,7 @@ const CONFIG_FILE_NAMES = [
  *
  * Required fields throw if not set anywhere.
  */
-export function loadConfig(network?: NetworkType): ProtocolConfig {
+export function loadConfig(network?: NetworkType): CliConfig {
   // 1. Start with base defaults and network-specific defaults
   const selectedNetwork = network || getNetworkFromEnv() || 'testnet';
   const config: Record<string, unknown> = { 
@@ -83,7 +92,7 @@ export function loadConfig(network?: NetworkType): ProtocolConfig {
   mergeEnvOverrides(config);
 
   // 4. We no longer validate globally here. Validation is done per-command using validateConfig().
-  return config as unknown as ProtocolConfig;
+  return config as unknown as CliConfig;
 }
 
 /**
@@ -180,6 +189,7 @@ function mergeConfigOverrides(
     "timeoutSeconds",
     "maxRetries",
     "baseFee",
+    "subjects",
   ]);
 
   for (const key of knownKeys) {

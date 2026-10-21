@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit && eslint src"
   },
   "dependencies": {
+    "@stellar-did-credit/feeder": "workspace:*",
     "@stellar-did-credit/sdk": "workspace:*",
     "@stellar/stellar-sdk": "^12.0.0",
     "commander": "^12.0.0"

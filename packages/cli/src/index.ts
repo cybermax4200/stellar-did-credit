@@ -36,6 +36,11 @@ import {
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
+import {
+  Feeder,
+  NETWORK_CONFIGS as FEEDER_NETWORK_CONFIGS,
+  type FeederConfig,
+} from "@stellar-did-credit/feeder";
 
 // ---------------------------------------------------------------------------
 // Bootstrap
@@ -2541,6 +2546,168 @@ Example:
       },
     );
 }
+
+// ---------------------------------------------------------------------------
+// Command group: feeder
+// ---------------------------------------------------------------------------
+
+/**
+ * Resolves the subject list for the feeder commands. A `--subjects` flag takes
+ * precedence over the `subjects` array in the config file.
+ */
+function resolveFeederSubjects(
+  subjectsFlag: string | undefined,
+  configSubjects: string[] | undefined,
+): string[] {
+  const raw: unknown[] =
+    subjectsFlag !== undefined
+      ? subjectsFlag.split(",")
+      : Array.isArray(configSubjects)
+        ? configSubjects
+        : [];
+  const subjects = raw
+    .filter((s): s is string => typeof s === "string")
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+
+  if (subjects.length === 0) {
+    console.error(
+      'Error: no subjects configured. Pass --subjects G...,G... or set "subjects" in stellar-did-config.json.',
+    );
+    process.exit(1);
+  }
+
+  for (const subject of subjects) {
+    if (!/^G[A-Z2-7]{55}$/.test(subject.toUpperCase())) {
+      console.error(
+        `Error: subject must be a valid Stellar account address (G..., 56 base32 characters). Got: ${subject}`,
+      );
+      process.exit(1);
+    }
+  }
+
+  return subjects;
+}
+
+/**
+ * Reads POLL_INTERVAL_MS, defaulting to the feeder's one-hour cycle.
+ */
+function resolveFeederPollIntervalMs(): number {
+  const raw = process.env["POLL_INTERVAL_MS"];
+  if (raw === undefined || raw.trim() === "") {
+    return 3_600_000;
+  }
+
+  const parsed = parseInt(raw.trim(), 10);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    console.error(
+      `Error: POLL_INTERVAL_MS must be a positive integer (got "${raw}").`,
+    );
+    process.exit(1);
+  }
+
+  return parsed;
+}
+
+/**
+ * Builds a Feeder from stellar-did-config.json (plus environment overrides).
+ */
+function createFeederFromConfig(
+  network: NetworkType,
+  subjectsFlag: string | undefined,
+): Feeder {
+  const config = loadConfig(network);
+  validateConfig(config, ["identityOracleId", "creditOracleId"], true);
+
+  const secret = process.env["FEEDER_SECRET"];
+  if (!secret) {
+    console.error(
+      "Error: FEEDER_SECRET is required. Set it to the secret key of a registered feeder account.",
+    );
+    process.exit(1);
+  }
+  const feederKeypair = parseSecret(secret);
+
+  const networkDefaults = FEEDER_NETWORK_CONFIGS[network];
+  const feederConfig: FeederConfig = {
+    rpcUrl: config.rpcUrl,
+    horizonUrl: process.env["HORIZON_URL"] ?? networkDefaults.horizonUrl,
+    networkPassphrase: config.networkPassphrase,
+    creditOracleId: config.creditOracleId,
+    identityOracleId: config.identityOracleId,
+    revocationRegistryId: config.revocationRegistryId || undefined,
+    governanceId: config.governanceId || undefined,
+    simAccount: config.simAccount,
+    subjects: resolveFeederSubjects(subjectsFlag, config.subjects),
+    pollIntervalMs: resolveFeederPollIntervalMs(),
+    maxRetries: config.maxRetries,
+  };
+
+  return new Feeder(feederConfig, feederKeypair);
+}
+
+const feeder = program
+  .command("feeder")
+  .description(
+    "Run the credit-oracle feeder: syncs VC counts and Horizon transaction " +
+      "stats for the configured subjects.",
+  );
+
+feeder
+  .command("start")
+  .description("Start the feeder polling loop (blocks until SIGINT/SIGTERM).")
+  .option(
+    "--subjects <addresses>",
+    "Comma-separated subject G... addresses (overrides the config file)",
+  )
+  .action(async (cmdOptions: { subjects?: string }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+
+    try {
+      const feederInstance = createFeederFromConfig(network, cmdOptions.subjects);
+      const stop = feederInstance.start();
+
+      console.log(`Feeder started on ${network}. Press Ctrl+C to stop.`);
+
+      let shuttingDown = false;
+      const shutdown = (signal: NodeJS.Signals): void => {
+        if (shuttingDown) return;
+        shuttingDown = true;
+        console.log(`\nReceived ${signal} — stopping feeder...`);
+        stop();
+        process.exit(0);
+      };
+
+      process.once("SIGINT", shutdown);
+      process.once("SIGTERM", shutdown);
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
+
+feeder
+  .command("run-cycle")
+  .description("Run a single feed cycle and exit.")
+  .option(
+    "--subjects <addresses>",
+    "Comma-separated subject G... addresses (overrides the config file)",
+  )
+  .action(async (cmdOptions: { subjects?: string }) => {
+    const options = program.opts();
+    const network = options.network as NetworkType;
+
+    try {
+      const feederInstance = createFeederFromConfig(network, cmdOptions.subjects);
+      console.log(`Running one feeder cycle on ${network}...`);
+      await feederInstance.runCycle();
+      console.log("Feeder cycle complete.");
+    } catch (err) {
+      console.error("Failed:", err instanceof Error ? err.message : err);
+      process.exit(1);
+    }
+  });
 
 // ---------------------------------------------------------------------------
 // Parse

@@ -7,6 +7,7 @@ module.exports = {
   },
   moduleNameMapper: {
     '^@stellar-did-credit/sdk$': '<rootDir>/../sdk/src/index.ts',
+    '^@stellar-did-credit/feeder$': '<rootDir>/../feeder/src/index.ts',
   },
   testMatch: ['<rootDir>/src/**/*.test.ts'],
 };
