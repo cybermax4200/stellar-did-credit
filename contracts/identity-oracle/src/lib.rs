@@ -115,6 +115,14 @@ pub enum IdentityOracleError {
 /// Prevents unbounded Vec growth and gas exhaustion on read paths.
 const MAX_VCS_PER_SUBJECT: u32 = 100;
 
+#[cfg(test)]
+mod stale_detection_notes {
+    //! Stale score detection is exercised from `contracts/tests/src/integration_test.rs`:
+    //! - ledger-age staleness (advance past `STALE_LEDGER_AGE` in credit-oracle), and
+    //! - identity-state staleness (VC anchored after score computation makes
+    //!   `get_last_state_change_ledger` exceed `ScoreRecord.computed_at_ledger`).
+}
+
 /// Aggregate protocol-level counters stored in instance storage.
 ///
 /// Updated on every write operation to provide on-chain operational metrics
