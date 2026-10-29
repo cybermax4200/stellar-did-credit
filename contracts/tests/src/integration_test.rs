@@ -3097,4 +3097,81 @@ mod tests {
         assert_eq!(active_weights.tx_weight, 20);
         assert_eq!(active_weights.repayment_weight, 30);
     }
+
+    #[test]
+    fn test_stale_score_detection() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        // Deploy contracts
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        // Initialize contracts
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Configure identity oracle with an admin VC
+        let vc_issuer = Address::generate(&env);
+        identity.add_vc_issuer(&vc_issuer);
+
+        // Create and register a VC
+        let vc_bytes = BytesN::from_array(&env, &[1u8; 32]);
+        identity.register_vc(&subject, &vc_bytes);
+
+        // Extend TTLs before ledger jumps
+        let stale_ledger_age = 86_400u32;
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(stale_ledger_age + 100, stale_ledger_age + 100);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(stale_ledger_age + 100, stale_ledger_age + 100);
+        });
+        env.as_contract(&revocation_id, || {
+            env.storage().instance().extend_ttl(stale_ledger_age + 100, stale_ledger_age + 100);
+        });
+
+        // TEST 1: Stale by ledger age
+        // Compute initial score
+        let initial_score = credit.get_score(&subject);
+        assert!(!initial_score.stale, "Score should not be stale immediately after computation");
+        let computed_ledger = env.ledger().sequence_number();
+
+        // Advance ledger past STALE_LEDGER_AGE
+        env.ledger().with_mut(|l| {
+            l.sequence_number = computed_ledger + stale_ledger_age + 1;
+        });
+
+        // Get score again and verify it's marked as stale
+        let stale_score = credit.get_score(&subject);
+        assert!(stale_score.stale, "Score should be stale after advancing past STALE_LEDGER_AGE");
+
+        // TEST 2: Stale by identity state change
+        // Reset ledger to near current (before stale threshold)
+        let current_seq = env.ledger().sequence_number();
+        env.ledger().with_mut(|l| {
+            l.sequence_number = computed_ledger + stale_ledger_age / 2; // Halfway through stale period
+        });
+
+        // Verify score is not yet stale
+        let fresh_score = credit.get_score(&subject);
+        assert!(!fresh_score.stale, "Score should not be stale before STALE_LEDGER_AGE");
+
+        // Modify identity state by adding a new VC
+        let new_vc_bytes = BytesN::from_array(&env, &[2u8; 32]);
+        identity.register_vc(&subject, &new_vc_bytes);
+
+        // Get score and verify it's marked as stale due to identity state change
+        let score_after_state_change = credit.get_score(&subject);
+        assert!(score_after_state_change.stale, "Score should be stale after identity state change (new VC added)");
+    }
 }
