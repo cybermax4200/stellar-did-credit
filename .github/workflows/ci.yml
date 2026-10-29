@@ -129,7 +129,7 @@ jobs:
         run: pnpm --filter @stellar-did-credit/zk-wasm build
 
       - name: Run TypeScript SDK tests
-        run: pnpm run test --coverage
+        run: pnpm run test
         working-directory: packages/sdk
 
   docs:
