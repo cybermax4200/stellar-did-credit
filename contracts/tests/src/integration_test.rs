@@ -3142,7 +3142,7 @@ mod tests {
 
         // TEST 1: Stale by ledger age
         // Compute initial score
-        let initial_score = credit.get_score(&subject);
+        let initial_score = credit.get_score(&subject).unwrap();
         assert!(!initial_score.stale, "Score should not be stale immediately after computation");
         let computed_ledger = env.ledger().sequence_number();
 
@@ -3152,7 +3152,7 @@ mod tests {
         });
 
         // Get score again and verify it's marked as stale
-        let stale_score = credit.get_score(&subject);
+        let stale_score = credit.get_score(&subject).unwrap();
         assert!(stale_score.stale, "Score should be stale after advancing past STALE_LEDGER_AGE");
 
         // TEST 2: Stale by identity state change
@@ -3163,7 +3163,7 @@ mod tests {
         });
 
         // Verify score is not yet stale
-        let fresh_score = credit.get_score(&subject);
+        let fresh_score = credit.get_score(&subject).unwrap();
         assert!(!fresh_score.stale, "Score should not be stale before STALE_LEDGER_AGE");
 
         // Modify identity state by adding a new VC
@@ -3171,7 +3171,7 @@ mod tests {
         identity.register_vc(&subject, &new_vc_bytes);
 
         // Get score and verify it's marked as stale due to identity state change
-        let score_after_state_change = credit.get_score(&subject);
+        let score_after_state_change = credit.get_score(&subject).unwrap();
         assert!(score_after_state_change.stale, "Score should be stale after identity state change (new VC added)");
     }
 }
