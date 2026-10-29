@@ -4,6 +4,18 @@ ignore = [
     "RUSTSEC-2024-0436",
     # tracing-subscriber ANSI escape sequence injection (transitive via zk-circuit arkworks deps)
     "RUSTSEC-2025-0055",
+    # crypto-bigint 0.5.5 timing side-channel — transitive via soroban-env-host v22 (soroban-sdk v22
+    # pins the entire chain; not actionable until Stellar bumps soroban-sdk).
+    "RUSTSEC-2026-0387",
+]
+
+[bans]
+# spin 0.9.8 was yanked; it is a transitive dep of soroban-wasmi and cannot be
+# updated independently. Demote yanked-crate detections to warnings so the check
+# does not fail while waiting for an upstream fix.
+deny = []
+skip = [
+    { name = "spin", version = "=0.9.8" },
 ]
 
 [licenses]
