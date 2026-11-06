@@ -462,56 +462,19 @@ await feeder.runCycle();
 
 ## Component status
 
-| Component               | Status         | Notes                                |
-| ----------------------- | -------------- | ------------------------------------ |
-| identity-oracle         | ✅ Complete    | All functions implemented and tested |
-| credit-oracle           | ✅ Complete    | Scoring formula live on testnet      |
-| revocation-registry     | ✅ Complete    | Batch revocation supported           |
-| score-range-verifier    | 🚧 In progress | Placeholder VK; real trusted setup required before testnet use. |
-| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open           |
-| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`  |
-| CLI tool                | ✅ Complete    | `packages/cli`                       |
-| Cross-contract vc_count | 📋 Planned     |                                      |
-| ZK proof layer          | 📋 Research    |                                      |
-| Governance contract     | 📋 Planned     |                                      |
-| Component               | Status         | Notes                                                                |
-| ----------------------- | -------------- | -------------------------------------------------------------------- |
-| identity-oracle         | ✅ Complete    | All functions implemented and tested                                 |
-| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                      |
-| revocation-registry     | ✅ Complete    | Batch revocation supported                                           |
-| governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
-| score-range-verifier    | 🚧 In progress | Placeholder VK; real trusted setup required before testnet use.     |
-| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available |
-| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                  |
-| CLI tool                | 📋 Planned     |                                                                      |
-| Cross-contract vc_count | 📋 Planned     |                                                                      |
-| ZK proof layer          | 📋 Research    |                                                                      |
-| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future |
-| Component               | Status         | Notes                                                                                         |
-| ----------------------- | -------------- | --------------------------------------------------------------------------------------------- |
-| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
-| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
-| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
-| TypeScript SDK          | 🚧 In progress | `getScore` done, rest open                                                                    |
-| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
-| CLI tool                | ✅ Complete    | `packages/cli`                                                                                |
-| Cross-contract vc_count | 📋 Planned     |                                                                                               |
-| ZK proof layer          | 📋 Research    |                                                                                               |
-| Governance contract     | 📋 Planned     |                                                                                               |
-| Component               | Status         | Notes                                                                                         |
-| ----------------------- | -------------- | --------------------------------------------------------------------                          |
-| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                          |
-| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                               |
-| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                    |
-| governance              | ✅ Complete    | Admin-registered voter weights, double timelock, see [docs/governance.md](docs/governance.md) |
-| TypeScript SDK          | 🚧 In progress | Core identity, credit, revocation, and governance helpers available                           |
-| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                           |
-| CLI tool                | 📋 Planned     |                                                                                               |
-| Cross-contract vc_count | 📋 Planned     |                                                                                               |
-| ZK proof layer          | 📋 Research    |                                                                                               |
-| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future                         |
-
----
+| Component               | Status        | Notes                                                                                          |
+| ----------------------- | ------------- | ---------------------------------------------------------------------------------------------- |
+| identity-oracle         | ✅ Complete    | All functions implemented and tested                                                           |
+| credit-oracle           | ✅ Complete    | Scoring formula live on testnet                                                                |
+| revocation-registry     | ✅ Complete    | Batch revocation supported                                                                     |
+| governance              | ✅ Complete    | Admin-registered voter weights, double timelock — see [docs/governance.md](docs/governance.md) |
+| score-range-verifier    | 🚧 In progress | Placeholder VK; real trusted setup (ceremony key) required before testnet use                  |
+| TypeScript SDK          | ✅ Complete    | Core identity, credit, revocation, and governance helpers                                      |
+| Feeder                  | ✅ Complete    | Reference impl in `packages/feeder`                                                            |
+| CLI tool                | ✅ Complete    | `packages/cli`                                                                                 |
+| Cross-contract vc_count | 📋 Planned     |                                                                                                |
+| ZK proof layer          | 📋 Research    |                                                                                                |
+| Token-weighted DAO vote | 📋 Planned     | Current governance uses admin-assigned weights; token model is future                          |
 
 ---
 
