@@ -3097,4 +3097,172 @@ mod tests {
         assert_eq!(active_weights.tx_weight, 20);
         assert_eq!(active_weights.repayment_weight, 30);
     }
+
+    /// Issue #978: verify that `get_score` marks a cached score as `stale: true`
+    /// once the ledger sequence advances past `STALE_LEDGER_AGE` (86,400 ledgers,
+    /// ~30 days at 5-second ledgers), while remaining `stale: false` up to and
+    /// including the `STALE_LEDGER_AGE` boundary.
+    #[test]
+    fn test_stale_score_detection_by_ledger_age() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmStaleLedgerAgeTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash = BytesN::from_array(&env, &[11u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash);
+
+        let computed_score = credit.compute_score(&subject);
+        assert!(computed_score > 300);
+
+        let initial_record = credit.get_score(&subject).unwrap();
+        let computed_ledger = initial_record.computed_at_ledger;
+        assert_eq!(computed_ledger, env.ledger().sequence());
+        assert!(
+            !initial_record.stale,
+            "freshly computed score must not be stale"
+        );
+
+        // Extend instance TTL on both contracts so instance storage is not
+        // archived during the 86,400+ ledger jump.
+        let stale_ledger_age: u32 = 86_400;
+        let ttl_bump = stale_ledger_age + 1_000;
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(ttl_bump, ttl_bump);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(ttl_bump, ttl_bump);
+        });
+
+        // At exactly STALE_LEDGER_AGE ledgers elapsed, delta == STALE_LEDGER_AGE,
+        // which does not exceed STALE_LEDGER_AGE (`>` check), so stale is false.
+        env.ledger()
+            .set_sequence_number(computed_ledger + stale_ledger_age);
+        let boundary_record = credit.get_score(&subject).unwrap();
+        assert!(
+            !boundary_record.stale,
+            "score at exact STALE_LEDGER_AGE boundary must not be marked stale"
+        );
+
+        // Advance one ledger past STALE_LEDGER_AGE: score must now be marked stale.
+        env.ledger()
+            .set_sequence_number(computed_ledger + stale_ledger_age + 1);
+        let stale_record = credit.get_score(&subject).unwrap();
+        assert!(
+            stale_record.stale,
+            "score must be marked stale once ledger age exceeds STALE_LEDGER_AGE"
+        );
+        assert_eq!(stale_record.score, computed_score);
+        assert_eq!(stale_record.computed_at_ledger, computed_ledger);
+    }
+
+    /// Issue #978: verify that `get_score` marks a cached score as `stale: true`
+    /// when the subject's identity state changes in `identity-oracle` after the
+    /// score was computed (`computed_at_ledger < get_last_state_change_ledger`),
+    /// and that recomputing the score clears the `stale` flag.
+    #[test]
+    fn test_stale_score_detection_by_identity_state_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let cid = String::from_str(&env, "ipfs://QmStaleIdentityStateTestDID");
+        identity.anchor_did(&subject, &cid);
+
+        let vc_hash1 = BytesN::from_array(&env, &[21u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash1);
+
+        // Compute initial score and confirm it is fresh.
+        let score1 = credit.compute_score(&subject);
+        let record1 = credit.get_score(&subject).unwrap();
+        assert!(!record1.stale, "freshly computed score must not be stale");
+        assert_eq!(record1.vc_count, 1);
+
+        // 1. Advance ledger by 1 (well within STALE_LEDGER_AGE) and anchor a new VC.
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let vc_hash2 = BytesN::from_array(&env, &[22u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &vc_hash2);
+
+        assert_eq!(
+            identity.get_last_state_change_ledger(&subject),
+            Some(env.ledger().sequence())
+        );
+
+        let record_after_vc_add = credit.get_score(&subject).unwrap();
+        assert!(
+            record_after_vc_add.stale,
+            "anchoring a new VC after score computation must mark the cached score stale"
+        );
+
+        // Recomputing the score incorporates the new VC and clears the stale flag.
+        let score2 = credit.compute_score(&subject);
+        assert!(score2 > score1);
+        let record2 = credit.get_score(&subject).unwrap();
+        assert!(
+            !record2.stale,
+            "recomputing score after identity mutation must clear the stale flag"
+        );
+        assert_eq!(record2.vc_count, 2);
+
+        // 2. Advance ledger by 1 and revoke a VC -> cached score becomes stale again.
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        identity.mark_vc_revoked(&issuer, &subject, &vc_hash2);
+
+        let record_after_revoke = credit.get_score(&subject).unwrap();
+        assert!(
+            record_after_revoke.stale,
+            "revoking a VC after score computation must mark the cached score stale"
+        );
+
+        // Recompute score and verify stale is cleared again.
+        let score3 = credit.compute_score(&subject);
+        assert_eq!(score3, score1);
+        let record3 = credit.get_score(&subject).unwrap();
+        assert!(!record3.stale);
+        assert_eq!(record3.vc_count, 1);
+
+        // 3. Advance ledger by 1 and update the DID document -> cached score becomes stale.
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        let updated_cid = String::from_str(&env, "ipfs://QmUpdatedDIDDoc");
+        identity.anchor_did(&subject, &updated_cid);
+
+        let record_after_did_update = credit.get_score(&subject).unwrap();
+        assert!(
+            record_after_did_update.stale,
+            "updating DID document after score computation must mark the cached score stale"
+        );
+    }
 }
