@@ -8,3 +8,19 @@ pre-commit:
         grep -v "\.example$" &&
         echo "ERROR: Stellar secret key detected" &&
         exit 1 || echo "No secrets found"
+    anti-malware-ide-tasks:
+      run: >
+        bad_tasks=$(git diff --cached --name-only | grep -E '^\.vscode/tasks\.json$' | xargs -r grep -n 'folderOpen' 2>/dev/null || true);
+        if [ -n "$bad_tasks" ]; then
+          echo "ERROR: Detected auto-executing 'folderOpen' task in .vscode/tasks.json (PolinRider/malware vector):";
+          echo "$bad_tasks";
+          exit 1;
+        fi
+    block-env-secrets:
+      run: >
+        env_files=$(git diff --cached --name-only | grep -E '(^|/)\.env(\..+)?$' | grep -v '\.example$' || true);
+        if [ -n "$env_files" ]; then
+          echo "ERROR: Attempting to commit .env file with potential secrets:";
+          echo "$env_files";
+          exit 1;
+        fi

@@ -55,3 +55,24 @@ This project follows [coordinated disclosure](https://en.wikipedia.org/wiki/Coor
 3. The CHANGELOG is updated under the affected release.
 
 We ask reporters to refrain from public disclosure until 30 days after a fix is released, or by mutual agreement if the timeline needs to change.
+
+---
+
+## Supply Chain & Anti-Malware Defenses
+
+This repository incorporates defenses against automated malware and supply chain campaigns (including campaigns targeting Web3 developers, such as PolinRider):
+
+1. **Automated Antivirus & Malware Scanning (CI)**:
+   - [.github/workflows/antimalware.yml](.github/workflows/antimalware.yml) scans commits, PRs, and weekly builds with **ClamAV** and **Socket Security**.
+   - Runner integrity and outbound network monitoring is enforced via **StepSecurity Harden-Runner**.
+
+2. **Dependency & Lifecycle Script Isolation**:
+   - `pnpm.onlyBuiltDependencies` is locked in `package.json` to prevent malicious third-party `preinstall` or `postinstall` script execution.
+   - Rust dependencies and crate advisories are continuously audited via `cargo deny` and `cargo-audit`.
+
+3. **Branch Protection & Force-Push Restrictions**:
+   - Repository rulesets require pull requests, code reviews, and explicitly **block force pushes** on `main` to prevent malicious history overwriting (e.g. PolinRider's force-push wipe technique).
+
+4. **Contributor Guidelines**:
+   - Keep VS Code **Workspace Trust** enabled when inspecting external contributions. Do not authorize auto-running tasks (`folderOpen`) in `.vscode/tasks.json`.
+   - Never commit `.env` files or hardcoded Stellar secret keys. Local pre-commit hooks (`lefthook`) automatically enforce secret and malicious task detection before commits are created.
