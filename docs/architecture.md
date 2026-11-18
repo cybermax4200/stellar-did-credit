@@ -93,8 +93,9 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `set_vc_count(feeder, subject, count)`               | feeder   | Caches the subject's VC count from identity-oracle |
 | `update_tx_stats(feeder, subject, stats)`            | feeder   | Updates 30-day transaction volume and count        |
 | `record_repayment(lender, subject, amount, on_time)` | lender   | Records a repayment event; current v1 behavior does not verify a real loan relationship and should be treated as a lender attestation rather than proof of disbursement |
-| `compute_score(subject)`                             | anyone   | Runs the scoring formula and persists the result   |
+| `compute_score(subject)`                             | anyone   | Runs the scoring formula and persists the result and bounded history |
 | `get_score(subject)`                                 | anyone   | Returns the last computed ScoreRecord              |
+| `get_score_history(subject)`                         | anyone   | Returns up to six score snapshots, oldest first     |
 | `update_weights(weights)`                            | admin    | Changes scoring weights (must sum to 100)          |
 | `flag_score_input(subject, input_key, reason)`       | subject  | Files a dispute against a specific score input     |
 | `resolve_dispute(subject, input_key, accepted)`      | admin    | Accepts or rejects a pending dispute               |
@@ -113,6 +114,7 @@ Computes and stores a credit score (300–850) for any subject address. It relie
 | `RepaymentRecord(Address)` | `RepaymentRecord` | Persistent — on-time and total repayment counts   |
 | `VcCount(Address)`         | `u32`             | Persistent — cached VC count from identity-oracle |
 | `Score(Address)`           | `ScoreRecord`     | Persistent — last computed score with metadata    |
+| `ScoreHistory(Address)`    | `Vec<HistoricalScore>` | Persistent — last six scores with ledger and timestamp |
 
 ---
 
@@ -433,11 +435,11 @@ This is a deliberate v1 limitation: the contract currently accepts repayment dat
 
 ### 5. Score is computed
 
-Anyone (the subject, a lender, or an application) calls `compute_score(subject)`. The contract reads the three input components, runs the weighted formula, clamps the result to 300–850, and persists a `ScoreRecord`.
+Anyone (the subject, a lender, or an application) calls `compute_score(subject)`. The contract reads the three input components, runs the weighted formula, clamps the result to 300–850, persists a `ScoreRecord`, and appends a timestamped entry to the six-entry score history.
 
 ### 6. Consumer reads the score
 
-A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord`. The SDK's `getScore()` method does this via a read-only simulation — no transaction fees required.
+A lender UI or the TypeScript SDK calls `get_score(subject)` to read the last computed `ScoreRecord` or `get_score_history(subject)` to read the recent progression. Both queries are read-only.
 
 ---
 
