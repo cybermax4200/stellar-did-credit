@@ -50,6 +50,8 @@ pub enum GovernanceError {
     ProposalRejected = 18,
     /// Voting period cannot be zero.
     InvalidVotingPeriod = 19,
+    /// The credit-oracle already has weights pending under an active timelock.
+    TimelockAlreadyPending = 20,
 }
 
 /// Storage keys for the governance contract.
@@ -500,12 +502,14 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .expect("no credit oracle");
 
+        if let Some(pending) = CreditOracleClient::get_pending_weights(&env, &credit_oracle_addr) {
+            if env.ledger().sequence() < pending.effective_ledger {
+                return Err(GovernanceError::TimelockAlreadyPending);
+            }
+        }
+
         // Use propose_weights to start the timelock, not update_weights which bypasses it
-        CreditOracleClient::propose_weights(
-            &env,
-            &credit_oracle_addr,
-            &proposal.proposed_weights,
-        );
+        CreditOracleClient::propose_weights(&env, &credit_oracle_addr, &proposal.proposed_weights);
 
         proposal.executed = true;
         env.storage().persistent().set(&proposal_key, &proposal);

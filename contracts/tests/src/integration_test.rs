@@ -3040,6 +3040,14 @@ mod tests {
         gov.vote(&voter1, &proposal_id, &true, &1000);
         gov.vote(&voter2, &proposal_id, &false, &400);
 
+        let next_weights = ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 25,
+            repayment_weight: 30,
+        };
+        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0);
+        gov.vote(&voter1, &next_proposal_id, &true, &1000);
+
         let proposal = gov.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.votes_for, 1000);
         assert_eq!(proposal.votes_against, 400);
@@ -3070,8 +3078,20 @@ mod tests {
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
 
+        assert_eq!(
+            gov.try_execute(&next_proposal_id),
+            Err(Ok(GovernanceError::TimelockAlreadyPending))
+        );
+
         // 11. Advance ledger past timelock (17,280 ledgers + 2 buffer)
         let jump = 17_280 + 2;
+        env.as_contract(&gov_id, || {
+            env.storage().persistent().extend_ttl(
+                &governance::DataKey::Proposal(next_proposal_id),
+                120_960,
+                518_400,
+            );
+        });
         // Extend TTL on all four contracts to prevent archival during the jump
         env.as_contract(&identity_id, || {
             env.storage().instance().extend_ttl(jump, jump);
@@ -3089,13 +3109,37 @@ mod tests {
             l.sequence_number += jump;
         });
 
-        // 12. Apply weights via governance (gov.apply_weights calls credit-oracle)
+        // The expired pending weights no longer block a new execution.
+        gov.execute(&next_proposal_id);
+        assert!(gov.get_proposal(&next_proposal_id).unwrap().executed);
+
+        let pending = credit.get_pending_weights().unwrap();
+        assert_eq!(pending.weights.vc_weight, 45);
+        assert_eq!(pending.weights.tx_weight, 25);
+        assert_eq!(pending.weights.repayment_weight, 30);
+
+        // 12. Advance past the replacement timelock and apply the new weights.
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&revocation_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
         gov.apply_weights();
 
         // 13. Verify credit-oracle weights actually changed
         let active_weights = credit.get_scoring_weights();
-        assert_eq!(active_weights.vc_weight, 50);
-        assert_eq!(active_weights.tx_weight, 20);
+        assert_eq!(active_weights.vc_weight, 45);
+        assert_eq!(active_weights.tx_weight, 25);
         assert_eq!(active_weights.repayment_weight, 30);
     }
 
