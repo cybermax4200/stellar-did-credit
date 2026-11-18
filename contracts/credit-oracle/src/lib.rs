@@ -381,6 +381,10 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
+/// Instance-storage TTL bump threshold (ledgers).
+const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
+/// Instance-storage TTL bump amount (≈ 29 days at 5 s/ledger).
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 /// Maximum number of entries allowed in a single batch operation.
 pub const MAX_BATCH_SIZE: u32 = 50;
 
