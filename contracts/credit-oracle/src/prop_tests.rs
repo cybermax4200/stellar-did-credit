@@ -389,3 +389,67 @@ proptest! {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Property 13 — Extreme/boundary inputs never panic and stay within bounds
+//
+// Counterparty counts and volumes arrive from feeders that may be malformed.
+// `u32::MAX` / `i128::MAX` (and `i128::MIN`) must flow through
+// `compute_score_pure` without an arithmetic panic under `overflow-checks` and
+// still land inside [MIN_SCORE, MAX_SCORE].
+// ---------------------------------------------------------------------------
+
+/// Draws from the interesting `u32` boundary values plus any random value.
+fn extreme_u32() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        Just(0u32),
+        Just(1u32),
+        Just(5u32),
+        Just(100u32),
+        Just(u32::MAX / 2),
+        Just(u32::MAX - 1),
+        Just(u32::MAX),
+        any::<u32>(),
+    ]
+}
+
+/// Draws from the interesting `i128` boundary values plus any random value.
+fn extreme_i128() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        Just(0i128),
+        Just(100_000_000i128),
+        Just(i128::MAX / 2),
+        Just(i128::MAX - 1),
+        Just(i128::MAX),
+        Just(i128::MIN),
+        any::<i128>(),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_extreme_inputs_stay_within_bounds_without_panic(
+        vc_points           in extreme_u32(),
+        volume_30d          in extreme_i128(),
+        avg_counterparties  in extreme_u32(),
+        on_time_count       in extreme_u32(),
+        total_count         in extreme_u32(),
+        total_repaid        in extreme_i128(),
+        (vc_w, tx_w, repay_w) in valid_weights(),
+    ) {
+        let score = compute_score_pure(
+            vc_points, volume_30d, avg_counterparties,
+            on_time_count, total_count, total_repaid,
+            vc_w, tx_w, repay_w,
+        );
+        prop_assert!(
+            score >= MIN_SCORE && score <= MAX_SCORE,
+            "extreme inputs produced out-of-range score {} (vc={}, vol={}, cps={}, \
+             on_time={}, total={}, repaid={})",
+            score, vc_points, volume_30d, avg_counterparties,
+            on_time_count, total_count, total_repaid
+        );
+    }
+}

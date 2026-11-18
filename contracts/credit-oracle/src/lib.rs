@@ -175,6 +175,13 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
 /// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+///
+/// Every intermediate step uses saturating arithmetic (or `checked_div` where
+/// the divisor may be zero) so that malformed feeder inputs — `u32::MAX`
+/// counterparty counts, `i128::MAX` volumes, skewed weights — can never panic
+/// under the workspace's `overflow-checks = true` release profile. The inputs
+/// are otherwise clamped (`vc_points`/`volume_score`/`counterparty_bonus`) so
+/// the composite stays far inside the `u128` range even in the worst case.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_score_pure(
     vc_points: u32,
@@ -187,22 +194,40 @@ pub fn compute_score_pure(
     tx_weight: u32,
     repayment_weight: u32,
 ) -> u32 {
-    let vc_score = (vc_points).min(100) as u128;
+    // Clamped to 100 before widening, so the later multiply cannot overflow.
+    let vc_score = vc_points.min(100) as u128;
+
+    // `i128` division by a non-zero constant cannot overflow; `max(0)` makes the
+    // widening cast to `u128` lossless for negative (malformed) volumes too.
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
-    let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
-    let tx_score = (volume_score + counterparty_bonus).min(100);
+
+    // `saturating_div` documents the intent: the counterparty term must stay
+    // well-defined for any feeder-supplied `avg_counterparties`, up to and
+    // including `u32::MAX`, before the `min(20)` clamp caps the bonus.
+    let counterparty_bonus = avg_counterparties.saturating_div(5).min(20) as u128;
+    let tx_score = volume_score.saturating_add(counterparty_bonus).min(100);
+
+    // `total_count` may legitimately be 0 (a brand-new subject), so the only
+    // divisor that can be zero uses `checked_div`; the fixed divisors below do
+    // not need it but stay saturating for uniformity.
     let repayment_rate_score = (on_time_count as u128)
         .saturating_mul(10_000)
         .checked_div(total_count as u128)
-        .map(|r| r / 100)
+        .map(|r| r.saturating_div(100))
         .unwrap_or(0);
     let repayment_volume_score = ((total_repaid / 100_000_000i128).max(0) as u128).min(100);
-    let repay_score = (repayment_rate_score + repayment_volume_score) / 2;
-    let composite = (vc_score * vc_weight as u128
-        + tx_score * tx_weight as u128
-        + repay_score * repayment_weight as u128)
-        / 100;
-    let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
+    let repay_score = repayment_rate_score
+        .saturating_add(repayment_volume_score)
+        .saturating_div(2);
+
+    let composite = vc_score
+        .saturating_mul(vc_weight as u128)
+        .saturating_add(tx_score.saturating_mul(tx_weight as u128))
+        .saturating_add(repay_score.saturating_mul(repayment_weight as u128))
+        .saturating_div(100);
+
+    let score = (MIN_SCORE as u128)
+        .saturating_add(composite.saturating_mul(550).saturating_div(100));
     score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
 }
 
@@ -1983,6 +2008,70 @@ mod tests {
         );
 
         assert_eq!(score, 850);
+    }
+
+    #[test]
+    fn test_compute_score_pure_u32_max_counterparties_is_clamped_to_bonus_cap() {
+        // counterparty_bonus = min(avg_counterparties / 5, 20); at 100 the cap is
+        // already reached, so `u32::MAX` must yield exactly the same score.
+        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30);
+        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30);
+
+        assert_eq!(at_cap, at_max);
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
+    }
+
+    #[test]
+    fn test_compute_score_pure_u32_max_volume_30d_is_handled_without_overflow() {
+        // volume_score = min(volume_30d / 1e8, 80). `u32::MAX` raw units is 42
+        // units — below the 80-unit cap — so it must match the equivalent
+        // explicit unit count, while `i128::MAX` saturates the cap at 80.
+        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_units = compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        assert_eq!(at_max, at_units);
+
+        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30);
+        assert_eq!(at_cap, at_i128_max);
+
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_i128_max));
+    }
+
+    #[test]
+    fn test_compute_score_pure_extreme_inputs_do_not_panic_and_clamp() {
+        // Acceptance criteria: u32::MAX / i128::MAX inputs must not panic under
+        // `overflow-checks = true` and must yield a score within [300, 850].
+        let score = compute_score_pure(
+            u32::MAX,
+            i128::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            i128::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+        );
+
+        assert!(
+            (MIN_SCORE..=MAX_SCORE).contains(&score),
+            "extreme inputs produced out-of-range score {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_compute_score_pure_negative_and_zero_inputs_do_not_panic() {
+        // i128::MIN volumes and a zero repayment divisor (no repayment history)
+        // are the other malformed-edge shapes the scoring path must survive.
+        let score = compute_score_pure(0, i128::MIN, 0, u32::MAX, 0, i128::MIN, 40, 30, 30);
+
+        assert!(
+            (MIN_SCORE..=MAX_SCORE).contains(&score),
+            "negative/zero inputs produced out-of-range score {}",
+            score
+        );
     }
 
     #[test]
