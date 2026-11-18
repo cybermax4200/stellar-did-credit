@@ -1394,6 +1394,10 @@ impl CreditOracle {
     /// Propose new scoring weights with timelock
     /// Propose new scoring weights with timelock
     pub fn propose_weights(env: Env, weights: ScoringWeights) -> Result<(), CreditOracleError> {
+        let sum = weights.vc_weight + weights.tx_weight + weights.repayment_weight;
+        if sum != 100 {
+            return Err(CreditOracleError::InvalidWeightsSum);
+        }
         if !weights.is_valid() {
             return Err(CreditOracleError::InvalidWeights);
         }
@@ -2325,15 +2329,23 @@ mod tests {
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights (sum != 100) — should return error via try_
-        let result = client.try_propose_weights(&ScoringWeights {
+        
+        // Sum != 100 — should return error InvalidWeightsSum
+        let result_99 = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 33,
+            tx_weight: 33,
+            repayment_weight: 33,
+        });
+        assert_eq!(result_99, Err(Ok(CreditOracleError::InvalidWeightsSum)));
+
+        let result_101 = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
-            repayment_weight: 40,
+            repayment_weight: 21,
         });
-        assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
+        assert_eq!(result_101, Err(Ok(CreditOracleError::InvalidWeightsSum)));
 
-        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        // Sum == 100, but components invalid (< 10) — should return error InvalidWeights
         let res_vc_low = client.try_propose_weights(&ScoringWeights {
             vc_weight: 9,
             tx_weight: 45,
@@ -2355,13 +2367,21 @@ mod tests {
         });
         assert_eq!(res_repayment_low, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        // Valid weights (sum 100, components >= 10) — should succeed
         let res_valid_min = client.try_propose_weights(&ScoringWeights {
             vc_weight: 50,
             tx_weight: 10,
             repayment_weight: 40,
         });
         assert!(res_valid_min.is_ok());
+
+        // Boundary valid case (33/33/34)
+        let res_valid_boundary = client.try_propose_weights(&ScoringWeights {
+            vc_weight: 33,
+            tx_weight: 33,
+            repayment_weight: 34,
+        });
+        assert!(res_valid_boundary.is_ok());
     }
 
     #[test]
