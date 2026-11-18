@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `governance`: prevent proposal execution while credit-oracle weights are under an active timelock; allow execution after the timelock expires (#1169)
 - SDK: restore the missing `IssuerTier` result type used by `listIssuerTiers` (#1071).
 - CLI: restore missing issuer-tier formatting helpers for `get`, `list`, and `set` commands (#1071).
 - `packages/cli` (`@stellar-did-credit/cli`): handle unscored subjects in `get-score` command by printing a helpful message and outputting `{ "score": null }` in JSON mode (#700)

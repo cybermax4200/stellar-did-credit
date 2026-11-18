@@ -98,8 +98,8 @@ pub enum CreditOracleError {
     InvalidAmount = 17,
     /// Compute-score cooldown must be between one ledger and the supported maximum.
     InvalidComputeCooldown = 18,
-    /// Weights sum to something other than 100.
-    InvalidWeightsSum = 19,
+    /// Batch size exceeds maximum allowed.
+    BatchTooLarge = 19,
 }
 
 /// Weights used in credit score calculation.

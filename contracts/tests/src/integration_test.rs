@@ -7,7 +7,8 @@ mod tests {
     };
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
+        RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry, TxStats,
+        MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -3039,6 +3040,14 @@ mod tests {
         gov.vote(&voter1, &proposal_id, &true, &1000);
         gov.vote(&voter2, &proposal_id, &false, &400);
 
+        let next_weights = ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 25,
+            repayment_weight: 30,
+        };
+        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0);
+        gov.vote(&voter1, &next_proposal_id, &true, &1000);
+
         let proposal = gov.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.votes_for, 1000);
         assert_eq!(proposal.votes_against, 400);
@@ -3069,8 +3078,20 @@ mod tests {
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
 
+        assert_eq!(
+            gov.try_execute(&next_proposal_id),
+            Err(Ok(GovernanceError::TimelockAlreadyPending))
+        );
+
         // 11. Advance ledger past timelock (17,280 ledgers + 2 buffer)
         let jump = 17_280 + 2;
+        env.as_contract(&gov_id, || {
+            env.storage().persistent().extend_ttl(
+                &governance::DataKey::Proposal(next_proposal_id),
+                120_960,
+                518_400,
+            );
+        });
         // Extend TTL on all four contracts to prevent archival during the jump
         env.as_contract(&identity_id, || {
             env.storage().instance().extend_ttl(jump, jump);
@@ -3088,13 +3109,147 @@ mod tests {
             l.sequence_number += jump;
         });
 
-        // 12. Apply weights via governance (gov.apply_weights calls credit-oracle)
+        // The expired pending weights no longer block a new execution.
+        gov.execute(&next_proposal_id);
+        assert!(gov.get_proposal(&next_proposal_id).unwrap().executed);
+
+        let pending = credit.get_pending_weights().unwrap();
+        assert_eq!(pending.weights.vc_weight, 45);
+        assert_eq!(pending.weights.tx_weight, 25);
+        assert_eq!(pending.weights.repayment_weight, 30);
+
+        // 12. Advance past the replacement timelock and apply the new weights.
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&revocation_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
         gov.apply_weights();
 
         // 13. Verify credit-oracle weights actually changed
         let active_weights = credit.get_scoring_weights();
-        assert_eq!(active_weights.vc_weight, 50);
-        assert_eq!(active_weights.tx_weight, 20);
+        assert_eq!(active_weights.vc_weight, 45);
+        assert_eq!(active_weights.tx_weight, 25);
         assert_eq!(active_weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        let subject_a = soroban_sdk::Address::generate(&env);
+        let subject_b = soroban_sdk::Address::generate(&env);
+        let subject_c = soroban_sdk::Address::generate(&env);
+
+        // 1. Empty batch validation: succeeds as a no-op when feeder is authorized
+        let empty_batch = soroban_sdk::Vec::new(&env);
+        let empty_res = credit.try_batch_update_tx_stats(&feeder, &empty_batch);
+        assert!(empty_res.is_ok(), "empty batch must succeed as a valid no-op");
+
+        // 2. Multi-subject batch update in a single atomic invocation
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: TxStats {
+                volume_30d: 500_000_000,
+                tx_count_30d: 25,
+                avg_counterparties: 5,
+            },
+        });
+        batch.push_back(SubjectTxStatsEntry {
+            subject: subject_b.clone(),
+            stats: TxStats {
+                volume_30d: 1_000_000_000,
+                tx_count_30d: 50,
+                avg_counterparties: 10,
+            },
+        });
+
+        credit.batch_update_tx_stats(&feeder, &batch);
+
+        // Verify stored stats for both subjects
+        let score_a = credit.compute_score(&subject_a);
+        let score_b = credit.compute_score(&subject_b);
+        assert!(score_a > 300, "subject_a score should reflect updated tx stats");
+        assert!(score_b > score_a, "subject_b with higher tx stats should score higher");
+
+        // 3. Partial duplicate subjects in a batch: subsequent entry overwrites earlier entry
+        let mut duplicate_batch = soroban_sdk::Vec::new(&env);
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_c.clone(),
+            stats: TxStats {
+                volume_30d: 100_000_000,
+                tx_count_30d: 5,
+                avg_counterparties: 2,
+            },
+        });
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: TxStats {
+                volume_30d: 800_000_000,
+                tx_count_30d: 40,
+                avg_counterparties: 8,
+            },
+        });
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_c.clone(),
+            stats: TxStats {
+                volume_30d: 2_000_000_000,
+                tx_count_30d: 80,
+                avg_counterparties: 20,
+            },
+        });
+
+        credit.batch_update_tx_stats(&feeder, &duplicate_batch);
+
+        // Advance ledger past cooldown window for score recomputation
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 2;
+        });
+
+        let score_c = credit.compute_score(&subject_c);
+        let score_a_updated = credit.compute_score(&subject_a);
+        assert!(score_a_updated > score_a, "subject_a score should reflect updated higher tx volume");
+        assert!(score_c > score_a_updated, "subject_c score should reflect final overwritten stats in batch");
+
+        // 4. Exceeding max batch limit returns BatchTooLarge
+        let mut large_batch = soroban_sdk::Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            large_batch.push_back(SubjectTxStatsEntry {
+                subject: soroban_sdk::Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+        let too_large_res = credit.try_batch_update_tx_stats(&feeder, &large_batch);
+        assert_eq!(too_large_res, Err(Ok(CreditOracleError::BatchTooLarge)));
     }
 }

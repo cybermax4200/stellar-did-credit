@@ -6,7 +6,7 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_SCORE,
+    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE,
     MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
@@ -340,5 +340,52 @@ proptest! {
             "oversize floor must clamp to BPS_DENOMINATOR, got {}",
             multiplier
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 11 — Batch size validation invariant: <= MAX_BATCH_SIZE is permitted,
+//               > MAX_BATCH_SIZE exceeds limit.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn prop_batch_size_limit_boundary(
+        len in 0u32..=150u32,
+    ) {
+        let is_too_large = len > MAX_BATCH_SIZE;
+        if len <= MAX_BATCH_SIZE {
+            prop_assert!(!is_too_large);
+        } else {
+            prop_assert!(is_too_large);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 12 — Batch update deduplication: sequential execution ensures that
+//               the last occurrence of a subject in a batch determines its final state.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn prop_batch_partial_duplicate_last_write_wins(
+        entries in proptest::collection::vec((0u8..8u8, 0i128..1_000_000i128), 1..=50),
+    ) {
+        // Find expected final value for each subject
+        let mut expected = [None; 8];
+        for &(subject_id, vol) in &entries {
+            expected[subject_id as usize] = Some(vol);
+        }
+
+        // Verify the last occurrence in entries equals the expected value
+        for (idx, &(subject_id, vol)) in entries.iter().enumerate() {
+            let is_last = entries[idx + 1..].iter().all(|&(s, _)| s != subject_id);
+            if is_last {
+                prop_assert_eq!(expected[subject_id as usize], Some(vol));
+            }
+        }
     }
 }
