@@ -289,7 +289,7 @@ const MAX_SCORE_HISTORY: u32 = 6;
 
 /// Transaction statistics for a user
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TxStats {
     /// Total transaction volume in last 30 days
     pub volume_30d: i128,
@@ -297,6 +297,16 @@ pub struct TxStats {
     pub tx_count_30d: u32,
     /// Average number of counterparties
     pub avg_counterparties: u32,
+}
+
+/// A batch entry pairing a subject address with its transaction statistics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubjectTxStatsEntry {
+    /// Target subject address whose transaction stats are being updated.
+    pub subject: Address,
+    /// 30-day transaction statistics for the subject.
+    pub stats: TxStats,
 }
 
 /// Internal repayment counters for a subject
@@ -371,6 +381,8 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
+/// Maximum number of entries allowed in a single batch operation.
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 #[contract]
 pub struct CreditOracle;
@@ -772,6 +784,39 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .set(&DataKey::TxStats(subject), &stats);
+        Ok(())
+    }
+
+    /// Update transaction statistics for multiple subjects in a single atomic invocation.
+    ///
+    /// Feeder authorization is checked once at the entrypoint. Enforces a maximum
+    /// batch size of `MAX_BATCH_SIZE` (50 entries) and updates persistent storage
+    /// and TTL for all subjects.
+    pub fn batch_update_tx_stats(
+        env: Env,
+        feeder: Address,
+        entries: Vec<SubjectTxStatsEntry>,
+    ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
+        feeder.require_auth();
+        let is_trusted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
+            return Err(CreditOracleError::FeederNotRegistered);
+        }
+        if entries.len() > MAX_BATCH_SIZE {
+            return Err(CreditOracleError::BatchTooLarge);
+        }
+        for entry in entries.iter() {
+            let key = DataKey::TxStats(entry.subject.clone());
+            env.storage().persistent().set(&key, &entry.stats);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
         Ok(())
     }
 
@@ -2507,6 +2552,231 @@ mod tests {
             },
         );
         assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_success_multiple_subjects() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let stats1 = TxStats {
+            volume_30d: 10_000,
+            tx_count_30d: 20,
+            avg_counterparties: 5,
+        };
+        let stats2 = TxStats {
+            volume_30d: 50_000,
+            tx_count_30d: 100,
+            avg_counterparties: 15,
+        };
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject1.clone(),
+            stats: stats1.clone(),
+        });
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject2.clone(),
+            stats: stats2.clone(),
+        });
+
+        assert!(client.try_batch_update_tx_stats(&feeder, &entries).is_ok());
+
+        let stored1: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored1, stats1);
+
+        let stored2: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject2.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored2, stats2);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_empty_batch_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let empty_entries: Vec<SubjectTxStatsEntry> = Vec::new(&env);
+        let res = client.try_batch_update_tx_stats(&feeder, &empty_entries);
+        assert!(res.is_ok(), "empty batch should succeed as a valid no-op");
+
+        // Feeder authorization is still checked at entrypoint even for empty batch
+        env.mock_auths(&[]);
+        let unauth_res = client.try_batch_update_tx_stats(&feeder, &empty_entries);
+        assert!(unauth_res.is_err(), "empty batch requires feeder authorization");
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_partial_duplicates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let stats_a_initial = TxStats {
+            volume_30d: 1_000,
+            tx_count_30d: 2,
+            avg_counterparties: 1,
+        };
+        let stats_b = TxStats {
+            volume_30d: 5_000,
+            tx_count_30d: 10,
+            avg_counterparties: 4,
+        };
+        let stats_a_final = TxStats {
+            volume_30d: 9_999,
+            tx_count_30d: 99,
+            avg_counterparties: 9,
+        };
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: stats_a_initial,
+        });
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_b.clone(),
+            stats: stats_b.clone(),
+        });
+        // Duplicate subject_a later in the batch (partial duplicate)
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: stats_a_final.clone(),
+        });
+
+        assert!(client.try_batch_update_tx_stats(&feeder, &entries).is_ok());
+
+        // The later entry for subject_a should have overwritten the earlier one
+        let stored_a: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject_a.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored_a, stats_a_final);
+
+        // subject_b should be intact
+        let stored_b: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject_b.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored_b, stats_b);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_exceeds_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let mut entries = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            entries.push_back(SubjectTxStatsEntry {
+                subject: Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert_eq!(res, Err(Ok(CreditOracleError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_feeder_not_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: Address::generate(&env),
+            stats: TxStats {
+                volume_30d: 100,
+                tx_count_30d: 1,
+                avg_counterparties: 1,
+            },
+        });
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert_eq!(res, Err(Ok(CreditOracleError::FeederNotRegistered)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_requires_auth_before_size_check() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let feeder = Address::generate(&env);
+
+        let mut entries = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            entries.push_back(SubjectTxStatsEntry {
+                subject: Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert!(res.is_err());
+        assert_ne!(res, Err(Ok(CreditOracleError::BatchTooLarge)));
     }
 
     #[test]
