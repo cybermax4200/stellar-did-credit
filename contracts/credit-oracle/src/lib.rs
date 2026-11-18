@@ -52,6 +52,8 @@ pub enum DataKey {
     RepaymentRecord(Address),
     /// Credit score for a user
     Score(Address),
+    /// Bounded history of computed scores for a user
+    ScoreHistory(Address),
     /// Cached VC count for a user
     VcCount(Address),
     /// Stored VC list per user with type tags
@@ -271,6 +273,20 @@ pub struct ScoreRecord {
     pub stale: bool,
 }
 
+/// A score computation retained for historical progression queries.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalScore {
+    /// Credit score value.
+    pub score: u32,
+    /// Ledger sequence at which the score was computed.
+    pub computed_at_ledger: u32,
+    /// Unix timestamp at which the score was computed.
+    pub computed_at_timestamp: u64,
+}
+
+const MAX_SCORE_HISTORY: u32 = 6;
+
 /// Transaction statistics for a user
 #[contracttype]
 #[derive(Clone)]
@@ -368,6 +384,29 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+fn append_score_history(env: &Env, subject: &Address, score: u32) {
+    let history_key = DataKey::ScoreHistory(subject.clone());
+    let mut history: Vec<HistoricalScore> = env
+        .storage()
+        .persistent()
+        .get(&history_key)
+        .unwrap_or(Vec::new(env));
+
+    while history.len() >= MAX_SCORE_HISTORY {
+        history.remove(0);
+    }
+
+    history.push_back(HistoricalScore {
+        score,
+        computed_at_ledger: env.ledger().sequence(),
+        computed_at_timestamp: env.ledger().timestamp(),
+    });
+    env.storage().persistent().set(&history_key, &history);
+    env.storage()
+        .persistent()
+        .extend_ttl(&history_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
 /// Read the recency decay configuration from instance storage (issue #530).
@@ -1113,6 +1152,7 @@ impl CreditOracle {
                 soroban_sdk::vec![&env, subject.clone().into_val(&env)],
             );
             if is_deactivated {
+                append_score_history(&env, &subject, MIN_SCORE);
                 return Ok(MIN_SCORE);
             }
 
@@ -1266,6 +1306,8 @@ impl CreditOracle {
                 .extend_ttl(&score_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
+        append_score_history(&env, &subject, score);
+
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
 
@@ -1339,6 +1381,14 @@ impl CreditOracle {
                 }
                 record
             })
+    }
+
+    /// Return the most recent score computations for a user, oldest first.
+    pub fn get_score_history(env: Env, subject: Address) -> Vec<HistoricalScore> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScoreHistory(subject))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Propose new scoring weights with timelock
@@ -3112,6 +3162,53 @@ mod tests {
         // Write occurred, so timestamp is updated
         assert!(record3.last_updated > record2.last_updated);
         assert_eq!(record3.vc_count, 1);
+    }
+
+    #[test]
+    fn test_score_history_rolls_over_and_preserves_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        assert!(client.get_score_history(&subject).is_empty());
+
+        let start_timestamp = env.ledger().timestamp();
+        let start_ledger = env.ledger().sequence();
+        let mut computed_scores = Vec::new(&env);
+        for i in 0..8u32 {
+            env.ledger()
+                .set_timestamp(start_timestamp + i as u64 * 60);
+            env.ledger().set_sequence_number(start_ledger + i);
+            client.update_tx_stats(
+                &feeder,
+                &subject,
+                &TxStats {
+                    volume_30d: i as i128 * 1_000_000_000,
+                    tx_count_30d: i,
+                    avg_counterparties: 0,
+                },
+            );
+            computed_scores.push_back(client.compute_score(&subject));
+        }
+
+        let history = client.get_score_history(&subject);
+        assert_eq!(history.len(), MAX_SCORE_HISTORY);
+        for i in 0..MAX_SCORE_HISTORY {
+            let entry = history.get(i).unwrap();
+            let expected_index = i + 2;
+            assert_eq!(entry.score, computed_scores.get(expected_index).unwrap());
+            assert_eq!(entry.computed_at_ledger, start_ledger + expected_index);
+            assert_eq!(
+                entry.computed_at_timestamp,
+                start_timestamp + expected_index as u64 * 60
+            );
+        }
     }
 
     #[test]
