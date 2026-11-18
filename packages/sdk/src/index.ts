@@ -2218,14 +2218,20 @@ export class StellarDIDCreditSDK {
   }
 
   /**
-   * List all credential hashes revoked by an issuer.
+   * List a page of credential hashes revoked by an issuer.
    *
    * Uses a read-only simulation against the revocation-registry contract.
    *
    * @param issuer - Stellar G... address of the issuer
-   * @returns Array of revoked credential hashes as Buffers
+   * @param page - Zero-based page number
+   * @param limit - Maximum number of hashes to return (capped at 100)
+   * @returns A page of revoked credential hashes as Buffers
    */
-  async listRevokedByIssuer(issuer: string): Promise<Buffer[]> {
+  async listRevokedByIssuer(
+    issuer: string,
+    page = 0,
+    limit = 100,
+  ): Promise<Buffer[]> {
     const server = this.server;
     const contract = new Contract(this.config.revocationRegistryId);
     const sourceAccount = new Account(this.config.simAccount, "0");
@@ -2238,6 +2244,8 @@ export class StellarDIDCreditSDK {
         contract.call(
           "list_revoked_for_issuer",
           new Address(issuer).toScVal(),
+          nativeToScVal(page, { type: "u32" }),
+          nativeToScVal(limit, { type: "u32" }),
         ),
       )
       .setTimeout(30)
