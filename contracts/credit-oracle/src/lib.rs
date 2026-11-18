@@ -1,7 +1,7 @@
 #![no_std]
 pub use credit_oracle_types::{
     CredentialType, CreditOracleError, IdentityOracleClient, IdentityVCRecord,
-    PendingWeightsRecord, ScoringWeights,
+    PendingWeightsRecord, ScoringWeights, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND,
 };
 use soroban_sdk::{
     contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
@@ -378,7 +378,7 @@ const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
 /// Longest supported compute-score cooldown (approximately five days).
 pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 /// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
-const PERS_TTL_THRESHOLD: u32 = 120_960;
+// const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
 /// Maximum number of entries allowed in a single batch operation.

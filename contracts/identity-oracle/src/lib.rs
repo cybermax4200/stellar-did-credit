@@ -8,7 +8,10 @@
 extern crate std;
 // `IdentityVCRecord` is shared with the credit-oracle, which decodes the
 // `get_vc_details` return value as this same type (issue #932).
-pub use credit_oracle_types::{CredentialType, IdentityVCRecord};
+pub use credit_oracle_types::{
+    CredentialType, IdentityVCRecord, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND,
+    INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT,
+};
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, String, Symbol, TryFromVal, Val, Vec,
@@ -80,8 +83,8 @@ fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
   // Threshold: if remaining TTL drops below this, extend.
   // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
   //
-const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
-const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
+// const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+// const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Error types for the identity-oracle contract.
 #[contracterror]
@@ -184,8 +187,8 @@ pub enum DataKey {
     LastStateChange(Address),
 }
 
-const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
-const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+// const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+// const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
 /// Default issuer trust multiplier: 100 basis points (1×).
 pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
