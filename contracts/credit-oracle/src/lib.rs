@@ -2726,10 +2726,7 @@ mod tests {
 
         let res = client.try_batch_update_tx_stats(&feeder, &entries);
         assert!(res.is_err());
-        match res {
-            Err(Ok(CreditOracleError::BatchTooLarge)) => panic!("size check ran before auth!"),
-            _ => {}
-        }
+        assert_ne!(res, Err(Ok(CreditOracleError::BatchTooLarge)));
     }
 
     #[test]

@@ -3183,6 +3183,11 @@ mod tests {
 
         credit.batch_update_tx_stats(&feeder, &duplicate_batch);
 
+        // Advance ledger past cooldown window for score recomputation
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 2;
+        });
+
         let score_c = credit.compute_score(&subject_c);
         let score_a_updated = credit.compute_score(&subject_a);
         assert!(score_a_updated > score_a, "subject_a score should reflect updated higher tx volume");
