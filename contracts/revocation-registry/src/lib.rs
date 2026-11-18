@@ -62,6 +62,7 @@ pub enum RevocationRegistryError {
     ReentrancyDetected = 7,
     /// Batch limit must be between 1 and MAX_BATCH_SIZE.
     InvalidBatchLimit = 8,
+    EmptyBatch = 9,
 }
 
 #[contracttype]
@@ -364,6 +365,13 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        if vc_hashes.is_empty() {
+            return Err(RevocationRegistryError::EmptyBatch);
+        }
+        if vc_hashes.len() > MAX_BATCH_SIZE {
+            return Err(RevocationRegistryError::BatchTooLarge);
+        }
+
         ensure_not_paused(&env)?;
         issuer.require_auth();
         let batch_limit: u32 = env
@@ -680,6 +688,42 @@ mod tests {
 
         let res = client.try_batch_revoke(&issuer, &vc_hashes);
         assert_eq!(res, Err(Ok(RevocationRegistryError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_batch_revoke_size_boundaries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+
+        let mut single_hash_batch = Vec::new(&env);
+        single_hash_batch.push_back(BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(client.try_batch_revoke(&issuer, &single_hash_batch), Ok(Ok(())));
+
+        let mut max_hash_batch = Vec::new(&env);
+        for i in 1..=100 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            max_hash_batch.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+        assert_eq!(client.try_batch_revoke(&issuer, &max_hash_batch), Ok(Ok(())));
+    }
+
+    #[test]
+    fn test_batch_revoke_rejects_empty_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+        let vc_hashes = Vec::new(&env);
+
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &vc_hashes),
+            Err(Ok(RevocationRegistryError::EmptyBatch))
+        );
     }
 
     #[test]
