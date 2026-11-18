@@ -381,6 +381,10 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
+/// Instance-storage TTL bump threshold (ledgers).
+const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
+/// Instance-storage TTL bump amount (≈ 29 days at 5 s/ledger).
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 /// Maximum number of entries allowed in a single batch operation.
 pub const MAX_BATCH_SIZE: u32 = 50;
 
@@ -506,6 +510,11 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
+        // Keep the instance entry (Admin, Config, singletons) from archiving
+        // after the default instance TTL window.
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events()
             .publish((Symbol::new(&env, "Initialized"),), admin.clone());
         Ok(())
@@ -783,7 +792,12 @@ impl CreditOracle {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::TxStats(subject), &stats);
+            .set(&DataKey::TxStats(subject.clone()), &stats);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TxStats(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         Ok(())
     }
 
@@ -864,7 +878,7 @@ impl CreditOracle {
             record.total_count = record.total_count.saturating_add(1);
             env.storage()
                 .persistent()
-                .set(&DataKey::RepaymentRecord(subject), &record);
+                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
         } else {
             let mut record: RepaymentRecord = env
                 .storage()
@@ -882,8 +896,13 @@ impl CreditOracle {
             record.total_repaid = record.total_repaid.saturating_add(amount);
             env.storage()
                 .persistent()
-                .set(&DataKey::RepaymentRecord(subject), &record);
+                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
         }
+        env.storage().persistent().extend_ttl(
+            &DataKey::RepaymentRecord(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         increment_repayments_recorded(&env);
         Ok(())
     }
