@@ -91,6 +91,8 @@ pub enum DataKey {
     DecayBpsPerDay,
     /// Issue #530: lower bound (bps) the recency multiplier may decay to.
     MinRecencyBps,
+    /// Issue #1167: minimum score for subjects with repayment history during decay.
+    DecayFloorScore,
     /// Issue #933: governance contract that currently holds the admin role.
     /// Written by `accept_admin` when the accepting address is a contract and
     /// removed when an account address accepts. Read via `get_governance`.
@@ -110,10 +112,13 @@ pub const DEFAULT_DECAY_BPS_PER_DAY: u32 = 5;
 /// Default recency floor from docs/vc-weighting-design.md: 5_000 bps (50%).
 pub const DEFAULT_MIN_RECENCY_BPS: u32 = 5_000;
 
+/// Default score floor preserves the existing minimum score of 300.
+pub const DEFAULT_DECAY_FLOOR_SCORE: u32 = MIN_SCORE;
+
 /// Recency decay configuration for the VC component of the score (issue #530).
 ///
 /// Returned by `get_recency_decay` and written by `set_recency_decay`. When
-/// `enabled` is `false` the other two fields are ignored and `compute_score`
+/// `enabled` is `false` the recency fields are ignored and `compute_score`
 /// behaves exactly as it did before recency decay existed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -124,6 +129,8 @@ pub struct RecencyDecayConfig {
     pub decay_bps_per_day: u32,
     /// Floor (bps) below which the multiplier never falls, e.g. 5_000 = 50%.
     pub min_recency_bps: u32,
+    /// Minimum score to preserve for subjects with repayment history.
+    pub decay_floor_score: u32,
 }
 
 /// Recency multiplier in basis points for a credential anchored at `anchored_at`.
@@ -172,7 +179,8 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
 ///
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
-/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+/// Scores for subjects with repayment history are clamped to the configured
+/// decay floor and `MAX_SCORE`; all others are clamped to `[MIN_SCORE, MAX_SCORE]`.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_score_pure(
     vc_points: u32,
@@ -184,6 +192,7 @@ pub fn compute_score_pure(
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
+    decay_floor_score: u32,
 ) -> u32 {
     let vc_score = (vc_points).min(100) as u128;
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
@@ -201,7 +210,12 @@ pub fn compute_score_pure(
         + repay_score * repayment_weight as u128)
         / 100;
     let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let score_floor = if total_count > 0 {
+        decay_floor_score.max(MIN_SCORE).min(MAX_SCORE)
+    } else {
+        MIN_SCORE
+    };
+    score.min(MAX_SCORE as u128).max(score_floor as u128) as u32
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -393,6 +407,11 @@ fn load_recency_config(env: &Env) -> RecencyDecayConfig {
             .instance()
             .get(&DataKey::MinRecencyBps)
             .unwrap_or(DEFAULT_MIN_RECENCY_BPS),
+        decay_floor_score: env
+            .storage()
+            .instance()
+            .get(&DataKey::DecayFloorScore)
+            .unwrap_or(DEFAULT_DECAY_FLOOR_SCORE),
     }
 }
 
@@ -931,20 +950,20 @@ impl CreditOracle {
     /// restores the previous behavior on the next `compute_score`.
     ///
     /// Suggested values from docs/vc-weighting-design.md: `decay_bps_per_day =
-    /// 5` (0.05%/day) and `min_recency_bps = 5_000` (50% floor).
+    /// 5` (0.05%/day), `min_recency_bps = 5_000` (50% floor), and a
+    /// `decay_floor_score` of 300 (the base score).
     ///
     /// Auth: admin only.
     ///
     /// Errors with `InvalidRecencyConfig` when `min_recency_bps` exceeds
-    /// `BPS_DENOMINATOR`, which would otherwise define a floor above full
-    /// weight. `decay_bps_per_day` needs no bound: the floor already caps how
-    /// far any rate can push the multiplier down.
+    /// `BPS_DENOMINATOR` or `decay_floor_score` exceeds `MAX_SCORE`.
     pub fn set_recency_decay(
         env: Env,
         admin: Address,
         enabled: bool,
         decay_bps_per_day: u32,
         min_recency_bps: u32,
+        decay_floor_score: u32,
     ) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
@@ -955,7 +974,7 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        if min_recency_bps > BPS_DENOMINATOR {
+        if min_recency_bps > BPS_DENOMINATOR || decay_floor_score > MAX_SCORE {
             return Err(CreditOracleError::InvalidRecencyConfig);
         }
 
@@ -968,10 +987,18 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::MinRecencyBps, &min_recency_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::DecayFloorScore, &decay_floor_score);
 
         env.events().publish(
             (symbol_short!("RecDecay"),),
-            (enabled, decay_bps_per_day, min_recency_bps),
+            (
+                enabled,
+                decay_bps_per_day,
+                min_recency_bps,
+                decay_floor_score,
+            ),
         );
         Ok(())
     }
@@ -1094,6 +1121,16 @@ impl CreditOracle {
         // is never computed, so the per-VC arithmetic below is identical to the
         // pre-#530 code path.
         let recency_config = load_recency_config(&env);
+        let decay_floor_score = if recency_config.enabled
+            && env
+                .storage()
+                .instance()
+                .has(&DataKey::IdentityOracleId)
+        {
+            recency_config.decay_floor_score
+        } else {
+            MIN_SCORE
+        };
         let recency = if recency_config.enabled {
             Some(recency_config)
         } else {
@@ -1209,6 +1246,7 @@ impl CreditOracle {
             weights.vc_weight,
             weights.tx_weight,
             weights.repayment_weight,
+            decay_floor_score,
         );
 
         // Compute the repayment rate in basis points. The counters are u32, so
@@ -1815,9 +1853,19 @@ mod tests {
 
     #[test]
     fn test_scoring_spec_example_1_new_user_scores_300() {
-        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(score, 300);
+    }
+
+    #[test]
+    fn test_compute_score_pure_applies_decay_floor_only_with_repayment_history() {
+        let score_with_history =
+            compute_score_pure(0, 0, 0, 0, 1, 0, 40, 30, 30, 600);
+        assert_eq!(score_with_history, 600);
+
+        let score_without_history = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, 600);
+        assert_eq!(score_without_history, MIN_SCORE);
     }
 
     #[test]
@@ -1832,6 +1880,7 @@ mod tests {
             40,
             30,
             30,
+            MIN_SCORE,
         );
 
         assert_eq!(score, 569);
@@ -1849,6 +1898,7 @@ mod tests {
             40,
             30,
             30,
+            MIN_SCORE,
         );
 
         assert_eq!(score, 817);
@@ -1866,6 +1916,7 @@ mod tests {
             40,
             30,
             30,
+            MIN_SCORE,
         );
 
         assert_eq!(score, 850);
@@ -1896,6 +1947,7 @@ mod tests {
                 40,
                 30,
                 30,
+                MIN_SCORE,
             )
         };
 
@@ -2790,8 +2842,8 @@ mod tests {
         assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
         // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
-        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
-        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40, MIN_SCORE);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40, MIN_SCORE);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
@@ -3481,7 +3533,7 @@ mod tests {
         client.anchor_vc(&feeder, &user, &vc4, &Some(unreg));
 
         let score = client.compute_score(&user);
-        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30);
+        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(score, expected);
 
         let record = client.get_score(&user).unwrap();
@@ -3639,6 +3691,7 @@ mod tests {
         assert!(!cfg.enabled, "decay must be opt-in");
         assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
         assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
+        assert_eq!(cfg.decay_floor_score, DEFAULT_DECAY_FLOOR_SCORE);
     }
 
     #[test]
@@ -3676,12 +3729,13 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        client.set_recency_decay(&admin, &true, &10, &2_500);
+        client.set_recency_decay(&admin, &true, &10, &2_500, &600);
 
         let cfg = client.get_recency_decay();
         assert!(cfg.enabled);
         assert_eq!(cfg.decay_bps_per_day, 10);
         assert_eq!(cfg.min_recency_bps, 2_500);
+        assert_eq!(cfg.decay_floor_score, 600);
     }
 
     #[test]
@@ -3695,7 +3749,7 @@ mod tests {
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000);
+        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000, &600);
         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
@@ -3709,7 +3763,10 @@ mod tests {
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001);
+        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001, &600);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
+
+        let result = client.try_set_recency_decay(&admin, &true, &5, &5_000, &(MAX_SCORE + 1));
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
 
         // The rejected call must not have mutated stored config.
@@ -3738,7 +3795,13 @@ mod tests {
 
         let before = client.compute_score(&user);
 
-        client.set_recency_decay(&admin, &true, &5, &5_000);
+        client.set_recency_decay(
+            &admin,
+            &true,
+            &5,
+            &5_000,
+            &DEFAULT_DECAY_FLOOR_SCORE,
+        );
         // Age the ledger by 5 years and recompute.
         env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
         env.ledger()
@@ -3794,6 +3857,7 @@ mod tests {
                     40,
                     30,
                     30,
+                    MIN_SCORE,
                 )
             };
 

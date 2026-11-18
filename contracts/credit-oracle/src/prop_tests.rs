@@ -48,6 +48,7 @@ proptest! {
             vc_points, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         prop_assert!(
             score >= MIN_SCORE && score <= MAX_SCORE,
@@ -82,11 +83,13 @@ proptest! {
             lo, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         let score_hi = compute_score_pure(
             hi, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         prop_assert!(
             score_hi >= score_lo,
@@ -101,7 +104,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 #[test]
 fn prop_zero_inputs_yields_min_score() {
-    let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+    let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
     assert_eq!(
         score, MIN_SCORE,
         "expected MIN_SCORE ({}) for all-zero inputs, got {}",
@@ -130,6 +133,7 @@ fn prop_perfect_inputs_yields_max_score() {
         1, 1,
         10_000_000_000i128,
         40, 30, 30,
+        MIN_SCORE,
     );
     assert_eq!(
         score, MAX_SCORE,
@@ -160,12 +164,14 @@ proptest! {
             vc_points, volume_30d, avg_cps,
             on_time, total_count, total_repaid,
             40, 30, 30,
+            MIN_SCORE,
         );
         // VC-boosted weights (80 / 10 / 10) — vc_weight doubled, others halved
         let score_boosted = compute_score_pure(
             vc_points, volume_30d, avg_cps,
             on_time, total_count, total_repaid,
             80, 10, 10,
+            MIN_SCORE,
         );
         prop_assert!(
             score_boosted >= score_base,
@@ -203,6 +209,7 @@ proptest! {
             vc_points, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
 
         // --- Perturb vc_points by ±1 ---
@@ -212,6 +219,7 @@ proptest! {
                 perturbed_vc, volume_30d, avg_counterparties,
                 on_time, total_count, total_repaid,
                 vc_w, tx_w, repay_w,
+                MIN_SCORE,
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(
@@ -228,6 +236,7 @@ proptest! {
                 vc_points, perturbed_vol, avg_counterparties,
                 on_time, total_count, total_repaid,
                 vc_w, tx_w, repay_w,
+                MIN_SCORE,
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(

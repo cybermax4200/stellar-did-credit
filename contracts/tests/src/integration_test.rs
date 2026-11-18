@@ -2943,6 +2943,7 @@ mod tests {
                 weights.vc_weight,
                 weights.tx_weight,
                 weights.repayment_weight,
+                credit_oracle::MIN_SCORE,
             )
         };
 
@@ -2951,7 +2952,7 @@ mod tests {
         assert_eq!(baseline, expected(100));
 
         // Enable the documented defaults: 5 bps/day with a 50% floor.
-        credit.set_recency_decay(&admin, &true, &5, &5_000);
+        credit.set_recency_decay(&admin, &true, &5, &5_000, &credit_oracle::MIN_SCORE);
 
         // 100 days old => 10_000 - 500 = 9_500 bps => 19 points per VC.
         env.ledger().set_timestamp(t0 + 100 * day);
@@ -2973,10 +2974,51 @@ mod tests {
         assert!(aged_5y < aged_100d, "decay must be monotonic in age");
 
         // Turning decay off restores the pre-#530 score exactly.
-        credit.set_recency_decay(&admin, &false, &5, &5_000);
+        credit.set_recency_decay(&admin, &false, &5, &5_000, &credit_oracle::MIN_SCORE);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), baseline);
+    }
+
+    #[test]
+    fn test_recency_decay_preserves_score_floor_for_repayment_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject_with_history = Address::generate(&env);
+        let subject_without_history = Address::generate(&env);
+
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+        identity.register_issuer(&issuer);
+        credit.register_lender(&admin, &lender);
+
+        let t0 = 1_700_000_000u64;
+        env.ledger().set_timestamp(t0);
+        for subject in [&subject_with_history, &subject_without_history] {
+            identity.anchor_did(subject, &String::from_str(&env, "ipfs://DecayFloor"));
+            for i in 0..5u8 {
+                identity.anchor_vc(&issuer, subject, &BytesN::from_array(&env, &[i; 32]));
+            }
+        }
+
+        credit.record_repayment(&lender, &subject_with_history, &100_000_000i128, &true);
+        credit.set_recency_decay(&admin, &true, &10_000, &0, &600);
+
+        env.ledger().set_timestamp(t0 + 86_400);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        assert_eq!(credit.compute_score(&subject_with_history), 600);
+        assert_eq!(credit.compute_score(&subject_without_history), 300);
     }
 
     /// Full cross-contract integration test for the governance -> credit-oracle
