@@ -6,6 +6,9 @@ use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, Address, BytesN, Env,
     IntoVal, Symbol, Vec,
 };
+use credit_oracle_types::{
+    PERS_TTL_THRESHOLD, PERS_TTL_EXTEND, INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT,
+};
 
 // ---------------------------------------------------------------------------
 // Auth helper
@@ -82,11 +85,11 @@ pub enum RevocationKey {
     BatchLimit,
 }
 
-const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
-const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
-
-const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
-const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
+// const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
+// const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+//
+// const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+// const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Hard safety cap for batch revoke operations.
 const MAX_BATCH_SIZE: u32 = 100;

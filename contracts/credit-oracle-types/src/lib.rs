@@ -32,6 +32,16 @@ pub struct IdentityVCRecord {
 /// (e.g., setting a component weight to 0 silently disables that metric).
 pub const MIN_COMPONENT_WEIGHT: u32 = 10;
 
+/// TTL threshold for persistent storage.
+pub const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
+/// TTL extension amount for persistent storage.
+pub const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
+
+/// Threshold for bumping the instance TTL.
+pub const INSTANCE_BUMP_THRESHOLD: u32 = 5000; // ~7 hours
+/// Amount to bump the instance TTL.
+pub const INSTANCE_BUMP_AMOUNT: u32 = 500_000; // ~30 days
+
 /// The label a credential carries for scoring purposes (e.g. `kyc`,
 /// `employment`), stored on-chain as a `Symbol`.
 ///
