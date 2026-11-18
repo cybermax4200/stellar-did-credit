@@ -2377,7 +2377,11 @@ describe("StellarDIDCreditSDK", () => {
       });
 
       const sdk = new StellarDIDCreditSDK(mockConfig);
-      const result = await sdk.listRevokedByIssuer(issuerKeypair.publicKey());
+      const result = await sdk.listRevokedByIssuer(
+        issuerKeypair.publicKey(),
+        2,
+        50,
+      );
 
       expect(result).toEqual(revokedHashes);
       expect(result.every((hash) => Buffer.isBuffer(hash))).toBe(true);
@@ -2385,7 +2389,7 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.revocationRegistryId,
         method: "list_revoked_for_issuer",
       });
-      expect(mockLastContractCall?.args).toHaveLength(1);
+      expect(mockLastContractCall?.args).toHaveLength(3);
     });
   });
 
