@@ -507,6 +507,7 @@ mod tests {
         let credit_oracle = Address::generate(&env);
 
         governance.initialize(&admin, &credit_oracle, &100);
+        let metadata_cid = soroban_sdk::String::from_str(&env, "ipfs://QmDefaultMetadataCID");
         let proposal_id = governance.create_proposal(
             &proposer,
             &ScoringWeights {
@@ -516,6 +517,7 @@ mod tests {
             },
             &100,
             &0,
+            &metadata_cid,
         );
         assert_eq!(proposal_id, 1);
 
