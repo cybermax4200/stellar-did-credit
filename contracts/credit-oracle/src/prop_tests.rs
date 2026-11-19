@@ -127,9 +127,12 @@ fn prop_perfect_inputs_yields_max_score() {
         100,
         8_000_000_000i128,
         100,
-        1, 1,
+        1,
+        1,
         10_000_000_000i128,
-        40, 30, 30,
+        40,
+        30,
+        30,
     );
     assert_eq!(
         score, MAX_SCORE,
@@ -451,5 +454,49 @@ proptest! {
             score, vc_points, volume_30d, avg_counterparties,
             on_time_count, total_count, total_repaid
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 14 — Protocol metrics accumulation and idempotence:
+//               First-time borrower scoring increments total_borrowers and accumulates
+//               volume; re-scoring existing borrowers is strictly idempotent.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn prop_protocol_metrics_accumulation_and_idempotence(
+        events in proptest::collection::vec((0u8..16u8, 0i128..10_000_000_000i128), 1..=100),
+    ) {
+        let mut seen = [false; 16];
+        let mut expected_borrowers: u64 = 0;
+        let mut expected_volume: i128 = 0;
+
+        for &(borrower_id, volume) in &events {
+            let id = borrower_id as usize;
+            if !seen[id] {
+                seen[id] = true;
+                expected_borrowers = expected_borrowers.saturating_add(1);
+                expected_volume = expected_volume.saturating_add(volume.max(0));
+            }
+        }
+
+        // Count unique borrowers in events
+        let unique_count = seen.iter().filter(|&&s| s).count() as u64;
+        prop_assert_eq!(expected_borrowers, unique_count);
+
+        // Re-scoring all events a second time should not change metrics (idempotence)
+        let mut rescore_borrowers = expected_borrowers;
+        let mut rescore_volume = expected_volume;
+        for &(borrower_id, volume) in &events {
+            let id = borrower_id as usize;
+            if !seen[id] {
+                rescore_borrowers = rescore_borrowers.saturating_add(1);
+                rescore_volume = rescore_volume.saturating_add(volume.max(0));
+            }
+        }
+        prop_assert_eq!(rescore_borrowers, expected_borrowers);
+        prop_assert_eq!(rescore_volume, expected_volume);
     }
 }

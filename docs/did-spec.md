@@ -293,6 +293,13 @@ A subject who previously deactivated their identity can restore active status by
    - **Verifiable Credentials Remain Revoked:** Calling `reactivate_identity` does **not** un-revoke previously revoked VCs. All historical records remain `revoked = true` to prevent replaying stale or invalidated credentials. Issuers must explicitly issue and anchor new credentials via `anchor_vc` or `anchor_vc_typed`.
    - **DID Document after `deactivate_did`:** If the subject was deactivated using `deactivate_did`, the DID document CID was removed from persistent storage. `reactivate_identity` does **not** restore the document CID; the subject must call [`anchor_did(subject, did_doc_cid)`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L702) to re-anchor their DID document.
 
+### 3.5 Verifiable Credential Verification
+
+Relying parties (e.g. lenders or anchors) can verify verifiable credentials anchored for a subject via read-only entry points on the `identity-oracle` contract:
+
+- **`verify_vc(subject, vc_hash)`**: Verifies a single credential. Returns `true` when `subject` has an active anchored VC record matching `vc_hash` that has not been revoked (checking both local record status and any linked `RevocationRegistry`), and `false` otherwise.
+- **`batch_verify_vc(subject, vc_hashes)`**: Verifies multiple credentials in a single atomic invocation. Takes a vector of `BytesN<32>` VC hashes and returns a vector of booleans of equal length, where each boolean indicates the validity of the corresponding hash. Unanchored or revoked credentials report `false`, while valid credentials report `true`. An empty input vector returns an empty output vector.
+
 ## 4. Security Considerations
 
 ### 4.1 Authentication and Authorization

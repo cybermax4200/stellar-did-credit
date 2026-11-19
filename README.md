@@ -163,7 +163,7 @@ Maintains an on-chain list of revoked credential hashes. Revocation status is ke
 | `revoke(issuer, subject, vc_hash)` | Revokes a credential by hash; `subject` updates the linked identity-oracle's per-subject record |
 | `batch_revoke(issuer, vc_hashes)` | Revokes multiple credentials in one transaction |
 | `is_revoked(vc_hash)`             | Returns true if the credential has been revoked |
-| `list_revoked_for_issuer(issuer)` | Returns all VC hashes revoked by the issuer    |
+| `list_revoked_for_issuer(issuer, page, limit)` | Returns a zero-based page (maximum 100) of VC hashes revoked by the issuer |
 | `upgrade(admin, new_wasm_hash)`   | Upgrades the contract WASM in-place             |
 
 ### score-range-verifier
