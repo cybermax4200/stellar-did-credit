@@ -2,8 +2,8 @@
 mod tests {
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        ProtocolMetrics, RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry,
-        TxStats, MAX_BATCH_SIZE,
+        ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
+        SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -154,6 +154,161 @@ mod tests {
         assert_eq!(record.on_time_count, 1);
         assert_eq!(record.total_count, 2);
         assert_eq!(record.total_repaid, 350_000_000);
+    }
+
+    #[test]
+    fn test_batch_record_repayments_matches_sequential_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let batch_id = env.register_contract(None, CreditOracle);
+        let sequential_id = env.register_contract(None, CreditOracle);
+        let batch = CreditOracleClient::new(&env, &batch_id);
+        let sequential = CreditOracleClient::new(&env, &sequential_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        batch.initialize(&admin);
+        sequential.initialize(&admin);
+        batch.register_lender(&admin, &lender);
+        sequential.register_lender(&admin, &lender);
+
+        let subjects = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let mut entries = soroban_sdk::Vec::new(&env);
+        for i in 0..MAX_BATCH_SIZE {
+            entries.push_back(RepaymentEntry {
+                subject: subjects[(i % subjects.len() as u32) as usize].clone(),
+                amount: i as i128 + 1,
+                on_time: i % 3 != 0,
+            });
+        }
+
+        env.events().all();
+        batch.batch_record_repayments(&lender, &entries);
+        let events = env.events().all();
+        let mut repayment_event_count = 0;
+        for i in 0..events.len() {
+            let (event_contract, topics, data) = events.get(i).unwrap();
+            if event_contract != batch_id || topics.len() != 1 {
+                continue;
+            }
+            let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+            if topic == symbol_short!("Repay") {
+                let (event_lender, event_subject, event_amount, event_on_time): (
+                    Address,
+                    Address,
+                    i128,
+                    bool,
+                ) = data.try_into_val(&env).unwrap();
+                let expected_entry = entries.get(repayment_event_count).unwrap();
+                assert_eq!(event_lender, lender);
+                assert_eq!(event_subject, expected_entry.subject);
+                assert_eq!(event_amount, expected_entry.amount);
+                assert_eq!(event_on_time, expected_entry.on_time);
+                repayment_event_count += 1;
+            }
+        }
+        assert_eq!(repayment_event_count, MAX_BATCH_SIZE);
+
+        for entry in entries.iter() {
+            sequential.record_repayment(&lender, &entry.subject, &entry.amount, &entry.on_time);
+        }
+
+        for subject in subjects.iter() {
+            let batch_record: RepaymentRecord = env.as_contract(&batch_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::RepaymentRecord(subject.clone()))
+                    .unwrap()
+            });
+            let sequential_record: RepaymentRecord = env.as_contract(&sequential_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::RepaymentRecord(subject.clone()))
+                    .unwrap()
+            });
+            assert_eq!(batch_record.on_time_count, sequential_record.on_time_count);
+            assert_eq!(batch_record.total_count, sequential_record.total_count);
+            assert_eq!(batch_record.total_repaid, sequential_record.total_repaid);
+        }
+        assert_eq!(
+            batch.get_protocol_stats().total_repayments_recorded,
+            MAX_BATCH_SIZE as u64
+        );
+        assert_eq!(
+            batch.get_protocol_stats().total_repayments_recorded,
+            sequential.get_protocol_stats().total_repayments_recorded
+        );
+        assert_eq!(
+            batch.get_protocol_metrics().total_repayments_count,
+            MAX_BATCH_SIZE as u64
+        );
+        assert_eq!(
+            batch.get_protocol_metrics().total_repayments_count,
+            sequential.get_protocol_metrics().total_repayments_count
+        );
+    }
+
+    #[test]
+    fn test_batch_record_repayments_rejects_oversized_and_invalid_batches() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        credit.initialize(&admin);
+        credit.register_lender(&admin, &lender);
+
+        let mut oversized = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            oversized.push_back(RepaymentEntry {
+                subject: Address::generate(&env),
+                amount: 1,
+                on_time: true,
+            });
+        }
+        assert_eq!(
+            credit.try_batch_record_repayments(&lender, &oversized),
+            Err(Ok(CreditOracleError::BatchTooLarge))
+        );
+
+        let valid_subject = Address::generate(&env);
+        let invalid_subject = Address::generate(&env);
+        let mut invalid_batch = soroban_sdk::Vec::new(&env);
+        invalid_batch.push_back(RepaymentEntry {
+            subject: valid_subject.clone(),
+            amount: 10,
+            on_time: true,
+        });
+        invalid_batch.push_back(RepaymentEntry {
+            subject: invalid_subject.clone(),
+            amount: 0,
+            on_time: false,
+        });
+        assert_eq!(
+            credit.try_batch_record_repayments(&lender, &invalid_batch),
+            Err(Ok(CreditOracleError::InvalidAmount))
+        );
+
+        let valid_record: Option<RepaymentRecord> = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(valid_subject))
+        });
+        let invalid_record: Option<RepaymentRecord> = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(invalid_subject))
+        });
+        assert!(valid_record.is_none());
+        assert!(invalid_record.is_none());
+        assert_eq!(credit.get_protocol_stats().total_repayments_recorded, 0);
     }
 
     #[test]
