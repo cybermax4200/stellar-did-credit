@@ -450,12 +450,12 @@ proptest! {
         total_count         in extreme_u32(),
         total_repaid        in extreme_i128(),
         (vc_w, tx_w, repay_w) in valid_weights(),
-        MIN_SCORE,
     ) {
         let score = compute_score_pure(
             vc_points, volume_30d, avg_counterparties,
             on_time_count, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+        MIN_SCORE,
         );
         prop_assert!(
             score >= MIN_SCORE && score <= MAX_SCORE,
