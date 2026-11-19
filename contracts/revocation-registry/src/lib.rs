@@ -66,6 +66,7 @@ pub enum RevocationRegistryError {
     ReentrancyDetected = 7,
     /// Batch limit must be between 1 and MAX_BATCH_SIZE.
     InvalidBatchLimit = 8,
+    EmptyBatch = 9,
 }
 
 #[contracttype]
@@ -407,8 +408,16 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
-        ensure_not_paused(&env)?;
         issuer.require_auth();
+        ensure_not_paused(&env)?;
+
+        if vc_hashes.is_empty() {
+            return Err(RevocationRegistryError::EmptyBatch);
+        }
+        if vc_hashes.len() > MAX_BATCH_SIZE {
+            return Err(RevocationRegistryError::BatchTooLarge);
+        }
+
         let batch_limit: u32 = env
             .storage()
             .instance()
@@ -733,6 +742,49 @@ mod tests {
     }
 
     #[test]
+    fn test_batch_revoke_size_boundaries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+
+        let mut single_hash_batch = Vec::new(&env);
+        single_hash_batch.push_back(BytesN::from_array(&env, &[0u8; 32]));
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &single_hash_batch),
+            Ok(Ok(()))
+        );
+
+        let mut max_hash_batch = Vec::new(&env);
+        for i in 1..=100 {
+            let mut hash_arr = [0u8; 32];
+            hash_arr[0] = i;
+            max_hash_batch.push_back(BytesN::from_array(&env, &hash_arr));
+        }
+        env.cost_estimate().budget().reset_unlimited();
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &max_hash_batch),
+            Ok(Ok(()))
+        );
+    }
+
+    #[test]
+    fn test_batch_revoke_rejects_empty_batch() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+        let vc_hashes = Vec::new(&env);
+
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &vc_hashes),
+            Err(Ok(RevocationRegistryError::EmptyBatch))
+        );
+    }
+
+    #[test]
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
@@ -812,7 +864,7 @@ mod tests {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_batch_revoke_all_marked(
-            hash_bytes in proptest::collection::vec(any::<[u8; 32]>(), 0..=50),
+            hash_bytes in proptest::collection::vec(any::<[u8; 32]>(), 1..=50),
         ) {
             let env = Env::default();
             env.mock_all_auths();

@@ -250,12 +250,7 @@ pub fn compute_score_pure(
 
     let score =
         (MIN_SCORE as u128).saturating_add(composite.saturating_mul(550).saturating_div(100));
-    let mut score = score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
-    // Issue #1167: subjects with repayment history never decay below the floor.
-    if total_count > 0 {
-        score = score.max(decay_floor_score.min(MAX_SCORE));
-    }
-    score
+    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
 }
 
 /// Number of ledgers after which a score is considered stale.
