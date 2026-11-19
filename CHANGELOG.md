@@ -9,6 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `identity-oracle`: implemented `get_issuers_paginated(env, start_index, limit)` returning bounded sub-slices of trusted issuers (enforcing `limit <= 50`), added `get_issuer_count(env)` total count helper, and retained `list_issuers(env)` bounded to the first 50 issuers as a deprecated compatibility entrypoint (#1164)
+- `credit-oracle`: introduced `ProtocolMetrics` struct and `DataKey::ProtocolMetrics` storage key tracking cumulative volume scored, unique borrowers scored, and recorded repayments count; updated `compute_score` to accumulate volume and borrowers idempotently; added live view function `get_protocol_metrics(env)` (#1168)
+
 - `identity-oracle`: added the read-only `is_paused()` function to query the contract pause state, returning `false` before `pause` has ever been called (#970)
 - `identity-oracle`: added the read-only `get_admin()` function, returning the current administrator address or `None` before initialization (#972)
 - `packages/cli` (`@stellar-did-credit/cli`): added an `upgrade` command group with `identity`, `credit`, and `revocation` subcommands to upgrade contract WASM bytecode in-place (admin only). Each takes `<admin-secret> <wasm-hash>`, validates that the hash is 64 hex characters (32 bytes), and supports `--dry-run` to simulate the upgrade without broadcasting. Contract upgrades are irreversible once confirmed on-chain (#963)
