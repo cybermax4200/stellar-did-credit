@@ -40,8 +40,6 @@ fn main() {
         "gamma_abc_4",
         "gamma_abc_5",
         "gamma_abc_6",
-        "gamma_abc_7",
-        "gamma_abc_8",
     ] {
         let bytes = point(&source, name);
         assert_eq!(bytes.len(), 96, "wrong size for {name}");

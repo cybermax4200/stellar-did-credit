@@ -2,8 +2,8 @@
 mod tests {
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        ProtocolMetrics, RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry,
-        TxStats, MAX_BATCH_SIZE,
+        ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
+        SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -154,6 +154,161 @@ mod tests {
         assert_eq!(record.on_time_count, 1);
         assert_eq!(record.total_count, 2);
         assert_eq!(record.total_repaid, 350_000_000);
+    }
+
+    #[test]
+    fn test_batch_record_repayments_matches_sequential_calls() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let batch_id = env.register_contract(None, CreditOracle);
+        let sequential_id = env.register_contract(None, CreditOracle);
+        let batch = CreditOracleClient::new(&env, &batch_id);
+        let sequential = CreditOracleClient::new(&env, &sequential_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        batch.initialize(&admin);
+        sequential.initialize(&admin);
+        batch.register_lender(&admin, &lender);
+        sequential.register_lender(&admin, &lender);
+
+        let subjects = [
+            Address::generate(&env),
+            Address::generate(&env),
+            Address::generate(&env),
+        ];
+        let mut entries = soroban_sdk::Vec::new(&env);
+        for i in 0..MAX_BATCH_SIZE {
+            entries.push_back(RepaymentEntry {
+                subject: subjects[(i % subjects.len() as u32) as usize].clone(),
+                amount: i as i128 + 1,
+                on_time: i % 3 != 0,
+            });
+        }
+
+        env.events().all();
+        batch.batch_record_repayments(&lender, &entries);
+        let events = env.events().all();
+        let mut repayment_event_count = 0;
+        for i in 0..events.len() {
+            let (event_contract, topics, data) = events.get(i).unwrap();
+            if event_contract != batch_id || topics.len() != 1 {
+                continue;
+            }
+            let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+            if topic == symbol_short!("Repay") {
+                let (event_lender, event_subject, event_amount, event_on_time): (
+                    Address,
+                    Address,
+                    i128,
+                    bool,
+                ) = data.try_into_val(&env).unwrap();
+                let expected_entry = entries.get(repayment_event_count).unwrap();
+                assert_eq!(event_lender, lender);
+                assert_eq!(event_subject, expected_entry.subject);
+                assert_eq!(event_amount, expected_entry.amount);
+                assert_eq!(event_on_time, expected_entry.on_time);
+                repayment_event_count += 1;
+            }
+        }
+        assert_eq!(repayment_event_count, MAX_BATCH_SIZE);
+
+        for entry in entries.iter() {
+            sequential.record_repayment(&lender, &entry.subject, &entry.amount, &entry.on_time);
+        }
+
+        for subject in subjects.iter() {
+            let batch_record: RepaymentRecord = env.as_contract(&batch_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::RepaymentRecord(subject.clone()))
+                    .unwrap()
+            });
+            let sequential_record: RepaymentRecord = env.as_contract(&sequential_id, || {
+                env.storage()
+                    .persistent()
+                    .get(&DataKey::RepaymentRecord(subject.clone()))
+                    .unwrap()
+            });
+            assert_eq!(batch_record.on_time_count, sequential_record.on_time_count);
+            assert_eq!(batch_record.total_count, sequential_record.total_count);
+            assert_eq!(batch_record.total_repaid, sequential_record.total_repaid);
+        }
+        assert_eq!(
+            batch.get_protocol_stats().total_repayments_recorded,
+            MAX_BATCH_SIZE as u64
+        );
+        assert_eq!(
+            batch.get_protocol_stats().total_repayments_recorded,
+            sequential.get_protocol_stats().total_repayments_recorded
+        );
+        assert_eq!(
+            batch.get_protocol_metrics().total_repayments_count,
+            MAX_BATCH_SIZE as u64
+        );
+        assert_eq!(
+            batch.get_protocol_metrics().total_repayments_count,
+            sequential.get_protocol_metrics().total_repayments_count
+        );
+    }
+
+    #[test]
+    fn test_batch_record_repayments_rejects_oversized_and_invalid_batches() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        credit.initialize(&admin);
+        credit.register_lender(&admin, &lender);
+
+        let mut oversized = soroban_sdk::Vec::new(&env);
+        for _ in 0..=MAX_BATCH_SIZE {
+            oversized.push_back(RepaymentEntry {
+                subject: Address::generate(&env),
+                amount: 1,
+                on_time: true,
+            });
+        }
+        assert_eq!(
+            credit.try_batch_record_repayments(&lender, &oversized),
+            Err(Ok(CreditOracleError::BatchTooLarge))
+        );
+
+        let valid_subject = Address::generate(&env);
+        let invalid_subject = Address::generate(&env);
+        let mut invalid_batch = soroban_sdk::Vec::new(&env);
+        invalid_batch.push_back(RepaymentEntry {
+            subject: valid_subject.clone(),
+            amount: 10,
+            on_time: true,
+        });
+        invalid_batch.push_back(RepaymentEntry {
+            subject: invalid_subject.clone(),
+            amount: 0,
+            on_time: false,
+        });
+        assert_eq!(
+            credit.try_batch_record_repayments(&lender, &invalid_batch),
+            Err(Ok(CreditOracleError::InvalidAmount))
+        );
+
+        let valid_record: Option<RepaymentRecord> = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(valid_subject))
+        });
+        let invalid_record: Option<RepaymentRecord> = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::RepaymentRecord(invalid_subject))
+        });
+        assert!(valid_record.is_none());
+        assert!(invalid_record.is_none());
+        assert_eq!(credit.get_protocol_stats().total_repayments_recorded, 0);
     }
 
     #[test]
@@ -2382,6 +2537,103 @@ mod tests {
         assert!(
             record2.computed_at_ledger > record1.computed_at_ledger,
             "computed_at_ledger should increase after recomputation"
+        );
+    }
+
+    /// A cached score must be reported stale once the current ledger is more
+    /// than `STALE_LEDGER_AGE` (~30 days / 86_400 ledgers) ahead of the ledger
+    /// it was computed at.
+    #[test]
+    fn test_get_score_stale_by_ledger_age() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleAge"));
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
+
+        credit.compute_score(&subject);
+        let record = credit.get_score(&subject).unwrap();
+        let computed_at = record.computed_at_ledger;
+        assert!(!record.stale, "a freshly computed score must not be stale");
+
+        // `STALE_LEDGER_AGE` is 86_400 ledgers and the check is a strict `>`,
+        // so advancing exactly that many ledgers plus one crosses the threshold.
+        env.ledger().set_sequence_number(computed_at + 86_400 + 1);
+
+        let record = credit.get_score(&subject).unwrap();
+        assert!(
+            record.stale,
+            "score older than STALE_LEDGER_AGE must be reported stale"
+        );
+        assert_eq!(
+            record.computed_at_ledger, computed_at,
+            "staleness is computed at read time; the stored ledger must not change"
+        );
+    }
+
+    /// A cached score must be reported stale once the subject's identity state
+    /// changes after the score was computed (here: a new VC is anchored).
+    #[test]
+    fn test_get_score_stale_by_identity_state_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleIdentity"));
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
+
+        credit.compute_score(&subject);
+        let record = credit.get_score(&subject).unwrap();
+        let computed_at = record.computed_at_ledger;
+        assert!(!record.stale, "a freshly computed score must not be stale");
+
+        // Advance one ledger so the identity mutation is strictly newer than the
+        // score, then anchor a second VC for the subject.
+        env.ledger().set_sequence_number(computed_at + 1);
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[9u8; 32]));
+
+        assert!(
+            identity.get_last_state_change_ledger(&subject).unwrap() > computed_at,
+            "identity mutation must be recorded after the score was computed"
+        );
+
+        let record = credit.get_score(&subject).unwrap();
+        assert!(
+            record.stale,
+            "score must be stale after the identity state changed"
+        );
+        assert_eq!(
+            record.computed_at_ledger, computed_at,
+            "staleness is computed at read time; the stored ledger must not change"
         );
     }
 
