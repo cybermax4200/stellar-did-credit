@@ -1,18 +1,18 @@
 #[cfg(test)]
 mod tests {
+    use credit_oracle::{
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
+        ProtocolMetrics, RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry,
+        TxStats, MAX_BATCH_SIZE,
+    };
+    use governance::{Governance, GovernanceClient, GovernanceError};
+    use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
+    use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
         contract, contractimpl, symbol_short,
         testutils::{Address as _, Events, Ledger as _},
         Address, BytesN, Env, String, Symbol, TryIntoVal,
     };
-    use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry, TxStats,
-        MAX_BATCH_SIZE,
-    };
-    use governance::{Governance, GovernanceClient, GovernanceError};
-    use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
-    use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
 
     fn test_cid(env: &Env) -> String {
         String::from_str(env, "ipfs://QmDefaultMetadataCID123456789")
@@ -1271,7 +1271,7 @@ mod tests {
     }
 
     /// Integration test for governance execution timelock:
-    /// vote passes  advance past voting  execution rejected (timelock) 
+    /// vote passes  advance past voting  execution rejected (timelock)
     /// advance past delay  execution succeeds.
     ///
     /// This follows the double-timelock model from docs/governance.md 2.2:
@@ -1536,6 +1536,50 @@ mod tests {
     }
 
     #[test]
+    fn test_get_issuers_paginated_and_count_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        assert_eq!(identity.get_issuer_count(), 0);
+        assert_eq!(identity.get_issuers_paginated(&0, &10).len(), 0);
+        assert_eq!(identity.get_issuers_paginated(&5, &10).len(), 0);
+
+        let mut issuers = std::vec::Vec::new();
+        for _ in 0..5 {
+            let iss = soroban_sdk::Address::generate(&env);
+            identity.register_issuer(&iss);
+            issuers.push(iss);
+        }
+
+        assert_eq!(identity.get_issuer_count(), 5);
+
+        // Sub-slice pagination
+        let page1 = identity.get_issuers_paginated(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), issuers[0]);
+        assert_eq!(page1.get(1).unwrap(), issuers[1]);
+
+        let page2 = identity.get_issuers_paginated(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), issuers[2]);
+        assert_eq!(page2.get(1).unwrap(), issuers[3]);
+
+        let page3 = identity.get_issuers_paginated(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap(), issuers[4]);
+
+        // Beyond array length returns empty Vec
+        let empty_page = identity.get_issuers_paginated(&10, &10);
+        assert_eq!(empty_page.len(), 0);
+    }
+
+    #[test]
     fn test_protocol_stats_identity_oracle_integration() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1630,6 +1674,89 @@ mod tests {
 
         let stats4 = credit.get_protocol_stats();
         assert_eq!(stats4.total_subjects_scored, 2);
+    }
+
+    #[test]
+    fn test_protocol_metrics_credit_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // Verify initial live metrics are all zero
+        let m0: ProtocolMetrics = credit.get_protocol_metrics();
+        assert_eq!(m0.total_volume_scored, 0);
+        assert_eq!(m0.total_borrowers, 0);
+        assert_eq!(m0.total_repayments_count, 0);
+
+        let subject1 = soroban_sdk::Address::generate(&env);
+        let subject2 = soroban_sdk::Address::generate(&env);
+
+        // Record repayments
+        credit.record_repayment(&lender, &subject1, &100_000_000i128, &true);
+        credit.record_repayment(&lender, &subject1, &200_000_000i128, &false);
+        let m_repay = credit.get_protocol_metrics();
+        assert_eq!(m_repay.total_repayments_count, 2);
+        assert_eq!(m_repay.total_borrowers, 0);
+        assert_eq!(m_repay.total_volume_scored, 0);
+
+        // Provide tx volume for both borrowers
+        credit.update_tx_stats(
+            &feeder,
+            &subject1,
+            &TxStats {
+                volume_30d: 500_000_000,
+                tx_count_30d: 10,
+                avg_counterparties: 4,
+            },
+        );
+        credit.update_tx_stats(
+            &feeder,
+            &subject2,
+            &TxStats {
+                volume_30d: 800_000_000,
+                tx_count_30d: 20,
+                avg_counterparties: 6,
+            },
+        );
+
+        // First scoring for subject1
+        credit.compute_score(&subject1);
+        let m1 = credit.get_protocol_metrics();
+        assert_eq!(m1.total_borrowers, 1);
+        assert_eq!(m1.total_volume_scored, 500_000_000);
+        assert_eq!(m1.total_repayments_count, 2);
+
+        // Re-scoring subject1 after cooldown: strictly idempotent
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        credit.compute_score(&subject1);
+        let m1_rescore = credit.get_protocol_metrics();
+        assert_eq!(m1_rescore.total_borrowers, 1);
+        assert_eq!(m1_rescore.total_volume_scored, 500_000_000);
+        assert_eq!(m1_rescore.total_repayments_count, 2);
+
+        // First scoring for subject2: accumulative
+        credit.compute_score(&subject2);
+        let m2 = credit.get_protocol_metrics();
+        assert_eq!(m2.total_borrowers, 2);
+        assert_eq!(m2.total_volume_scored, 1_300_000_000);
+        assert_eq!(m2.total_repayments_count, 2);
+
+        // Record a repayment for subject2
+        credit.record_repayment(&lender, &subject2, &50_000_000i128, &true);
+        let m_final = credit.get_protocol_metrics();
+        assert_eq!(m_final.total_borrowers, 2);
+        assert_eq!(m_final.total_volume_scored, 1_300_000_000);
+        assert_eq!(m_final.total_repayments_count, 3);
     }
 
     /// Verify that deactivate/reactivate lifecycle works across identity-oracle
@@ -2001,7 +2128,8 @@ mod tests {
         let admin = soroban_sdk::Address::generate(&env);
         let issuer = soroban_sdk::Address::generate(&env);
         let subject = soroban_sdk::Address::generate(&env);
-        let did_uri = String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
+        let did_uri =
+            String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
 
         let mut hash_bytes = [0u8; 32];
         hash_bytes[0] = 42;
@@ -2025,26 +2153,29 @@ mod tests {
                 .has(&identity_oracle::DataKey::StorageVersion));
 
             // Persistent storage: simulate pre-migration identity records
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::TrustedIssuer(issuer.clone()), &true);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::TrustedIssuer(issuer.clone()),
+                &true,
+            );
             let mut issuers = soroban_sdk::Vec::new(&env);
             issuers.push_back(issuer.clone());
             env.storage()
                 .persistent()
                 .set(&identity_oracle::DataKey::IssuersIndex, &issuers);
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::DIDDocument(subject.clone()), &did_uri);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::DIDDocument(subject.clone()),
+                &did_uri,
+            );
 
             let mut vcs = soroban_sdk::Vec::new(&env);
             vcs.push_back(vc_record);
             env.storage()
                 .persistent()
                 .set(&identity_oracle::DataKey::VCAnchors(subject.clone()), &vcs);
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::ActiveVCCount(subject.clone()), &1u32);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::ActiveVCCount(subject.clone()),
+                &1u32,
+            );
         });
 
         // Verify StorageVersion is absent before migration
@@ -2537,7 +2668,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let inflated_score = credit.compute_score(&subject);
-        assert!(inflated_score > 300, "expected score > 300, got {}", inflated_score);
+        assert!(
+            inflated_score > 300,
+            "expected score > 300, got {}",
+            inflated_score
+        );
 
         // Step 1: subject flags tx_stats; exactly one DsptFild with the right payload.
         let input_key = Symbol::new(&env, "tx_stats");
@@ -2545,7 +2680,11 @@ mod tests {
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "flag_score_input must emit exactly one DsptFild(subject, input_key)"
         );
         assert_eq!(
@@ -2558,7 +2697,11 @@ mod tests {
         let resolve_events = dispute_events(&env, &credit_id);
         assert_eq!(
             resolve_events,
-            vec![(symbol_short!("DsptRslv"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptRslv"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "accepting a dispute must emit exactly one DsptRslv(subject, input_key)"
         );
         assert_eq!(
@@ -2579,7 +2722,8 @@ mod tests {
             },
         );
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let corrected_score = credit.compute_score(&subject);
         assert!(
             corrected_score < inflated_score,
@@ -2632,14 +2776,22 @@ mod tests {
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
         );
 
         // Admin rejects: exactly one DsptRjct, and no DsptRslv for the feeder to act on.
         credit.resolve_dispute(&subject, &input_key, &false);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptRjct"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptRjct"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "rejecting a dispute must emit exactly one DsptRjct and no DsptRslv"
         );
         assert_eq!(
@@ -2648,14 +2800,19 @@ mod tests {
         );
 
         // No resync happened, so recomputing yields the same score.
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), score_before);
 
         // A rejected dispute does not block filing a new one for the same key.
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
         );
         assert_eq!(
             credit.get_dispute(&subject, &input_key).unwrap().status,
@@ -2689,7 +2846,11 @@ mod tests {
         credit.flag_score_input(&subject, &repay_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), repay_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                repay_key.clone()
+            )]
         );
 
         // Accept tx_stats only: the event names tx_stats, repayment stays Pending.
@@ -2716,7 +2877,11 @@ mod tests {
         credit.resolve_dispute(&subject, &repay_key, &false);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptRjct"), subject.clone(), repay_key.clone())]
+            vec![(
+                symbol_short!("DsptRjct"),
+                subject.clone(),
+                repay_key.clone()
+            )]
         );
         assert_eq!(
             credit.get_dispute(&subject, &tx_key).unwrap().status,
@@ -2776,7 +2941,6 @@ mod tests {
             "expected DisputeAlreadyPending when re-filing a pending dispute"
         );
     }
-
 
     #[test]
     fn test_persistent_storage_ttl_survival_after_ledger_advance() {
@@ -3173,7 +3337,10 @@ mod tests {
         // 1. Empty batch validation: succeeds as a no-op when feeder is authorized
         let empty_batch = soroban_sdk::Vec::new(&env);
         let empty_res = credit.try_batch_update_tx_stats(&feeder, &empty_batch);
-        assert!(empty_res.is_ok(), "empty batch must succeed as a valid no-op");
+        assert!(
+            empty_res.is_ok(),
+            "empty batch must succeed as a valid no-op"
+        );
 
         // 2. Multi-subject batch update in a single atomic invocation
         let mut batch = soroban_sdk::Vec::new(&env);
@@ -3199,8 +3366,14 @@ mod tests {
         // Verify stored stats for both subjects
         let score_a = credit.compute_score(&subject_a);
         let score_b = credit.compute_score(&subject_b);
-        assert!(score_a > 300, "subject_a score should reflect updated tx stats");
-        assert!(score_b > score_a, "subject_b with higher tx stats should score higher");
+        assert!(
+            score_a > 300,
+            "subject_a score should reflect updated tx stats"
+        );
+        assert!(
+            score_b > score_a,
+            "subject_b with higher tx stats should score higher"
+        );
 
         // 3. Partial duplicate subjects in a batch: subsequent entry overwrites earlier entry
         let mut duplicate_batch = soroban_sdk::Vec::new(&env);
@@ -3238,8 +3411,14 @@ mod tests {
 
         let score_c = credit.compute_score(&subject_c);
         let score_a_updated = credit.compute_score(&subject_a);
-        assert!(score_a_updated > score_a, "subject_a score should reflect updated higher tx volume");
-        assert!(score_c > score_a_updated, "subject_c score should reflect final overwritten stats in batch");
+        assert!(
+            score_a_updated > score_a,
+            "subject_a score should reflect updated higher tx volume"
+        );
+        assert!(
+            score_c > score_a_updated,
+            "subject_c score should reflect final overwritten stats in batch"
+        );
 
         // 4. Exceeding max batch limit returns BatchTooLarge
         let mut large_batch = soroban_sdk::Vec::new(&env);

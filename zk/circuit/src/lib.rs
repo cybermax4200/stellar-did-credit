@@ -20,8 +20,8 @@ pub mod range;
 pub mod score;
 pub mod score_circuit;
 
-pub use score_circuit::{ScoreCircuit, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
 pub use score::{compute_score_pure, MAX_SCORE, MIN_SCORE};
+pub use score_circuit::{ScoreCircuit, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
 
 pub use merkle::{MerkleMembershipCircuit, MerklePublicInputs, MerkleWitness, MERKLE_DEPTH};
 
@@ -159,10 +159,10 @@ mod tests {
         let commitment = scheme.commit(&fields, w.blinding);
         ScorePublicInputs {
             threshold,
-            subject: Fr::from(1u32), // dummy for test
+            subject: Fr::from(1u32),          // dummy for test
             credit_oracle_id: Fr::from(2u32), // dummy for test
             score_commitment: commitment,
-            snapshot_ledger: 12345, // dummy for test
+            snapshot_ledger: 12345,           // dummy for test
             domain_separator: Fr::from(3u32), // dummy for test
         }
     }

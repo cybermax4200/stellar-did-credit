@@ -54,7 +54,12 @@ fn ensure_not_paused(env: &Env) -> Result<(), IdentityOracleError> {
     }
 }
 
-fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+fn validate_contract_function<T>(
+    env: &Env,
+    contract_id: &Address,
+    func: Symbol,
+    args: Vec<Val>,
+) -> bool
 where
     T: TryFromVal<Env, Val>,
 {
@@ -75,11 +80,11 @@ fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
 }
 
 // ── Persistent TTL constants ─────────────────────────────────────
-  // Persistent entries are extended to ~30 days on every write.
-  //
-  // Threshold: if remaining TTL drops below this, extend.
-  // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
-  //
+// Persistent entries are extended to ~30 days on every write.
+//
+// Threshold: if remaining TTL drops below this, extend.
+// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+//
 const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
@@ -195,11 +200,18 @@ pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 /// Maximum allowed CID length in bytes.
 pub const MAX_CID_LENGTH: u32 = 128;
 
+/// Maximum number of trusted issuers returned by a single paginated query.
+pub const MAX_ISSUER_PAGE_LIMIT: u32 = 50;
+
 fn generic_credential_type(_env: &Env) -> CredentialType {
     symbol_short!("generic")
 }
 
-fn get_stored_credential_type(env: &Env, subject: &Address, vc_hash: &BytesN<32>) -> CredentialType {
+fn get_stored_credential_type(
+    env: &Env,
+    subject: &Address,
+    vc_hash: &BytesN<32>,
+) -> CredentialType {
     env.storage()
         .persistent()
         .get(&DataKey::VCCredentialType(subject.clone(), vc_hash.clone()))
@@ -242,6 +254,27 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
 #[contract]
 pub struct IdentityOracle;
 
+fn get_active_issuers(env: &Env) -> Vec<Address> {
+    let ever_registered: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::IssuersIndex)
+        .unwrap_or(Vec::new(env));
+
+    let mut active = Vec::new(env);
+    for issuer in ever_registered.iter() {
+        let is_trusted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrustedIssuer(issuer.clone()))
+            .unwrap_or(false);
+        if is_trusted {
+            active.push_back(issuer);
+        }
+    }
+    active
+}
+
 fn load_protocol_stats(env: &Env) -> ProtocolStats {
     env.storage()
         .instance()
@@ -250,9 +283,7 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 }
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ProtocolStats, stats);
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
 fn increment_dids_anchored(env: &Env) {
@@ -442,7 +473,9 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -502,7 +535,9 @@ impl IdentityOracle {
         if version >= 2 {
             return Ok(());
         }
-        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -576,9 +611,7 @@ impl IdentityOracle {
                 .unwrap_or(Vec::new(&env));
             issuers.push_back(issuer.clone());
             let index_key = DataKey::IssuersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &issuers);
+            env.storage().persistent().set(&index_key, &issuers);
             env.storage()
                 .persistent()
                 .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
@@ -889,12 +922,12 @@ impl IdentityOracle {
                     .checked_sub(1)
                     .expect("active VC count underflow");
                 let active_key = DataKey::ActiveVCCount(subject.clone());
-                env.storage()
-                    .persistent()
-                    .set(&active_key, &active_count);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                env.storage().persistent().set(&active_key, &active_count);
+                env.storage().persistent().extend_ttl(
+                    &active_key,
+                    PERS_TTL_THRESHOLD,
+                    PERS_TTL_EXTEND,
+                );
             } else {
                 seed_active_vc_count(&env, &subject);
             }
@@ -972,8 +1005,7 @@ impl IdentityOracle {
 
         record_last_state_change(&env, &subject);
 
-        env.events()
-            .publish((symbol_short!("IdReact"),), subject);
+        env.events().publish((symbol_short!("IdReact"),), subject);
     }
 
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
@@ -1075,7 +1107,11 @@ impl IdentityOracle {
     }
 
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
-    pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> CredentialType {
+    pub fn get_vc_credential_type(
+        env: Env,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> CredentialType {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
@@ -1258,9 +1294,7 @@ impl IdentityOracle {
     ///
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     pub fn get_revocation_registry(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .get(&DataKey::RevocationRegistryId)
+        env.storage().instance().get(&DataKey::RevocationRegistryId)
     }
 
     /// Admin-only maintenance: extend instance storage TTL so critical
@@ -1277,29 +1311,37 @@ impl IdentityOracle {
         Ok(())
     }
 
-    /// Returns the currently registered (non-deregistered) trusted issuers.
-    ///
-    /// The index contains currently trusted issuers after deregistration
-    /// compaction; the flag check also keeps this safe for legacy indexes.
-    pub fn list_issuers(env: Env) -> Vec<Address> {
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::IssuersIndex)
-            .unwrap_or(Vec::new(&env));
+    /// Returns the total count of currently registered (active) trusted issuers.
+    pub fn get_issuer_count(env: Env) -> u32 {
+        get_active_issuers(&env).len()
+    }
 
-        let mut active = Vec::new(&env);
-        for issuer in ever_registered.iter() {
-            let is_trusted: bool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::TrustedIssuer(issuer.clone()))
-                .unwrap_or(false);
-            if is_trusted {
-                active.push_back(issuer);
+    /// Returns a paginated sub-slice of currently registered (active) trusted issuers.
+    ///
+    /// `start_index` is the zero-based offset into the active issuer list.
+    /// `limit` is bounded to at most `MAX_ISSUER_PAGE_LIMIT` (50).
+    /// If `start_index` is at or beyond the total number of issuers, an empty vector is returned.
+    pub fn get_issuers_paginated(env: Env, start_index: u32, limit: u32) -> Vec<Address> {
+        let active = get_active_issuers(&env);
+        let total = active.len();
+        let bounded_limit = limit.min(MAX_ISSUER_PAGE_LIMIT);
+        let mut result = Vec::new(&env);
+        if start_index < total {
+            let end_index = start_index.saturating_add(bounded_limit).min(total);
+            for i in start_index..end_index {
+                result.push_back(active.get(i).unwrap());
             }
         }
-        active
+        result
+    }
+
+    /// Returns the currently registered (non-deregistered) trusted issuers, bounded to the first page.
+    ///
+    /// Deprecated: Prefer `get_issuers_paginated` to avoid unbounded return vectors
+    /// and gas exhaustion on networks with many issuers.
+    #[deprecated(note = "use `get_issuers_paginated` instead")]
+    pub fn list_issuers(env: Env) -> Vec<Address> {
+        Self::get_issuers_paginated(env, 0, MAX_ISSUER_PAGE_LIMIT)
     }
 
     /// Returns aggregate protocol-level counters.
@@ -1424,19 +1466,19 @@ mod tests {
 
         let (is_trusted, index_ttl, index): (bool, u32, Vec<Address>) =
             env.as_contract(&contract_id, || {
-            let index_key = DataKey::IssuersIndex;
-            (
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::TrustedIssuer(issuer.clone()))
-                    .unwrap_or(true),
-                env.storage().persistent().get_ttl(&index_key),
-                env.storage()
-                    .persistent()
-                    .get(&index_key)
-                    .unwrap_or(Vec::new(&env)),
-            )
-                    });
+                let index_key = DataKey::IssuersIndex;
+                (
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::TrustedIssuer(issuer.clone()))
+                        .unwrap_or(true),
+                    env.storage().persistent().get_ttl(&index_key),
+                    env.storage()
+                        .persistent()
+                        .get(&index_key)
+                        .unwrap_or(Vec::new(&env)),
+                )
+            });
         assert!(!is_trusted);
         assert!(index.is_empty());
         assert!(index_ttl > PERS_TTL_THRESHOLD);
@@ -1542,6 +1584,111 @@ mod tests {
     }
 
     #[test]
+    fn test_get_issuer_count_and_paginated_basic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Initially zero issuers
+        assert_eq!(client.get_issuer_count(), 0);
+        assert_eq!(client.get_issuers_paginated(&0, &10), Vec::new(&env));
+        assert_eq!(client.get_issuers_paginated(&5, &10), Vec::new(&env));
+
+        let issuer1 = Address::generate(&env);
+        let issuer2 = Address::generate(&env);
+        let issuer3 = Address::generate(&env);
+        let issuer4 = Address::generate(&env);
+        let issuer5 = Address::generate(&env);
+
+        client.register_issuer(&issuer1);
+        client.register_issuer(&issuer2);
+        client.register_issuer(&issuer3);
+        client.register_issuer(&issuer4);
+        client.register_issuer(&issuer5);
+
+        assert_eq!(client.get_issuer_count(), 5);
+
+        // Page 1: offset 0, limit 2
+        let page1 = client.get_issuers_paginated(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), issuer1);
+        assert_eq!(page1.get(1).unwrap(), issuer2);
+
+        // Page 2: offset 2, limit 2
+        let page2 = client.get_issuers_paginated(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), issuer3);
+        assert_eq!(page2.get(1).unwrap(), issuer4);
+
+        // Page 3: offset 4, limit 2 (only 1 item remains)
+        let page3 = client.get_issuers_paginated(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap(), issuer5);
+
+        // Offset equal to total count returns empty
+        let page_exact_end = client.get_issuers_paginated(&5, &2);
+        assert_eq!(page_exact_end.len(), 0);
+
+        // Offset beyond total count returns empty
+        let page_beyond = client.get_issuers_paginated(&100, &10);
+        assert_eq!(page_beyond.len(), 0);
+
+        // Zero limit returns empty
+        let page_zero_limit = client.get_issuers_paginated(&0, &0);
+        assert_eq!(page_zero_limit.len(), 0);
+    }
+
+    #[test]
+    fn test_get_issuers_paginated_enforces_max_limit_50() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register 55 issuers
+        let mut registered = std::vec::Vec::new();
+        for _ in 0..55 {
+            let issuer = Address::generate(&env);
+            client.register_issuer(&issuer);
+            registered.push(issuer);
+        }
+
+        assert_eq!(client.get_issuer_count(), 55);
+
+        // Requesting limit 100 must be clamped to 50
+        let page = client.get_issuers_paginated(&0, &100);
+        assert_eq!(page.len(), 50);
+        for i in 0..50 {
+            assert_eq!(page.get(i as u32).unwrap(), registered[i]);
+        }
+
+        // Fetch remaining 5
+        let remainder = client.get_issuers_paginated(&50, &50);
+        assert_eq!(remainder.len(), 5);
+        for i in 0..5 {
+            assert_eq!(remainder.get(i as u32).unwrap(), registered[50 + i]);
+        }
+
+        // list_issuers returns the first page bounded to 50
+        let first_page = client.list_issuers();
+        assert_eq!(first_page.len(), 50);
+
+        // Deregister the first issuer and verify pagination shifts correctly
+        client.deregister_issuer(&registered[0]);
+        assert_eq!(client.get_issuer_count(), 54);
+        let page_after_dereg = client.get_issuers_paginated(&0, &2);
+        assert_eq!(page_after_dereg.get(0).unwrap(), registered[1]);
+        assert_eq!(page_after_dereg.get(1).unwrap(), registered[2]);
+    }
+
+    #[test]
     fn test_is_verified_true_after_vc_anchored() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1639,7 +1786,10 @@ mod tests {
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
-        let cid = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        let cid = String::from_str(
+            &env,
+            "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4",
+        );
         assert!(cid.len() <= MAX_CID_LENGTH);
         client.anchor_did(&subject, &cid);
         assert_eq!(client.get_did_document(&subject), Some(cid));
@@ -1835,9 +1985,7 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash_2);
 
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .extend_ttl(6_000_000, 6_000_000);
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000);
         });
 
         env.ledger().with_mut(|l| {
@@ -2245,7 +2393,10 @@ mod tests {
         client.initialize(&admin);
 
         let registry = client.get_revocation_registry();
-        assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
+        assert!(
+            registry.is_none(),
+            "RevocationRegistryId should be None after initialization"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2311,7 +2462,10 @@ mod tests {
 
         // Now should return Some
         let stored = client.get_revocation_registry();
-        assert!(stored.is_some(), "RevocationRegistryId should be Some after set_revocation_registry");
+        assert!(
+            stored.is_some(),
+            "RevocationRegistryId should be Some after set_revocation_registry"
+        );
         assert_eq!(stored.unwrap(), registry_id);
     }
 
@@ -2741,9 +2895,9 @@ mod tests {
             cid_str.push('a');
         }
         let cid = String::from_str(&env, &cid_str);
-        
+
         client.anchor_did(&subject, &cid);
-        
+
         let stored = client.get_did_document(&subject);
         assert_eq!(stored.unwrap(), cid);
     }
@@ -2761,7 +2915,7 @@ mod tests {
             cid_str.push('a');
         }
         let cid = String::from_str(&env, &cid_str);
-        
+
         let result = client.try_anchor_did(&subject, &cid);
         assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
     }
@@ -2780,17 +2934,17 @@ mod tests {
         client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
-        
+
         // Test with various credential types that should work
         let credential_types = [
             "kyc",
-            "employment", 
+            "employment",
             "education",
             "identity",
             "credit_score",
             "test",
-            "a",                    // single character
-            "very_long_type_name",  // longer name
+            "a",                   // single character
+            "very_long_type_name", // longer name
         ];
 
         for (i, type_name) in credential_types.iter().enumerate() {
@@ -2798,16 +2952,20 @@ mod tests {
             hash_arr[0] = i as u8;
             hash_arr[1] = 42; // distinguishing byte
             let vc_hash = BytesN::from_array(&env, &hash_arr);
-            
+
             let credential_type = Symbol::new(&env, type_name);
             let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
-            
+
             // Should succeed for all valid credential types
-            assert!(result.is_ok(), "Failed to anchor VC with credential type: {}", type_name);
+            assert!(
+                result.is_ok(),
+                "Failed to anchor VC with credential type: {}",
+                type_name
+            );
         }
     }
 
-    #[test] 
+    #[test]
     fn test_anchor_vc_typed_vc_limit_with_credential_types() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2821,33 +2979,37 @@ mod tests {
         client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
-        
+
         // Anchor exactly 100 VCs with different credential types
         for i in 0..100u8 {
             let mut hash_arr = [0u8; 32];
             hash_arr[0] = i;
             hash_arr[1] = 10; // distinguishing byte
             let vc_hash = BytesN::from_array(&env, &hash_arr);
-            
+
             // Vary credential types to simulate fuzz input
             let credential_type = match i % 4 {
                 0 => Symbol::new(&env, "kyc"),
                 1 => Symbol::new(&env, "employment"),
-                2 => Symbol::new(&env, "education"), 
+                2 => Symbol::new(&env, "education"),
                 _ => Symbol::new(&env, "identity"),
             };
-            
+
             let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
-            assert!(result.is_ok(), "Failed to anchor VC {} with credential type", i);
+            assert!(
+                result.is_ok(),
+                "Failed to anchor VC {} with credential type",
+                i
+            );
         }
-        
+
         // The 101st VC should fail with VCLimitReached
         let mut hash_arr = [0u8; 32];
         hash_arr[0] = 101;
         hash_arr[1] = 10;
         let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
         let credential_type = Symbol::new(&env, "test");
-        
+
         let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash_101, &credential_type);
         assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
     }
@@ -2922,10 +3084,22 @@ mod tests {
         assert_eq!(results.get(3).unwrap(), false);
 
         // Verify matches individual verify_vc
-        assert_eq!(results.get(0).unwrap(), client.verify_vc(&subject, &vc_valid1));
-        assert_eq!(results.get(1).unwrap(), client.verify_vc(&subject, &vc_unknown));
-        assert_eq!(results.get(2).unwrap(), client.verify_vc(&subject, &vc_valid2));
-        assert_eq!(results.get(3).unwrap(), client.verify_vc(&subject, &vc_revoked));
+        assert_eq!(
+            results.get(0).unwrap(),
+            client.verify_vc(&subject, &vc_valid1)
+        );
+        assert_eq!(
+            results.get(1).unwrap(),
+            client.verify_vc(&subject, &vc_unknown)
+        );
+        assert_eq!(
+            results.get(2).unwrap(),
+            client.verify_vc(&subject, &vc_valid2)
+        );
+        assert_eq!(
+            results.get(3).unwrap(),
+            client.verify_vc(&subject, &vc_revoked)
+        );
     }
 
     #[test]
