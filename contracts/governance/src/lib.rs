@@ -5,7 +5,8 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, CreditOracleError, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
+    Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -72,6 +73,8 @@ pub struct VoterWeightEntry {
 pub enum DataKey {
     /// Contract administrator address.
     Admin,
+    /// Optional emergency guardian authorized to veto proposals.
+    Guardian,
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
     /// Monotonically increasing counter used to assign proposal IDs.
@@ -85,6 +88,8 @@ pub enum DataKey {
     Proposal(u64),
     /// Original proposer address for a given proposal ID.
     Proposer(u64),
+    /// Human-readable reason recorded when the guardian vetoes a proposal.
+    VetoReason(u64),
     /// Registered voting weight for an address.
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
@@ -297,6 +302,36 @@ impl Governance {
             .instance()
             .set(&DataKey::QuorumPercent, &percent);
         Ok(())
+    }
+
+    /// Designate the emergency guardian address.
+    ///
+    /// The guardian is the only address allowed to call [`Governance::emergency_veto`]
+    /// to cancel a proposal that has passed voting but is still inside its
+    /// execution-delay timelock. Replaces any previously configured guardian.
+    ///
+    /// Auth: `admin` must equal the stored admin and sign the transaction.
+    pub fn set_guardian(
+        env: Env,
+        admin: Address,
+        guardian: Address,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        Ok(())
+    }
+
+    /// Return the currently configured emergency guardian, if any.
+    pub fn get_guardian(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Guardian)
     }
 
     /// Return the percentage-based quorum configuration, if enabled.
@@ -534,6 +569,18 @@ impl Governance {
             .get(&proposal_key)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
+        // Terminal states are checked before the timing gates so a cancelled
+        // (including guardian-vetoed) proposal is reported as
+        // `ProposalAlreadyCancelled` immediately, regardless of whether the
+        // voting period or execution timelock has elapsed.
+        if proposal.executed {
+            return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
         if env.ledger().sequence() <= proposal.expiry_ledger {
             return Err(GovernanceError::ProposalNotExpired);
         }
@@ -544,14 +591,6 @@ impl Governance {
             .saturating_add(proposal.execution_delay_ledgers);
         if env.ledger().sequence() <= executable_at {
             return Err(GovernanceError::TimelockNotExpired);
-        }
-
-        if proposal.executed {
-            return Err(GovernanceError::ProposalAlreadyExecuted);
-        }
-
-        if proposal.cancelled {
-            return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
         if proposal.votes_for <= proposal.votes_against {
@@ -1069,6 +1108,84 @@ impl Governance {
             .publish((symbol_short!("PropCanc"), proposal_id), canceller);
 
         Ok(())
+    }
+
+    /// Emergency veto of a proposal by the designated guardian.
+    ///
+    /// Cancels the proposal permanently, even after voting has concluded and
+    /// while the proposal is inside its execution-delay timelock. This is the
+    /// safety valve for a malicious proposal that passed because of compromised
+    /// voting keys: the guardian can block it before `execute` queues the new
+    /// weights in the credit-oracle.
+    ///
+    /// The veto reason is recorded under `DataKey::VetoReason(proposal_id)` and
+    /// emitted in the `ProposalVetoed` event.
+    ///
+    /// Errors:
+    /// - `NotAuthorized` if no guardian is configured or `guardian` is not it.
+    /// - `ProposalNotFound` if the proposal does not exist.
+    /// - `ProposalAlreadyExecuted` if the proposal has already been executed.
+    /// - `ProposalAlreadyCancelled` if it was already cancelled or vetoed.
+    ///
+    /// Auth: `guardian` must sign the transaction.
+    pub fn emergency_veto(
+        env: Env,
+        guardian: Address,
+        proposal_id: u64,
+        reason: String,
+    ) -> Result<(), GovernanceError> {
+        guardian.require_auth();
+
+        let stored_guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if guardian != stored_guardian {
+            return Err(GovernanceError::NotAuthorized);
+        }
+
+        let proposal_key = DataKey::Proposal(proposal_id);
+        let mut proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
+        proposal.cancelled = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
+        // Stored separately so the GovernanceProposal layout stays stable for
+        // proposals written before this feature was deployed.
+        env.storage()
+            .persistent()
+            .set(&DataKey::VetoReason(proposal_id), &reason);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VetoReason(proposal_id),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "ProposalVetoed"), proposal_id),
+            (guardian, reason),
+        );
+
+        Ok(())
+    }
+
+    /// Return the recorded veto reason for a proposal, if it was vetoed.
+    pub fn get_veto_reason(env: Env, proposal_id: u64) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VetoReason(proposal_id))
     }
 }
 
@@ -1624,6 +1741,204 @@ mod tests {
         gov_client.register_voter(&admin, &voter, &100);
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &100);
         assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
+    }
+
+    #[test]
+    fn test_set_guardian_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        assert_eq!(client.get_guardian(), None);
+
+        let non_admin = Address::generate(&env);
+        assert_eq!(
+            client.try_set_guardian(&non_admin, &guardian),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+
+        client.set_guardian(&admin, &guardian);
+        assert_eq!(client.get_guardian(), Some(guardian));
+    }
+
+    #[test]
+    fn test_emergency_veto_requires_guardian() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        let proposer = Address::generate(&env);
+        let weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposal_id = client.create_proposal(&proposer, &weights, &100, &0);
+
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let reason = String::from_str(&env, "attempted veto");
+
+        // No guardian configured yet.
+        assert_eq!(
+            client.try_emergency_veto(&attacker, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+
+        client.set_guardian(&admin, &guardian);
+
+        // The admin is not automatically the guardian.
+        assert_eq!(
+            client.try_emergency_veto(&admin, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_emergency_veto(&attacker, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+    }
+
+    #[test]
+    fn test_emergency_veto_during_timelock_blocks_execution() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
+        let guardian = Address::generate(&env);
+        gov_client.set_guardian(&admin, &guardian);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        // voting_period = 100 ledgers, execution_delay = 50 ledgers.
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        // Voting has concluded but the execution timelock is still running.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::TimelockNotExpired))
+        );
+
+        let reason = String::from_str(&env, "compromised proposer key");
+        gov_client.emergency_veto(&guardian, &proposal_id, &reason);
+
+        // Drain events before any further client call clears the buffer.
+        let events = env.events().all();
+        let mut veto_event_count = 0u32;
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id != gov_id || topics.len() != 2 {
+                continue;
+            }
+            let topic: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+            if topic != Symbol::new(&env, "ProposalVetoed") {
+                continue;
+            }
+            let event_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(event_id, proposal_id);
+            let (event_guardian, event_reason): (Address, String) =
+                data.try_into_val(&env).unwrap();
+            assert_eq!(event_guardian, guardian);
+            assert_eq!(event_reason, reason);
+            veto_event_count += 1;
+        }
+        assert_eq!(veto_event_count, 1, "expected one ProposalVetoed event");
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "veto must mark the proposal cancelled");
+        assert!(
+            !proposal.executed,
+            "veto must not mark the proposal executed"
+        );
+        assert_eq!(gov_client.get_veto_reason(&proposal_id), Some(reason));
+
+        // Effective immediately, while still inside the timelock.
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // ...and permanently, after the timelock would have expired.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // A proposal can only be vetoed once.
+        let again = String::from_str(&env, "second veto");
+        assert_eq!(
+            gov_client.try_emergency_veto(&guardian, &proposal_id, &again),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+    }
+
+    #[test]
+    fn test_emergency_veto_rejects_executed_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        let guardian = Address::generate(&env);
+        client.set_guardian(&admin, &guardian);
+
+        let proposer = Address::generate(&env);
+        let weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposal_id = client.create_proposal(&proposer, &weights, &100, &0);
+
+        // Simulate the proposal having already been executed.
+        env.as_contract(&gov_id, || {
+            let key = DataKey::Proposal(proposal_id);
+            let mut proposal: GovernanceProposal = env.storage().persistent().get(&key).unwrap();
+            proposal.executed = true;
+            env.storage().persistent().set(&key, &proposal);
+        });
+
+        let reason = String::from_str(&env, "too late");
+        assert_eq!(
+            client.try_emergency_veto(&guardian, &proposal_id, &reason),
+            Err(Ok(GovernanceError::ProposalAlreadyExecuted))
+        );
     }
 
     /// Verifies the full execution timelock flow:

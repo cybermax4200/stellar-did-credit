@@ -185,6 +185,13 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Data:** `canceller: Address`
 * **Emitted When:** A governance proposal is cancelled.
 
+#### ProposalVetoed
+
+- **Topic:** `[Symbol("ProposalVetoed"), proposal_id: u64]`
+- **Data:** `(guardian: Address, reason: String)`
+- **Emitted When:** The designated emergency guardian calls `emergency_veto` to cancel a proposal before execution. The proposal becomes unexecutable immediately, even if it passed voting and is inside the execution-delay timelock.
+- **Indexer Action:** Treat the proposal as permanently cancelled. The reason is also readable via `get_veto_reason(proposal_id)`.
+
 #### WeightsApplied
 
 - **Topic:** `[Symbol("WtApplied")]`
