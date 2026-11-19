@@ -1219,6 +1219,99 @@ mod tests {
         );
     }
 
+    /// The emergency guardian can veto a proposal that has already passed
+    /// voting while it is still inside the execution-delay timelock. The veto
+    /// is permanent and execution fails with `ProposalAlreadyCancelled`.
+    #[test]
+    fn test_emergency_veto_blocks_execution_during_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Transfer oracle admin to governance contract.
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let guardian = soroban_sdk::Address::generate(&env);
+        gov.set_guardian(&admin, &guardian);
+        assert_eq!(gov.get_guardian(), Some(guardian.clone()));
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+
+        let voter = soroban_sdk::Address::generate(&env);
+        gov.register_voter(&admin, &voter, &200);
+        gov.vote(&voter, &proposal_id, &true, &200);
+
+        // Voting has concluded but the execution timelock is still running.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::TimelockNotExpired))
+        );
+
+        let reason = String::from_str(&env, "emergency: compromised proposer key");
+        gov.emergency_veto(&guardian, &proposal_id, &reason);
+
+        // Capture events before any further contract call drains the buffer.
+        let events = env.events().all();
+        let veto_events: Vec<_> = events
+            .iter()
+            .filter(|(id, topics, _)| {
+                if *id != gov_id || topics.len() != 2 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                sym.map(|s| s == Symbol::new(&env, "ProposalVetoed"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(veto_events.len(), 1, "exactly one ProposalVetoed event");
+        let (_, topics, data) = &veto_events[0];
+        let event_proposal_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_proposal_id, proposal_id);
+        let (event_guardian, event_reason): (soroban_sdk::Address, String) =
+            data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_guardian, guardian);
+        assert_eq!(event_reason, reason);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal must be cancelled by veto");
+        assert!(!proposal.executed, "veto must not execute the proposal");
+        assert_eq!(gov.get_veto_reason(&proposal_id), Some(reason));
+
+        // Unexecutable immediately, still inside the timelock.
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // Unexecutable after the delay period would have elapsed.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+    }
+
     /// A third party (neither proposer nor admin) cannot cancel a proposal.
     #[test]
     fn test_unauthorized_cancel_is_rejected() {

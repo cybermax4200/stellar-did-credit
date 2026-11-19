@@ -115,6 +115,21 @@ The public `cancel_proposal(env, canceller, proposal_id)` entrypoint:
 
 Cancellation has real on-chain enforcement: once cancelled, both `vote` and `execute` fail for that proposal for the rest of its lifetime.
 
+### 2.6 The Emergency Guardian and `emergency_veto()`
+
+The admin may designate a dedicated **security guardian** whose only power is to veto a proposal before it takes effect. This is the emergency brake for the case where a malicious proposal passes because of compromised voting keys: the guardian can cancel it during the execution-delay timelock, before `execute` queues new weights in the credit-oracle.
+
+- `set_guardian(env, admin, guardian)` — admin-only setter. Verifies `admin` equals the stored `DataKey::Admin` and requires its signature, then stores the address under `DataKey::Guardian`. Replaces any previous guardian. `get_guardian(env)` returns the current guardian (`Option<Address>`).
+- `emergency_veto(env, guardian, proposal_id, reason: String)` — requires `guardian.require_auth()` and checks the signer equals the stored `DataKey::Guardian`. Any other caller (including the admin) receives `NotAuthorized`; the same error is returned if no guardian has been configured.
+  - Errors: `ProposalNotFound` if the proposal does not exist, `ProposalAlreadyExecuted` if it already executed, `ProposalAlreadyCancelled` if it was already cancelled or vetoed.
+  - Sets `cancelled: bool = true` on the stored proposal — even if voting has already concluded — so the proposal becomes unexecutable immediately.
+  - Records the supplied reason under `DataKey::VetoReason(proposal_id)` (read via `get_veto_reason(env, proposal_id)`). The reason is stored separately so the `GovernanceProposal` layout stays compatible with proposals written before this feature shipped.
+  - Emits a `ProposalVetoed` event with topics `[Symbol("ProposalVetoed"), proposal_id]` and data `(guardian: Address, reason: String)`.
+
+`execute` checks `executed` and `cancelled` **before** the expiry/timelock gates, so calling `execute` on a vetoed proposal returns `ProposalAlreadyCancelled` immediately — whether the vote window is still open, the execution delay is running, or the delay has already elapsed. Like `cancel_proposal`, a veto does not refund already-used vote weight.
+
+Operationally, hold the guardian key separately from the admin key (for example in a security-team multisig or hardware wallet) so that compromising the admin or a proposer does not also defeat the veto.
+
 ---
 
 ## 3. Function Reference with Worked Examples
@@ -422,6 +437,7 @@ Voter and quorum configuration functions require `admin.require_auth()` AND veri
 | Function | Signature | Errors |
 |---|---|---|
 | `set_quorum` | `(env, admin, quorum_required: i128) -> Result<()>` | `InvalidQuorum` if <= 0; `NotAuthorized` if caller mismatch. |
+| `set_guardian` | `(env, admin, guardian: Address) -> Result<()>` | `NotAuthorized` if caller mismatch. Guardian may call `emergency_veto`. |
 | `register_voter` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight <= 0; `NotAuthorized`. |
 | `update_voter_weight` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight < 0; `NotAuthorized`. Passing weight = 0 deletes the VoterWeight key (same as deregister). |
 | `batch_register_voters` | `(env, admin, entries: Vec<VoterWeightEntry>) -> Result<()>` | `NotAuthorized`, `InvalidVoteWeight` if any weight <= 0, or `VoterBatchTooLarge` above 50 entries. |
@@ -450,6 +466,8 @@ No auth, no side effects.
 | Function | Signature | Returns |
 |---|---|---|
 | `get_quorum` | `(env) -> i128` | Default quorum for future proposals. Returns 0 if never set (shouldn't happen post-initialize). |
+| `get_guardian` | `(env) -> Option<Address>` | Current emergency guardian, or `None` if not configured. |
+| `get_veto_reason` | `(env, proposal_id: u64) -> Option<String>` | Reason recorded by `emergency_veto`, or `None` if the proposal was not vetoed. |
 | `get_proposal` | `(env, proposal_id: u64) -> Option<GovernanceProposal>` | Full `GovernanceProposal` struct copy, or `None`. |
 | `get_voter_weight` | `(env, voter: Address) -> Option<i128>` | Registered total weight, or `None` if not registered. |
 | `get_vote_weight_used` | `(env, proposal_id: u64, voter: Address) -> i128` | Used weight on a specific proposal. 0 if never voted. |
