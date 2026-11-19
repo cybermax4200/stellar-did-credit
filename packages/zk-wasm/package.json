@@ -4,6 +4,9 @@
   "main": "pkg/zk_wasm.js",
   "types": "pkg/zk_wasm.d.ts",
   "scripts": {
-    "build": "wasm-pack build --target nodejs"
+    "build": "wasm-pack build --release --target nodejs",
+    "build:web": "wasm-pack build --release --target web --out-dir pkg-web",
+    "test:build": "node test/compare-builds.cjs",
+    "test:browser": "node test/browser-smoke.cjs"
   }
 }

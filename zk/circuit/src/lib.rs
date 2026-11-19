@@ -181,6 +181,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_wasm_proof_fixture() {
+        use ark_serialize::CanonicalSerialize;
+        use sha2::{Digest, Sha256};
+
+        let mut rng = big_rng();
+        let (pk, vk) = generate_test_keys(&mut rng).unwrap();
+        let witness = make_witness();
+        let mut inputs = make_public_inputs(&witness, 600);
+        inputs.subject = Fr::from(0u32);
+        inputs.credit_oracle_id = Fr::from(0u32);
+        inputs.domain_separator = Fr::from(0u32);
+        let proof = generate_proof(witness, inputs.clone(), &pk, &mut rng).unwrap();
+        assert!(verify_proof(&proof, &inputs, &vk).unwrap());
+        let mut bytes = Vec::new();
+        proof.a.serialize_uncompressed(&mut bytes).unwrap();
+        proof.b.serialize_uncompressed(&mut bytes).unwrap();
+        proof.c.serialize_uncompressed(&mut bytes).unwrap();
+        let expected = [0xfd, 0xa9, 0x79, 0xc3, 0x14, 0x31, 0x91, 0xb9, 0xa1, 0x41, 0xf8, 0xe6, 0x9b, 0xe6, 0x14, 0x08, 0x56, 0x56, 0xbb, 0x3b, 0x53, 0x93, 0x88, 0x87, 0x5e, 0x26, 0x01, 0x3e, 0xdf, 0x59, 0x9f, 0x88];
+        assert_eq!(&Sha256::digest(&bytes)[..], &expected);
+    }
+
+    #[test]
     fn verify_rejects_wrong_threshold() {
         let mut rng = big_rng();
         let (pk, vk) = generate_test_keys(&mut rng).unwrap();
