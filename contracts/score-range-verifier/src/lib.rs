@@ -82,12 +82,18 @@ const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Embedded verification key for the score-range circuit.
 ///
-/// This is a placeholder VK (BLS12-381 generator points) until the trusted
-/// setup for the score-range circuit (Issue 59) is completed. The real VK
-/// must be embedded here before mainnet deployment. The `vk_hash` stored at
-/// `initialize` time must match `sha256` of this VK's canonical encoding.
+/// These bytes match the development-only fixed-seed output in
+/// `zk/circuit/vk_out.txt`; they are not a production ceremony key. The seed
+/// in `zk/circuit/src/bin/generate_vk.rs` is public, so this key must not be
+/// trusted for production proof verification. A ceremony key and a matching
+/// proof fixture are needed before this verifier can be deployed securely.
+///
+/// The generator uses arkworks uncompressed serialization, whereas Soroban's
+/// BLS host functions require big-endian field encodings. The conversion and
+/// point validation must be verified when replacing the key. The supplied
+/// `vk_hash` is currently stored without being checked against this key.
 fn embedded_verification_key(env: &Env) -> VerificationKey {
-    // Generated BLS12-381 G1 generator (uncompressed, 96 bytes) for alpha
+    // Development-only output; see the warning above.
     let alpha_bytes = [
         0x01, 0xFB, 0x00, 0xF7, 0x67, 0xE9, 0x9B, 0x6A, 0x77, 0x57, 0x53, 0x8D, 0x1D, 0x99, 0xB6, 0x94, 
         0x31, 0xC0, 0x78, 0x40, 0xEF, 0x24, 0x83, 0xFD, 0xE5, 0x54, 0x84, 0x45, 0xDE, 0x60, 0x91, 0x6E, 
