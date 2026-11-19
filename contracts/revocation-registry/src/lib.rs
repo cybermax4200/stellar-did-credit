@@ -78,7 +78,11 @@ pub enum RevocationKey {
     RegisteredVCIssuer(BytesN<32>),
     Status(BytesN<32>),
     IssuerOfVC(BytesN<32>),
+    /// Legacy unbounded key retained for compatibility; no longer read or written.
     IssuerRevokedList(Address),
+    IssuerRevokedIndex(Address, u32),
+    IssuerRevokedCount(Address),
+    IsRevokedByIssuer(Address, BytesN<32>),
     ReentrancyLock,
     BatchLimit,
 }
@@ -91,6 +95,53 @@ const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
 /// Hard safety cap for batch revoke operations.
 const MAX_BATCH_SIZE: u32 = 100;
+/// Maximum number of revocation hashes returned by a single list query.
+const MAX_PAGE_SIZE: u32 = 100;
+
+fn append_issuer_revocation(
+    env: &Env,
+    issuer: &Address,
+    vc_hash: &BytesN<32>,
+    count: &mut u32,
+) -> bool {
+    let revoked_key = RevocationKey::IsRevokedByIssuer(issuer.clone(), vc_hash.clone());
+    if env.storage().persistent().has(&revoked_key) {
+        return false;
+    }
+
+    env.storage().persistent().set(
+        &RevocationKey::IssuerRevokedIndex(issuer.clone(), *count),
+        vc_hash,
+    );
+    env.storage().persistent().set(&revoked_key, &true);
+    *count += 1;
+    true
+}
+
+fn list_issuer_revocations(
+    env: &Env,
+    issuer: &Address,
+    cursor: u32,
+    limit: u32,
+) -> Vec<BytesN<32>> {
+    let mut result = Vec::new(env);
+    let count: u32 = env
+        .storage()
+        .persistent()
+        .get(&RevocationKey::IssuerRevokedCount(issuer.clone()))
+        .unwrap_or(0);
+    let end = cursor.saturating_add(limit.min(MAX_PAGE_SIZE)).min(count);
+
+    for index in cursor.min(count)..end {
+        let hash: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&RevocationKey::IssuerRevokedIndex(issuer.clone(), index))
+            .expect("revocation index entry missing");
+        result.push_back(hash);
+    }
+    result
+}
 
 #[contract]
 pub struct RevocationRegistry;
@@ -294,18 +345,23 @@ impl RevocationRegistry {
             PERS_TTL_EXTEND,
         );
 
-        let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
-        let mut list: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&list_key)
-            .unwrap_or(Vec::new(&env));
-        if !list.contains(vc_hash.clone()) {
-            list.push_back(vc_hash.clone());
-            env.storage().persistent().set(&list_key, &list);
+        let count_key = RevocationKey::IssuerRevokedCount(issuer.clone());
+        let mut count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
+        if append_issuer_revocation(&env, &issuer, &vc_hash, &mut count) {
+            env.storage().persistent().set(&count_key, &count);
+            env.storage().persistent().extend_ttl(
+                &RevocationKey::IssuerRevokedIndex(issuer.clone(), count - 1),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
+            env.storage().persistent().extend_ttl(
+                &RevocationKey::IsRevokedByIssuer(issuer.clone(), vc_hash.clone()),
+                PERS_TTL_THRESHOLD,
+                PERS_TTL_EXTEND,
+            );
             env.storage()
                 .persistent()
-                .extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                .extend_ttl(&count_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
         env.events()
             .publish((symbol_short!("Revoked"),), (issuer, vc_hash));
@@ -326,42 +382,25 @@ impl RevocationRegistry {
     }
 
     pub fn get_revocation_count(env: Env, issuer: Address) -> u32 {
-        let list_key = RevocationKey::IssuerRevokedList(issuer);
-        let list: Vec<BytesN<32>> = env
-            .storage()
+        env.storage()
             .persistent()
-            .get(&list_key)
-            .unwrap_or(Vec::new(&env));
-        list.len()
+            .get(&RevocationKey::IssuerRevokedCount(issuer))
+            .unwrap_or(0)
     }
 
     pub fn list_revoked(env: Env, issuer: Address, cursor: u32, limit: u32) -> Vec<BytesN<32>> {
-        let list_key = RevocationKey::IssuerRevokedList(issuer);
-        let list: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&list_key)
-            .unwrap_or(Vec::new(&env));
-
-        let total = list.len();
-        let mut result = Vec::new(&env);
-
-        if cursor >= total || limit == 0 {
-            return result;
-        }
-
-        let end = (cursor + limit).min(total);
-        for i in cursor..end {
-            result.push_back(list.get(i).unwrap());
-        }
-        result
+        list_issuer_revocations(&env, &issuer, cursor, limit)
     }
 
-    pub fn list_revoked_for_issuer(env: Env, issuer: Address) -> Vec<BytesN<32>> {
-        env.storage()
-            .persistent()
-            .get(&RevocationKey::IssuerRevokedList(issuer))
-            .unwrap_or(Vec::new(&env))
+    pub fn list_revoked_for_issuer(
+        env: Env,
+        issuer: Address,
+        page: u32,
+        limit: u32,
+    ) -> Vec<BytesN<32>> {
+        let bounded_limit = limit.min(MAX_PAGE_SIZE);
+        let cursor = page.saturating_mul(bounded_limit);
+        list_issuer_revocations(&env, &issuer, cursor, bounded_limit)
     }
 
     pub fn batch_revoke(
@@ -390,12 +429,8 @@ impl RevocationRegistry {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
 
-        let list_key = RevocationKey::IssuerRevokedList(issuer.clone());
-        let mut list: Vec<BytesN<32>> = env
-            .storage()
-            .persistent()
-            .get(&list_key)
-            .unwrap_or(Vec::new(&env));
+        let count_key = RevocationKey::IssuerRevokedCount(issuer.clone());
+        let mut count: u32 = env.storage().persistent().get(&count_key).unwrap_or(0);
         let mut list_modified = false;
 
         for vc_hash in vc_hashes.iter() {
@@ -434,8 +469,18 @@ impl RevocationRegistry {
                 PERS_TTL_EXTEND,
             );
 
-            if !list.contains(vc_hash.clone()) {
-                list.push_back(vc_hash.clone());
+            if append_issuer_revocation(&env, &issuer, &vc_hash, &mut count) {
+                let index = count - 1;
+                env.storage().persistent().extend_ttl(
+                    &RevocationKey::IssuerRevokedIndex(issuer.clone(), index),
+                    PERS_TTL_THRESHOLD,
+                    PERS_TTL_EXTEND,
+                );
+                env.storage().persistent().extend_ttl(
+                    &RevocationKey::IsRevokedByIssuer(issuer.clone(), vc_hash.clone()),
+                    PERS_TTL_THRESHOLD,
+                    PERS_TTL_EXTEND,
+                );
                 list_modified = true;
             }
 
@@ -446,10 +491,10 @@ impl RevocationRegistry {
         }
 
         if list_modified {
-            env.storage().persistent().set(&list_key, &list);
+            env.storage().persistent().set(&count_key, &count);
             env.storage()
                 .persistent()
-                .extend_ttl(&list_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                .extend_ttl(&count_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
         env.events()
@@ -944,7 +989,7 @@ mod tests {
         let zero_limit = client.list_revoked(&issuer, &0, &0);
         assert_eq!(zero_limit.len(), 0);
 
-        let all_revoked = client.list_revoked_for_issuer(&issuer);
+        let all_revoked = client.list_revoked_for_issuer(&issuer, &0, &100);
         assert_eq!(all_revoked.len(), 4);
         assert_eq!(all_revoked.get(0).unwrap(), hash1);
         assert_eq!(all_revoked.get(1).unwrap(), hash2);
@@ -993,14 +1038,61 @@ mod tests {
         let mut batch = Vec::new(&env);
         batch.push_back(hash2.clone());
 
-        assert_eq!(client.list_revoked_for_issuer(&issuer).len(), 0);
+        assert_eq!(client.list_revoked_for_issuer(&issuer, &0, &100).len(), 0);
         client.revoke(&issuer, &subject, &hash1);
         client.batch_revoke(&issuer, &batch);
 
-        let revoked = client.list_revoked_for_issuer(&issuer);
+        let revoked = client.list_revoked_for_issuer(&issuer, &0, &100);
         assert_eq!(revoked.len(), 2);
         assert_eq!(revoked.get(0).unwrap(), hash1);
         assert_eq!(revoked.get(1).unwrap(), hash2);
+        assert_eq!(
+            client.list_revoked_for_issuer(&issuer, &0, &1).get(0),
+            Some(hash1)
+        );
+        assert_eq!(
+            client.list_revoked_for_issuer(&issuer, &1, &1).get(0),
+            Some(hash2)
+        );
+        assert_eq!(client.list_revoked_for_issuer(&issuer, &2, &1).len(), 0);
+        assert_eq!(client.list_revoked_for_issuer(&issuer, &0, &0).len(), 0);
+    }
+
+    #[test]
+    fn test_indexed_revocations_scale_and_paginate() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, RevocationRegistry);
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        env.as_contract(&contract_id, || {
+            env.storage().persistent().set(
+                &RevocationKey::IssuerRevokedCount(issuer.clone()),
+                &2_500u32,
+            );
+        });
+
+        assert_eq!(client.get_revocation_count(&issuer), 2_500);
+        let mut next_hash_bytes = [0u8; 32];
+        next_hash_bytes[..4].copy_from_slice(&2_500u32.to_be_bytes());
+        let next_hash = BytesN::from_array(&env, &next_hash_bytes);
+        client.revoke(&issuer, &subject, &next_hash);
+        assert_eq!(client.get_revocation_count(&issuer), 2_501);
+        let last_page = client.list_revoked_for_issuer(&issuer, &25, &100);
+        assert_eq!(last_page.len(), 1);
+        assert_eq!(last_page.get(0).unwrap(), next_hash);
+        assert_eq!(client.list_revoked_for_issuer(&issuer, &26, &100).len(), 0);
+        client.revoke(&issuer, &subject, &next_hash);
+        assert_eq!(client.get_revocation_count(&issuer), 2_501);
+
+        let legacy_list_exists = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .has(&RevocationKey::IssuerRevokedList(issuer.clone()))
+        });
+        assert!(!legacy_list_exists);
     }
 
     #[test]
@@ -1018,6 +1110,11 @@ mod tests {
         assert_eq!(client.get_revocation_count(&issuer), 1);
 
         client.revoke(&issuer, &subject, &vc_hash);
+        assert_eq!(client.get_revocation_count(&issuer), 1);
+        let mut duplicate_batch = Vec::new(&env);
+        duplicate_batch.push_back(vc_hash.clone());
+        duplicate_batch.push_back(vc_hash.clone());
+        client.batch_revoke(&issuer, &duplicate_batch);
         assert_eq!(client.get_revocation_count(&issuer), 1);
         let list = client.list_revoked(&issuer, &0, &10);
         assert_eq!(list.len(), 1);

@@ -40,24 +40,24 @@
 //! | `identity-oracle` `VCAnchors` | yes | 518_400 |
 //! | `credit-oracle` `TrustedFeeder` | yes | 518_400 |
 //! | `credit-oracle` `Score` | yes | 518_400 |
-//! | `credit-oracle` `TxStats` | **no** | 4096 (default) |
-//! | `credit-oracle` instance | **never bumped** | 4096 (default) |
+//! | `credit-oracle` `TxStats` | yes | 518_400 |
+//! | `credit-oracle` instance | yes (bumped in `initialize`) | 500_000 |
 //!
-//! The last two rows are live defects and are exactly what issues 5 and 6 must
-//! fix. Each is covered by a pair of tests: one pinning today's expiry
-//! behaviour, and one proving the entry survives once its TTL *is* extended.
-//! The survival test is the harness a contributor fixing those issues runs to
-//! confirm the fix — it passes today only because the test extends the TTL by
-//! hand, and should keep passing unchanged once the contract does it instead.
+//! Each entry is covered by a pair of tests: one proving the entry survives
+//! within its extended TTL, and one pinning that the host still archives it
+//! one ledger past that window. The survival tests double as the harness a
+//! contributor runs to confirm the contract (not the test) is doing the
+//! extension.
 //!
 //! # Why `keep_instance_alive` appears in every test
 //!
-//! `credit-oracle` never calls `instance().extend_ttl`, so its instance entry
-//! expires after the default 4096 ledgers — sooner than any persistent entry
-//! under test. Without pinning the instance open, every jump would panic on
-//! *instance* archival and tell us nothing about the persistent key we meant
-//! to test. `test_credit_oracle_instance_archives_after_default_ttl` covers
-//! that failure mode deliberately, on its own.
+//! `credit-oracle` bumps its instance entry to `INSTANCE_BUMP_AMOUNT`
+//! (500_000) in `initialize`, which is still shorter than the `PERS_TTL_EXTEND`
+//! window the persistent keys under test get (518_400). Without pinning the
+//! instance open, a jump to `PERS_TTL_EXTEND` would panic on *instance*
+//! archival and tell us nothing about the persistent key we meant to test.
+//! `test_credit_oracle_instance_survives_default_ttl_window` covers the
+//! instance entry on its own.
 
 #[cfg(test)]
 mod tests {
@@ -79,6 +79,9 @@ mod tests {
 
     /// Mirrors `PERS_TTL_THRESHOLD` in the contracts (~7 days at 5 s/ledger).
     const PERS_TTL_THRESHOLD: u32 = 120_960;
+
+    /// Mirrors `INSTANCE_BUMP_AMOUNT` in `credit-oracle` (~29 days at 5 s/ledger).
+    const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
     /// Substring of the panic raised when an archived entry is accessed.
     const ARCHIVED: &str = "Error(Storage, InternalError)";
@@ -139,21 +142,21 @@ mod tests {
                 "TrustedFeeder should carry the extended TTL",
             );
 
-            // update_tx_stats does not call extend_ttl, so TxStats only gets
-            // the environment default — the defect issues 5/6 must fix.
+            // update_tx_stats calls extend_ttl(PERS_TTL_THRESHOLD, PERS_TTL_EXTEND)
+            // right after the write, so TxStats gets the extended TTL too.
             assert_eq!(
                 env.storage()
                     .persistent()
                     .get_ttl(&CreditKey::TxStats(subject.clone())),
-                DEFAULT_PERSISTENT_TTL - 1,
-                "TxStats is written without extend_ttl, so it only gets min_persistent_entry_ttl",
+                PERS_TTL_EXTEND,
+                "TxStats should carry the extended TTL written by update_tx_stats",
             );
 
-            // credit-oracle never bumps its instance TTL either.
+            // initialize bumps the instance TTL to INSTANCE_BUMP_AMOUNT.
             assert_eq!(
                 env.storage().instance().get_ttl(),
-                DEFAULT_PERSISTENT_TTL - 1,
-                "credit-oracle never calls instance().extend_ttl",
+                INSTANCE_BUMP_AMOUNT,
+                "credit-oracle bumps its instance TTL in initialize",
             );
         });
     }
@@ -214,7 +217,7 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 2. TxStats (credit-oracle) — written WITHOUT extend_ttl
+    // 2. TxStats (credit-oracle) — extended by update_tx_stats
     // -----------------------------------------------------------------
 
     fn credit_with_stats(env: &Env) -> (Address, CreditOracleClient<'_>, Address, Address) {
@@ -240,48 +243,19 @@ mod tests {
         (id, credit, feeder, subject)
     }
 
-    /// Issue #527 predicted `compute_score` would "default to zero inputs" once
-    /// TxStats expired. It does not — the read panics before `unwrap_or` runs.
-    /// TxStats is the shortest-lived persistent entry in credit-oracle because
-    /// `update_tx_stats` never calls `extend_ttl`.
+    /// `update_tx_stats` extends the TxStats entry to PERS_TTL_EXTEND, so the
+    /// same jump that used to archive it (past the 4096-ledger default) now
+    /// yields a clean score computation that still reflects the stats.
     #[test]
-    #[should_panic(expected = "Error(Storage, InternalError)")]
-    fn test_tx_stats_expires_without_ttl_extension() {
+    fn test_tx_stats_survives_within_extended_ttl() {
         let env = Env::default();
         env.mock_all_auths();
 
         let (id, credit, _feeder, subject) = credit_with_stats(&env);
         keep_instance_alive(&env, &id);
 
-        // Well inside PERS_TTL_EXTEND, but past the 4096-ledger default.
-        advance(&env, DEFAULT_PERSISTENT_TTL + 1);
-
-        let _ = credit.compute_score(&subject);
-    }
-
-    /// Harness for issues 5 and 6: extend the TxStats TTL the way
-    /// `update_tx_stats` should, and the same jump that panics above becomes a
-    /// clean score computation. A contributor fixing the contract deletes the
-    /// manual `extend_ttl` block and this test must still pass.
-    #[test]
-    fn test_tx_stats_survives_when_ttl_is_extended() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let (id, credit, _feeder, subject) = credit_with_stats(&env);
-        keep_instance_alive(&env, &id);
-
-        // --- stands in for the missing extend_ttl inside update_tx_stats ---
-        env.as_contract(&id, || {
-            env.storage().persistent().extend_ttl(
-                &CreditKey::TxStats(subject.clone()),
-                PERS_TTL_THRESHOLD,
-                PERS_TTL_EXTEND,
-            );
-        });
-        // -------------------------------------------------------------------
-
-        advance(&env, DEFAULT_PERSISTENT_TTL + 1);
+        // Well past the 4096-ledger default, but inside PERS_TTL_EXTEND.
+        advance(&env, PERS_TTL_EXTEND - 1);
 
         let score = credit.compute_score(&subject);
         assert!(
@@ -289,6 +263,22 @@ mod tests {
             "surviving TxStats must still lift the score above the 300 floor, got {}",
             score,
         );
+    }
+
+    /// One ledger past PERS_TTL_EXTEND the TxStats entry is archived. As with
+    /// every other key, the read panics rather than falling back to the
+    /// `unwrap_or` default — the extension buys 30 days, not immunity.
+    #[test]
+    #[should_panic(expected = "Error(Storage, InternalError)")]
+    fn test_tx_stats_expires_past_extended_ttl() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (id, credit, _feeder, subject) = credit_with_stats(&env);
+        keep_instance_alive(&env, &id);
+        advance(&env, PERS_TTL_EXTEND + 1);
+
+        let _ = credit.compute_score(&subject);
     }
 
     // -----------------------------------------------------------------
@@ -417,9 +407,11 @@ mod tests {
 
     /// Archival is not read-only: *writing* an archived key panics too, so a
     /// feeder cannot repair an expired entry by pushing fresh data over it.
-    /// `update_tx_stats` here fails even though it only ever writes TxStats —
-    /// the host rejects the access before the contract body runs. Recovery
-    /// requires restoring the entry, which no contract function exposes.
+    /// The feeder flag is pinned open so the TxStats entry under test archives
+    /// alone; `update_tx_stats` then panics even though it only ever writes
+    /// TxStats — the host rejects the access before the contract body runs.
+    /// Recovery requires restoring the entry, which no contract function
+    /// exposes.
     #[test]
     #[should_panic(expected = "Error(Storage, InternalError)")]
     fn test_writing_over_an_archived_entry_does_not_repair_it() {
@@ -428,7 +420,16 @@ mod tests {
 
         let (id, credit, feeder, subject) = credit_with_stats(&env);
         keep_instance_alive(&env, &id);
-        advance(&env, DEFAULT_PERSISTENT_TTL + 1);
+
+        // Keep the feeder flag alive so TxStats is the only archived key.
+        env.as_contract(&id, || {
+            env.storage().persistent().extend_ttl(
+                &CreditKey::TrustedFeeder(feeder.clone()),
+                6_000_000,
+                6_000_000,
+            );
+        });
+        advance(&env, PERS_TTL_EXTEND + 1);
 
         credit.update_tx_stats(
             &feeder,
@@ -442,18 +443,16 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 5. Instance archival (credit-oracle)
+    // 5. Instance TTL (credit-oracle)
     // -----------------------------------------------------------------
 
-    /// The most urgent finding. credit-oracle never calls
-    /// `instance().extend_ttl`, so its instance entry — holding `Admin`,
-    /// `Config`, and every other singleton — expires after the default 4096
-    /// ledgers (~5.7 h at 5 s/ledger) and archives the whole contract. This is
-    /// why every other test in this module calls `keep_instance_alive`: without
-    /// it, the instance is what expires first, long before any persistent key.
+    /// credit-oracle bumps its instance TTL in `initialize` to
+    /// `INSTANCE_BUMP_AMOUNT` (500_000), so its instance entry — holding
+    /// `Admin`, `Config`, and every other singleton — survives an idle period
+    /// past the default 4096-ledger window that used to archive the whole
+    /// contract.
     #[test]
-    #[should_panic(expected = "Error(Storage, InternalError)")]
-    fn test_credit_oracle_instance_archives_after_default_ttl() {
+    fn test_credit_oracle_instance_survives_default_ttl_window() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -464,16 +463,19 @@ mod tests {
         let subject = Address::generate(&env);
         credit.initialize(&admin);
 
-        // Deliberately NOT calling keep_instance_alive.
+        // Deliberately NOT calling keep_instance_alive: the bump in
+        // `initialize`, not the test, must keep the instance alive.
         advance(&env, DEFAULT_PERSISTENT_TTL + 1);
 
-        let _ = credit.compute_score(&subject);
+        // A subject with no history scores the floor; the point is that the
+        // call returns at all instead of panicking on an archived instance.
+        assert_eq!(credit.compute_score(&subject), 300);
     }
 
-    /// Counterpart to the test above: identity-oracle *does* bump its instance
+    /// Counterpart to the test above: identity-oracle also bumps its instance
     /// TTL (INSTANCE_BUMP_AMOUNT = 500_000) on admin calls, so it survives the
-    /// same jump that archives credit-oracle. The two tests together isolate
-    /// the difference to the missing bump rather than to the environment.
+    /// same jump. The two tests together isolate the instance bump rather than
+    /// the environment.
     #[test]
     fn test_identity_oracle_instance_survives_default_ttl_window() {
         let env = Env::default();
@@ -481,7 +483,7 @@ mod tests {
 
         let (_id, identity, subject) = anchor_one_vc(&env);
 
-        // Same jump as the credit-oracle archival test, no manual pinning.
+        // Same jump as the credit-oracle survival test, no manual pinning.
         advance(&env, DEFAULT_PERSISTENT_TTL + 1);
 
         assert!(
@@ -541,7 +543,8 @@ mod tests {
 
         let (id, _credit, _feeder, subject) = credit_with_stats(&env);
         keep_instance_alive(&env, &id);
-        advance(&env, DEFAULT_PERSISTENT_TTL + 1);
+        // Past the extended TxStats TTL, so the entry is genuinely archived.
+        advance(&env, PERS_TTL_EXTEND + 1);
 
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             env.as_contract(&id, || {

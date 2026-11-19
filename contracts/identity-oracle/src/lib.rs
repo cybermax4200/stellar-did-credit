@@ -200,6 +200,9 @@ pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 /// Maximum allowed CID length in bytes.
 pub const MAX_CID_LENGTH: u32 = 128;
 
+/// Maximum number of trusted issuers returned by a single paginated query.
+pub const MAX_ISSUER_PAGE_LIMIT: u32 = 50;
+
 fn generic_credential_type(_env: &Env) -> CredentialType {
     symbol_short!("generic")
 }
@@ -250,6 +253,27 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
 
 #[contract]
 pub struct IdentityOracle;
+
+fn get_active_issuers(env: &Env) -> Vec<Address> {
+    let ever_registered: Vec<Address> = env
+        .storage()
+        .persistent()
+        .get(&DataKey::IssuersIndex)
+        .unwrap_or(Vec::new(env));
+
+    let mut active = Vec::new(env);
+    for issuer in ever_registered.iter() {
+        let is_trusted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrustedIssuer(issuer.clone()))
+            .unwrap_or(false);
+        if is_trusted {
+            active.push_back(issuer);
+        }
+    }
+    active
+}
 
 fn load_protocol_stats(env: &Env) -> ProtocolStats {
     env.storage()
@@ -1163,6 +1187,39 @@ impl IdentityOracle {
         false
     }
 
+    /// Verify multiple verifiable credentials for a subject in a single atomic invocation.
+    ///
+    /// Parameters:
+    /// - `env`: Soroban contract environment used to read persistent storage.
+    /// - `subject`: Address whose anchored VC records are searched.
+    /// - `vc_hashes`: Vector of SHA-256 hashes of off-chain VC JSONs to verify.
+    ///
+    /// Returns a vector of booleans of equal length to `vc_hashes`, where each
+    /// element is `true` if the corresponding VC is anchored and active (not revoked),
+    /// and `false` otherwise (unanchored or revoked). An empty input vector returns
+    /// an empty vector. This function is read-only and does not require authentication.
+    pub fn batch_verify_vc(env: Env, subject: Address, vc_hashes: Vec<BytesN<32>>) -> Vec<bool> {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<IdentityVCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut results = Vec::new(&env);
+        for vc_hash in vc_hashes.iter() {
+            let mut is_valid = false;
+            for record in anchors.iter() {
+                if record.vc_hash == vc_hash && !is_record_revoked(&env, &record) {
+                    is_valid = true;
+                    break;
+                }
+            }
+            results.push_back(is_valid);
+        }
+        results
+    }
+
     /// Propose a new contract admin (step 1 of two-step admin transfer).
     ///
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
@@ -1254,29 +1311,37 @@ impl IdentityOracle {
         Ok(())
     }
 
-    /// Returns the currently registered (non-deregistered) trusted issuers.
-    ///
-    /// The index contains currently trusted issuers after deregistration
-    /// compaction; the flag check also keeps this safe for legacy indexes.
-    pub fn list_issuers(env: Env) -> Vec<Address> {
-        let ever_registered: Vec<Address> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::IssuersIndex)
-            .unwrap_or(Vec::new(&env));
+    /// Returns the total count of currently registered (active) trusted issuers.
+    pub fn get_issuer_count(env: Env) -> u32 {
+        get_active_issuers(&env).len()
+    }
 
-        let mut active = Vec::new(&env);
-        for issuer in ever_registered.iter() {
-            let is_trusted: bool = env
-                .storage()
-                .persistent()
-                .get(&DataKey::TrustedIssuer(issuer.clone()))
-                .unwrap_or(false);
-            if is_trusted {
-                active.push_back(issuer);
+    /// Returns a paginated sub-slice of currently registered (active) trusted issuers.
+    ///
+    /// `start_index` is the zero-based offset into the active issuer list.
+    /// `limit` is bounded to at most `MAX_ISSUER_PAGE_LIMIT` (50).
+    /// If `start_index` is at or beyond the total number of issuers, an empty vector is returned.
+    pub fn get_issuers_paginated(env: Env, start_index: u32, limit: u32) -> Vec<Address> {
+        let active = get_active_issuers(&env);
+        let total = active.len();
+        let bounded_limit = limit.min(MAX_ISSUER_PAGE_LIMIT);
+        let mut result = Vec::new(&env);
+        if start_index < total {
+            let end_index = start_index.saturating_add(bounded_limit).min(total);
+            for i in start_index..end_index {
+                result.push_back(active.get(i).unwrap());
             }
         }
-        active
+        result
+    }
+
+    /// Returns the currently registered (non-deregistered) trusted issuers, bounded to the first page.
+    ///
+    /// Deprecated: Prefer `get_issuers_paginated` to avoid unbounded return vectors
+    /// and gas exhaustion on networks with many issuers.
+    #[deprecated(note = "use `get_issuers_paginated` instead")]
+    pub fn list_issuers(env: Env) -> Vec<Address> {
+        Self::get_issuers_paginated(env, 0, MAX_ISSUER_PAGE_LIMIT)
     }
 
     /// Returns aggregate protocol-level counters.
@@ -1516,6 +1581,111 @@ mod tests {
         let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[3u8; 32]);
         client.anchor_vc(&issuer, &subject, &vc_hash);
+    }
+
+    #[test]
+    fn test_get_issuer_count_and_paginated_basic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Initially zero issuers
+        assert_eq!(client.get_issuer_count(), 0);
+        assert_eq!(client.get_issuers_paginated(&0, &10), Vec::new(&env));
+        assert_eq!(client.get_issuers_paginated(&5, &10), Vec::new(&env));
+
+        let issuer1 = Address::generate(&env);
+        let issuer2 = Address::generate(&env);
+        let issuer3 = Address::generate(&env);
+        let issuer4 = Address::generate(&env);
+        let issuer5 = Address::generate(&env);
+
+        client.register_issuer(&issuer1);
+        client.register_issuer(&issuer2);
+        client.register_issuer(&issuer3);
+        client.register_issuer(&issuer4);
+        client.register_issuer(&issuer5);
+
+        assert_eq!(client.get_issuer_count(), 5);
+
+        // Page 1: offset 0, limit 2
+        let page1 = client.get_issuers_paginated(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), issuer1);
+        assert_eq!(page1.get(1).unwrap(), issuer2);
+
+        // Page 2: offset 2, limit 2
+        let page2 = client.get_issuers_paginated(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), issuer3);
+        assert_eq!(page2.get(1).unwrap(), issuer4);
+
+        // Page 3: offset 4, limit 2 (only 1 item remains)
+        let page3 = client.get_issuers_paginated(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap(), issuer5);
+
+        // Offset equal to total count returns empty
+        let page_exact_end = client.get_issuers_paginated(&5, &2);
+        assert_eq!(page_exact_end.len(), 0);
+
+        // Offset beyond total count returns empty
+        let page_beyond = client.get_issuers_paginated(&100, &10);
+        assert_eq!(page_beyond.len(), 0);
+
+        // Zero limit returns empty
+        let page_zero_limit = client.get_issuers_paginated(&0, &0);
+        assert_eq!(page_zero_limit.len(), 0);
+    }
+
+    #[test]
+    fn test_get_issuers_paginated_enforces_max_limit_50() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Register 55 issuers
+        let mut registered = std::vec::Vec::new();
+        for _ in 0..55 {
+            let issuer = Address::generate(&env);
+            client.register_issuer(&issuer);
+            registered.push(issuer);
+        }
+
+        assert_eq!(client.get_issuer_count(), 55);
+
+        // Requesting limit 100 must be clamped to 50
+        let page = client.get_issuers_paginated(&0, &100);
+        assert_eq!(page.len(), 50);
+        for i in 0..50 {
+            assert_eq!(page.get(i as u32).unwrap(), registered[i]);
+        }
+
+        // Fetch remaining 5
+        let remainder = client.get_issuers_paginated(&50, &50);
+        assert_eq!(remainder.len(), 5);
+        for i in 0..5 {
+            assert_eq!(remainder.get(i as u32).unwrap(), registered[50 + i]);
+        }
+
+        // list_issuers returns the first page bounded to 50
+        let first_page = client.list_issuers();
+        assert_eq!(first_page.len(), 50);
+
+        // Deregister the first issuer and verify pagination shifts correctly
+        client.deregister_issuer(&registered[0]);
+        assert_eq!(client.get_issuer_count(), 54);
+        let page_after_dereg = client.get_issuers_paginated(&0, &2);
+        assert_eq!(page_after_dereg.get(0).unwrap(), registered[1]);
+        assert_eq!(page_after_dereg.get(1).unwrap(), registered[2]);
     }
 
     #[test]
@@ -2873,5 +3043,66 @@ mod tests {
 
         let stored_type: CredentialType = client.get_vc_credential_type(&subject, &typed_hash);
         assert_eq!(stored_type, Symbol::new(&env, "kyc"));
+    }
+
+    #[test]
+    fn test_batch_verify_vc_mixed_credentials() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let vc_valid1 = BytesN::from_array(&env, &[10u8; 32]);
+        let vc_valid2 = BytesN::from_array(&env, &[20u8; 32]);
+        let vc_revoked = BytesN::from_array(&env, &[30u8; 32]);
+        let vc_unknown = BytesN::from_array(&env, &[40u8; 32]);
+
+        client.anchor_vc(&issuer, &subject, &vc_valid1);
+        client.anchor_vc(&issuer, &subject, &vc_valid2);
+        client.anchor_vc(&issuer, &subject, &vc_revoked);
+
+        // Revoke vc_revoked
+        client.mark_vc_revoked(&issuer, &subject, &vc_revoked);
+
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(vc_valid1.clone());
+        hashes.push_back(vc_unknown.clone());
+        hashes.push_back(vc_valid2.clone());
+        hashes.push_back(vc_revoked.clone());
+
+        let results = client.batch_verify_vc(&subject, &hashes);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+        assert_eq!(results.get(2).unwrap(), true);
+        assert_eq!(results.get(3).unwrap(), false);
+
+        // Verify matches individual verify_vc
+        assert_eq!(results.get(0).unwrap(), client.verify_vc(&subject, &vc_valid1));
+        assert_eq!(results.get(1).unwrap(), client.verify_vc(&subject, &vc_unknown));
+        assert_eq!(results.get(2).unwrap(), client.verify_vc(&subject, &vc_valid2));
+        assert_eq!(results.get(3).unwrap(), client.verify_vc(&subject, &vc_revoked));
+    }
+
+    #[test]
+    fn test_batch_verify_vc_empty_input() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let subject = Address::generate(&env);
+
+        let empty_hashes: Vec<BytesN<32>> = Vec::new(&env);
+        let results = client.batch_verify_vc(&subject, &empty_hashes);
+        assert_eq!(results.len(), 0);
     }
 }

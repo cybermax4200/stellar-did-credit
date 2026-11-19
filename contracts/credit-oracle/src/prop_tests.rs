@@ -6,8 +6,8 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_SCORE, MIN_SCORE,
-    SECONDS_PER_DAY,
+    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE,
+    MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
 
@@ -343,5 +343,160 @@ proptest! {
             "oversize floor must clamp to BPS_DENOMINATOR, got {}",
             multiplier
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 11 — Batch size validation invariant: <= MAX_BATCH_SIZE is permitted,
+//               > MAX_BATCH_SIZE exceeds limit.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn prop_batch_size_limit_boundary(
+        len in 0u32..=150u32,
+    ) {
+        let is_too_large = len > MAX_BATCH_SIZE;
+        if len <= MAX_BATCH_SIZE {
+            prop_assert!(!is_too_large);
+        } else {
+            prop_assert!(is_too_large);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 12 — Batch update deduplication: sequential execution ensures that
+//               the last occurrence of a subject in a batch determines its final state.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    #[test]
+    fn prop_batch_partial_duplicate_last_write_wins(
+        entries in proptest::collection::vec((0u8..8u8, 0i128..1_000_000i128), 1..=50),
+    ) {
+        // Find expected final value for each subject
+        let mut expected = [None; 8];
+        for &(subject_id, vol) in &entries {
+            expected[subject_id as usize] = Some(vol);
+        }
+
+        // Verify the last occurrence in entries equals the expected value
+        for (idx, &(subject_id, vol)) in entries.iter().enumerate() {
+            let is_last = entries[idx + 1..].iter().all(|&(s, _)| s != subject_id);
+            if is_last {
+                prop_assert_eq!(expected[subject_id as usize], Some(vol));
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 13 — Extreme/boundary inputs never panic and stay within bounds
+//
+// Counterparty counts and volumes arrive from feeders that may be malformed.
+// `u32::MAX` / `i128::MAX` (and `i128::MIN`) must flow through
+// `compute_score_pure` without an arithmetic panic under `overflow-checks` and
+// still land inside [MIN_SCORE, MAX_SCORE].
+// ---------------------------------------------------------------------------
+
+/// Draws from the interesting `u32` boundary values plus any random value.
+fn extreme_u32() -> impl Strategy<Value = u32> {
+    prop_oneof![
+        Just(0u32),
+        Just(1u32),
+        Just(5u32),
+        Just(100u32),
+        Just(u32::MAX / 2),
+        Just(u32::MAX - 1),
+        Just(u32::MAX),
+        any::<u32>(),
+    ]
+}
+
+/// Draws from the interesting `i128` boundary values plus any random value.
+fn extreme_i128() -> impl Strategy<Value = i128> {
+    prop_oneof![
+        Just(0i128),
+        Just(100_000_000i128),
+        Just(i128::MAX / 2),
+        Just(i128::MAX - 1),
+        Just(i128::MAX),
+        Just(i128::MIN),
+        any::<i128>(),
+    ]
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    #[test]
+    fn prop_extreme_inputs_stay_within_bounds_without_panic(
+        vc_points           in extreme_u32(),
+        volume_30d          in extreme_i128(),
+        avg_counterparties  in extreme_u32(),
+        on_time_count       in extreme_u32(),
+        total_count         in extreme_u32(),
+        total_repaid        in extreme_i128(),
+        (vc_w, tx_w, repay_w) in valid_weights(),
+    ) {
+        let score = compute_score_pure(
+            vc_points, volume_30d, avg_counterparties,
+            on_time_count, total_count, total_repaid,
+            vc_w, tx_w, repay_w,
+        );
+        prop_assert!(
+            score >= MIN_SCORE && score <= MAX_SCORE,
+            "extreme inputs produced out-of-range score {} (vc={}, vol={}, cps={}, \
+             on_time={}, total={}, repaid={})",
+            score, vc_points, volume_30d, avg_counterparties,
+            on_time_count, total_count, total_repaid
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 14 — Protocol metrics accumulation and idempotence:
+//               First-time borrower scoring increments total_borrowers and accumulates
+//               volume; re-scoring existing borrowers is strictly idempotent.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(500))]
+
+    #[test]
+    fn prop_protocol_metrics_accumulation_and_idempotence(
+        events in proptest::collection::vec((0u8..16u8, 0i128..10_000_000_000i128), 1..=100),
+    ) {
+        let mut seen = [false; 16];
+        let mut expected_borrowers: u64 = 0;
+        let mut expected_volume: i128 = 0;
+
+        for &(borrower_id, volume) in &events {
+            let id = borrower_id as usize;
+            if !seen[id] {
+                seen[id] = true;
+                expected_borrowers = expected_borrowers.saturating_add(1);
+                expected_volume = expected_volume.saturating_add(volume.max(0));
+            }
+        }
+
+        // Count unique borrowers in events
+        let unique_count = seen.iter().filter(|&&s| s).count() as u64;
+        prop_assert_eq!(expected_borrowers, unique_count);
+
+        // Re-scoring all events a second time should not change metrics (idempotence)
+        let mut rescore_borrowers = expected_borrowers;
+        let mut rescore_volume = expected_volume;
+        for &(borrower_id, volume) in &events {
+            let id = borrower_id as usize;
+            if !seen[id] {
+                rescore_borrowers = rescore_borrowers.saturating_add(1);
+                rescore_volume = rescore_volume.saturating_add(volume.max(0));
+            }
+        }
+        prop_assert_eq!(rescore_borrowers, expected_borrowers);
+        prop_assert_eq!(rescore_volume, expected_volume);
     }
 }

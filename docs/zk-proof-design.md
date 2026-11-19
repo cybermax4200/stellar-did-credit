@@ -174,6 +174,33 @@ For Phase 4b **on-chain state binding**, store `H(ScoreRecord)` as a leaf in a s
 
 This adds a contract change but removes the need to trust off-chain witness sourcing.
 
+#### Merkle membership gadget (depth 20) — implemented
+
+Research Q1 is addressed by the depth-20 membership gadget in
+`zk/circuit/src/merkle.rs`. It wires the anchored Merkle `root` in as the only
+**public input**, while the `leaf` and the 20-level authentication path
+(`siblings` hashes + `is_right` direction bits) stay **private witness** inputs.
+Each level orders its children with a constant-time `conditionally_select` on
+the private direction bit and applies one Poseidon two-to-one compression
+(rate 2, capacity 1, Cauchy MDS, 8 full + 56 partial rounds), so a depth-20
+proof costs 20 Poseidon permutations.
+
+| Component | Constraint count |
+| --------- | ---------------- |
+| 20 × Poseidon two-to-one compression (incl. child ordering) | 4,800 |
+| Leaf + path witness allocation and root equality | 1 |
+| **Total (depth 20, measured)** | **4,801** |
+| **Budget asserted in tests (`MERKLE_CONSTRAINT_BUDGET`)** | **8,000** |
+
+The count is pinned by `merkle::tests::constraint_budget`, which asserts the
+synthesized constraint system stays within `MERKLE_CONSTRAINT_BUDGET`. The
+budget carries ~66% headroom so the assertion remains stable across
+`ark-r1cs-std` patch releases while still catching accidental circuit
+duplication. Depth scales linearly: each extra level adds one Poseidon
+permutation (~240 constraints). As with the score circuit, the gadget runs
+off-chain in WASM, so the constraint count affects proof-generation time, not
+on-chain verification cost (a single BLS12-381 pairing check via CAP-0059).
+
 ### Field encoding notes
 
 | Rust / Soroban type | Circuit encoding |

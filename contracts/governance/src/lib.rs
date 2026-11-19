@@ -50,6 +50,21 @@ pub enum GovernanceError {
     ProposalRejected = 18,
     /// Voting period cannot be zero.
     InvalidVotingPeriod = 19,
+    /// The credit-oracle already has weights pending under an active timelock.
+    TimelockAlreadyPending = 20,
+    /// A voter batch exceeds the maximum number of entries.
+    VoterBatchTooLarge = 21,
+}
+
+/// Maximum number of entries accepted by either voter batch operation.
+pub const MAX_VOTER_BATCH: u32 = 50;
+
+/// A voter and the voting weight to assign.
+#[contracttype]
+#[derive(Clone)]
+pub struct VoterWeightEntry {
+    pub voter: Address,
+    pub weight: i128,
 }
 
 /// Storage keys for the governance contract.
@@ -133,6 +148,22 @@ pub struct GovernanceProposal {
 /// On-chain governance contract.
 #[contract]
 pub struct Governance;
+
+// Applies the same storage, TTL and event behavior as the single-voter calls.
+fn set_voter_weight(env: &Env, voter: Address, weight: i128, registration: bool) {
+    let key = DataKey::VoterWeight(voter.clone());
+    let old_weight: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+    if weight == 0 {
+        env.storage().persistent().remove(&key);
+    } else {
+        env.storage().persistent().set(&key, &weight);
+        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    }
+    let total: i128 = env.storage().instance().get(&DataKey::TotalRegisteredWeight).unwrap_or(0);
+    env.storage().instance().set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
+    let topic = if registration { symbol_short!("VoterReg") } else { symbol_short!("VoterUpd") };
+    env.events().publish((topic, voter), weight);
+}
 
 #[contractimpl]
 impl Governance {
@@ -524,6 +555,12 @@ impl Governance {
             .get(&DataKey::CreditOracle)
             .expect("no credit oracle");
 
+        if let Some(pending) = CreditOracleClient::get_pending_weights(&env, &credit_oracle_addr) {
+            if env.ledger().sequence() < pending.effective_ledger {
+                return Err(GovernanceError::TimelockAlreadyPending);
+            }
+        }
+
         // Use propose_weights to start the timelock, not update_weights which bypasses it
         CreditOracleClient::propose_weights(&env, &credit_oracle_addr, &proposal.proposed_weights);
 
@@ -640,6 +677,60 @@ impl Governance {
             &credit_oracle_addr,
             &env.current_contract_address(),
         );
+        Ok(())
+    }
+
+    /// Register or replace up to 50 voter weights. Duplicate addresses are
+    /// processed in order, so the last entry determines the final weight.
+    pub fn batch_register_voters(
+        env: Env,
+        admin: Address,
+        entries: Vec<VoterWeightEntry>,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        if entries.len() > MAX_VOTER_BATCH {
+            return Err(GovernanceError::VoterBatchTooLarge);
+        }
+        for entry in entries.iter() {
+            if entry.weight <= 0 {
+                return Err(GovernanceError::InvalidVoteWeight);
+            }
+        }
+        for entry in entries.iter() {
+            set_voter_weight(&env, entry.voter, entry.weight, true);
+        }
+        Ok(())
+    }
+
+    /// Update up to 50 voter weights in order; zero removes a voter.
+    /// For duplicate addresses, the last entry determines the final weight.
+    pub fn batch_update_voter_weights(
+        env: Env,
+        admin: Address,
+        entries: Vec<VoterWeightEntry>,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        if entries.len() > MAX_VOTER_BATCH {
+            return Err(GovernanceError::VoterBatchTooLarge);
+        }
+        for entry in entries.iter() {
+            if entry.weight < 0 {
+                return Err(GovernanceError::InvalidVoteWeight);
+            }
+        }
+        for entry in entries.iter() {
+            set_voter_weight(&env, entry.voter, entry.weight, false);
+        }
         Ok(())
     }
 
@@ -970,6 +1061,58 @@ mod tests {
         testutils::{Address as _, Events, Ledger},
         Env, TryIntoVal,
     };
+
+    #[test]
+    fn test_voter_batches() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let other = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        let mut entries = Vec::new(&env);
+        for _ in 0..25 {
+            entries.push_back(VoterWeightEntry { voter: Address::generate(&env), weight: 10 });
+        }
+        assert_eq!(client.try_batch_register_voters(&other, &entries), Err(Ok(GovernanceError::NotAuthorized)));
+        assert_eq!(client.try_batch_update_voter_weights(&other, &entries), Err(Ok(GovernanceError::NotAuthorized)));
+        client.batch_register_voters(&admin, &entries);
+        for entry in entries.iter() {
+            assert_eq!(client.get_voter_weight(&entry.voter), Some(10));
+        }
+        assert_eq!(client.get_total_registered_weight(), 250);
+
+        let voter = entries.get(0).unwrap().voter;
+        let mut updates = Vec::new(&env);
+        updates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 0 });
+        updates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 30 });
+        client.batch_update_voter_weights(&admin, &updates);
+        assert_eq!(client.get_voter_weight(&voter), Some(30));
+        assert_eq!(client.get_total_registered_weight(), 270);
+        let mut duplicates = Vec::new(&env);
+        duplicates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 20 });
+        duplicates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 30 });
+        client.batch_register_voters(&admin, &duplicates);
+        assert_eq!(client.get_total_registered_weight(), 270);
+
+        let mut invalid = Vec::new(&env);
+        invalid.push_back(VoterWeightEntry { voter: voter.clone(), weight: 50 });
+        invalid.push_back(VoterWeightEntry { voter: other.clone(), weight: -1 });
+        assert_eq!(client.try_batch_register_voters(&admin, &invalid), Err(Ok(GovernanceError::InvalidVoteWeight)));
+        assert_eq!(client.try_batch_update_voter_weights(&admin, &invalid), Err(Ok(GovernanceError::InvalidVoteWeight)));
+        assert_eq!(client.get_voter_weight(&voter), Some(30));
+        assert_eq!(client.get_total_registered_weight(), 270);
+
+        let mut oversized = Vec::new(&env);
+        for _ in 0..51 {
+            oversized.push_back(VoterWeightEntry { voter: other.clone(), weight: 1 });
+        }
+        assert_eq!(client.try_batch_register_voters(&admin, &oversized), Err(Ok(GovernanceError::VoterBatchTooLarge)));
+        assert_eq!(client.try_batch_update_voter_weights(&admin, &oversized), Err(Ok(GovernanceError::VoterBatchTooLarge)));
+        assert_eq!(client.get_voter_weight(&other), None);
+    }
 
     #[test]
     fn test_governance_proposal_creation_voting_and_execution() {

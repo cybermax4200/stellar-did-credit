@@ -2,7 +2,8 @@
 mod tests {
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
+        ProtocolMetrics, RepaymentRecord, RepaymentRecordV1, ScoringWeights, SubjectTxStatsEntry,
+        TxStats, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -1531,6 +1532,50 @@ mod tests {
     }
 
     #[test]
+    fn test_get_issuers_paginated_and_count_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+
+        assert_eq!(identity.get_issuer_count(), 0);
+        assert_eq!(identity.get_issuers_paginated(&0, &10).len(), 0);
+        assert_eq!(identity.get_issuers_paginated(&5, &10).len(), 0);
+
+        let mut issuers = std::vec::Vec::new();
+        for _ in 0..5 {
+            let iss = soroban_sdk::Address::generate(&env);
+            identity.register_issuer(&iss);
+            issuers.push(iss);
+        }
+
+        assert_eq!(identity.get_issuer_count(), 5);
+
+        // Sub-slice pagination
+        let page1 = identity.get_issuers_paginated(&0, &2);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page1.get(0).unwrap(), issuers[0]);
+        assert_eq!(page1.get(1).unwrap(), issuers[1]);
+
+        let page2 = identity.get_issuers_paginated(&2, &2);
+        assert_eq!(page2.len(), 2);
+        assert_eq!(page2.get(0).unwrap(), issuers[2]);
+        assert_eq!(page2.get(1).unwrap(), issuers[3]);
+
+        let page3 = identity.get_issuers_paginated(&4, &2);
+        assert_eq!(page3.len(), 1);
+        assert_eq!(page3.get(0).unwrap(), issuers[4]);
+
+        // Beyond array length returns empty Vec
+        let empty_page = identity.get_issuers_paginated(&10, &10);
+        assert_eq!(empty_page.len(), 0);
+    }
+
+    #[test]
     fn test_protocol_stats_identity_oracle_integration() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1625,6 +1670,89 @@ mod tests {
 
         let stats4 = credit.get_protocol_stats();
         assert_eq!(stats4.total_subjects_scored, 2);
+    }
+
+    #[test]
+    fn test_protocol_metrics_credit_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        // Verify initial live metrics are all zero
+        let m0: ProtocolMetrics = credit.get_protocol_metrics();
+        assert_eq!(m0.total_volume_scored, 0);
+        assert_eq!(m0.total_borrowers, 0);
+        assert_eq!(m0.total_repayments_count, 0);
+
+        let subject1 = soroban_sdk::Address::generate(&env);
+        let subject2 = soroban_sdk::Address::generate(&env);
+
+        // Record repayments
+        credit.record_repayment(&lender, &subject1, &100_000_000i128, &true);
+        credit.record_repayment(&lender, &subject1, &200_000_000i128, &false);
+        let m_repay = credit.get_protocol_metrics();
+        assert_eq!(m_repay.total_repayments_count, 2);
+        assert_eq!(m_repay.total_borrowers, 0);
+        assert_eq!(m_repay.total_volume_scored, 0);
+
+        // Provide tx volume for both borrowers
+        credit.update_tx_stats(
+            &feeder,
+            &subject1,
+            &TxStats {
+                volume_30d: 500_000_000,
+                tx_count_30d: 10,
+                avg_counterparties: 4,
+            },
+        );
+        credit.update_tx_stats(
+            &feeder,
+            &subject2,
+            &TxStats {
+                volume_30d: 800_000_000,
+                tx_count_30d: 20,
+                avg_counterparties: 6,
+            },
+        );
+
+        // First scoring for subject1
+        credit.compute_score(&subject1);
+        let m1 = credit.get_protocol_metrics();
+        assert_eq!(m1.total_borrowers, 1);
+        assert_eq!(m1.total_volume_scored, 500_000_000);
+        assert_eq!(m1.total_repayments_count, 2);
+
+        // Re-scoring subject1 after cooldown: strictly idempotent
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        credit.compute_score(&subject1);
+        let m1_rescore = credit.get_protocol_metrics();
+        assert_eq!(m1_rescore.total_borrowers, 1);
+        assert_eq!(m1_rescore.total_volume_scored, 500_000_000);
+        assert_eq!(m1_rescore.total_repayments_count, 2);
+
+        // First scoring for subject2: accumulative
+        credit.compute_score(&subject2);
+        let m2 = credit.get_protocol_metrics();
+        assert_eq!(m2.total_borrowers, 2);
+        assert_eq!(m2.total_volume_scored, 1_300_000_000);
+        assert_eq!(m2.total_repayments_count, 2);
+
+        // Record a repayment for subject2
+        credit.record_repayment(&lender, &subject2, &50_000_000i128, &true);
+        let m_final = credit.get_protocol_metrics();
+        assert_eq!(m_final.total_borrowers, 2);
+        assert_eq!(m_final.total_volume_scored, 1_300_000_000);
+        assert_eq!(m_final.total_repayments_count, 3);
     }
 
     /// Verify that deactivate/reactivate lifecycle works across identity-oracle
@@ -3076,6 +3204,14 @@ mod tests {
         gov.vote(&voter1, &proposal_id, &true, &1000);
         gov.vote(&voter2, &proposal_id, &false, &400);
 
+        let next_weights = ScoringWeights {
+            vc_weight: 45,
+            tx_weight: 25,
+            repayment_weight: 30,
+        };
+        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0);
+        gov.vote(&voter1, &next_proposal_id, &true, &1000);
+
         let proposal = gov.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.votes_for, 1000);
         assert_eq!(proposal.votes_against, 400);
@@ -3106,8 +3242,20 @@ mod tests {
         assert_eq!(pending_record.weights.tx_weight, 20);
         assert_eq!(pending_record.weights.repayment_weight, 30);
 
+        assert_eq!(
+            gov.try_execute(&next_proposal_id),
+            Err(Ok(GovernanceError::TimelockAlreadyPending))
+        );
+
         // 11. Advance ledger past timelock (17,280 ledgers + 2 buffer)
         let jump = 17_280 + 2;
+        env.as_contract(&gov_id, || {
+            env.storage().persistent().extend_ttl(
+                &governance::DataKey::Proposal(next_proposal_id),
+                120_960,
+                518_400,
+            );
+        });
         // Extend TTL on all four contracts to prevent archival during the jump
         env.as_contract(&identity_id, || {
             env.storage().instance().extend_ttl(jump, jump);
@@ -3125,13 +3273,219 @@ mod tests {
             l.sequence_number += jump;
         });
 
-        // 12. Apply weights via governance (gov.apply_weights calls credit-oracle)
+        // The expired pending weights no longer block a new execution.
+        gov.execute(&next_proposal_id);
+        assert!(gov.get_proposal(&next_proposal_id).unwrap().executed);
+
+        let pending = credit.get_pending_weights().unwrap();
+        assert_eq!(pending.weights.vc_weight, 45);
+        assert_eq!(pending.weights.tx_weight, 25);
+        assert_eq!(pending.weights.repayment_weight, 30);
+
+        // 12. Advance past the replacement timelock and apply the new weights.
+        env.as_contract(&identity_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&credit_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&revocation_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.as_contract(&gov_id, || {
+            env.storage().instance().extend_ttl(jump, jump);
+        });
+        env.ledger().with_mut(|l| {
+            l.sequence_number += jump;
+        });
         gov.apply_weights();
 
         // 13. Verify credit-oracle weights actually changed
         let active_weights = credit.get_scoring_weights();
-        assert_eq!(active_weights.vc_weight, 50);
-        assert_eq!(active_weights.tx_weight, 20);
+        assert_eq!(active_weights.vc_weight, 45);
+        assert_eq!(active_weights.tx_weight, 25);
         assert_eq!(active_weights.repayment_weight, 30);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = soroban_sdk::Address::generate(&env);
+
+        credit.initialize(&admin);
+        credit.register_feeder(&admin, &feeder);
+        credit.register_lender(&admin, &lender);
+
+        let subject_a = soroban_sdk::Address::generate(&env);
+        let subject_b = soroban_sdk::Address::generate(&env);
+        let subject_c = soroban_sdk::Address::generate(&env);
+
+        // 1. Empty batch validation: succeeds as a no-op when feeder is authorized
+        let empty_batch = soroban_sdk::Vec::new(&env);
+        let empty_res = credit.try_batch_update_tx_stats(&feeder, &empty_batch);
+        assert!(
+            empty_res.is_ok(),
+            "empty batch must succeed as a valid no-op"
+        );
+
+        // 2. Multi-subject batch update in a single atomic invocation
+        let mut batch = soroban_sdk::Vec::new(&env);
+        batch.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: TxStats {
+                volume_30d: 500_000_000,
+                tx_count_30d: 25,
+                avg_counterparties: 5,
+            },
+        });
+        batch.push_back(SubjectTxStatsEntry {
+            subject: subject_b.clone(),
+            stats: TxStats {
+                volume_30d: 1_000_000_000,
+                tx_count_30d: 50,
+                avg_counterparties: 10,
+            },
+        });
+
+        credit.batch_update_tx_stats(&feeder, &batch);
+
+        // Verify stored stats for both subjects
+        let score_a = credit.compute_score(&subject_a);
+        let score_b = credit.compute_score(&subject_b);
+        assert!(
+            score_a > 300,
+            "subject_a score should reflect updated tx stats"
+        );
+        assert!(
+            score_b > score_a,
+            "subject_b with higher tx stats should score higher"
+        );
+
+        // 3. Partial duplicate subjects in a batch: subsequent entry overwrites earlier entry
+        let mut duplicate_batch = soroban_sdk::Vec::new(&env);
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_c.clone(),
+            stats: TxStats {
+                volume_30d: 100_000_000,
+                tx_count_30d: 5,
+                avg_counterparties: 2,
+            },
+        });
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: TxStats {
+                volume_30d: 800_000_000,
+                tx_count_30d: 40,
+                avg_counterparties: 8,
+            },
+        });
+        duplicate_batch.push_back(SubjectTxStatsEntry {
+            subject: subject_c.clone(),
+            stats: TxStats {
+                volume_30d: 2_000_000_000,
+                tx_count_30d: 80,
+                avg_counterparties: 20,
+            },
+        });
+
+        credit.batch_update_tx_stats(&feeder, &duplicate_batch);
+
+        // Advance ledger past cooldown window for score recomputation
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 2;
+        });
+
+        let score_c = credit.compute_score(&subject_c);
+        let score_a_updated = credit.compute_score(&subject_a);
+        assert!(
+            score_a_updated > score_a,
+            "subject_a score should reflect updated higher tx volume"
+        );
+        assert!(
+            score_c > score_a_updated,
+            "subject_c score should reflect final overwritten stats in batch"
+        );
+
+        // 4. Exceeding max batch limit returns BatchTooLarge
+        let mut large_batch = soroban_sdk::Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            large_batch.push_back(SubjectTxStatsEntry {
+                subject: soroban_sdk::Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+        let too_large_res = credit.try_batch_update_tx_stats(&feeder, &large_batch);
+        assert_eq!(too_large_res, Err(Ok(CreditOracleError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_batch_verify_vc_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+
+        // Link identity-oracle to revocation-registry
+        identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
+
+        identity.register_issuer(&issuer);
+
+        let hash_valid1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash_valid2 = BytesN::from_array(&env, &[2u8; 32]);
+        let hash_revoked = BytesN::from_array(&env, &[3u8; 32]);
+        let hash_unknown = BytesN::from_array(&env, &[4u8; 32]);
+
+        // Anchor 3 credentials
+        identity.anchor_vc(&issuer, &subject, &hash_valid1);
+        identity.anchor_vc(&issuer, &subject, &hash_valid2);
+        identity.anchor_vc(&issuer, &subject, &hash_revoked);
+
+        // Revoke one via revocation registry
+        revocation.revoke(&issuer, &subject, &hash_revoked);
+
+        // 1. Batch verify with mixed credentials
+        let mut hashes = soroban_sdk::Vec::new(&env);
+        hashes.push_back(hash_valid1.clone());
+        hashes.push_back(hash_revoked.clone());
+        hashes.push_back(hash_unknown.clone());
+        hashes.push_back(hash_valid2.clone());
+
+        let results = identity.batch_verify_vc(&subject, &hashes);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+        assert_eq!(results.get(2).unwrap(), false);
+        assert_eq!(results.get(3).unwrap(), true);
+
+        // 2. Empty input returns empty output
+        let empty_hashes = soroban_sdk::Vec::new(&env);
+        let empty_results = identity.batch_verify_vc(&subject, &empty_hashes);
+        assert_eq!(empty_results.len(), 0);
     }
 }
