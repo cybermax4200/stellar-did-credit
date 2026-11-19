@@ -102,6 +102,9 @@
                 },
                 {
                   "u32": 10
+                },
+                {
+                  "string": "ipfs://QmDefaultMetadataCID123456789"
                 }
               ]
             }
@@ -290,7 +293,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -368,6 +371,14 @@
                       },
                       "val": {
                         "u64": 1
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "metadata_cid"
+                      },
+                      "val": {
+                        "string": "ipfs://QmDefaultMetadataCID123456789"
                       }
                     },
                     {
@@ -661,6 +672,9 @@
                 },
                 {
                   "u32": 100
+                },
+                {
+                  "string": "ipfs://QmDefaultMetadataCID123456789"
                 }
               ]
             }

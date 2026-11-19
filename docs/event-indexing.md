@@ -171,7 +171,7 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 #### ProposalCreated
 
 - **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
-- **Data:** `(proposer: Address, expiry_ledger: u32)`
+- **Data:** `(proposer: Address, expiry_ledger: u32, metadata_cid: String)`
 - **Emitted When:** A new governance proposal is created.
 
 #### ProposalExecuted

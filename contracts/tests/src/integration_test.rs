@@ -14,6 +14,10 @@ mod tests {
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
 
+    fn test_cid(env: &Env) -> String {
+        String::from_str(env, "ipfs://QmDefaultMetadataCID123456789")
+    }
+
     #[test]
     fn test_score_freshness_enforcement() {
         let env = Env::default();
@@ -968,7 +972,7 @@ mod tests {
 
         // Create a proposal
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Cast a passing vote (so execute would succeed if not cancelled)
         let voter = soroban_sdk::Address::generate(&env);
@@ -1048,7 +1052,7 @@ mod tests {
         };
 
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Admin (not the proposer) cancels the proposal
         gov.cancel_proposal(&admin, &proposal_id);
@@ -1083,7 +1087,7 @@ mod tests {
         };
 
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let third_party = soroban_sdk::Address::generate(&env);
         let res = gov.try_cancel_proposal(&third_party, &proposal_id);
@@ -1121,7 +1125,7 @@ mod tests {
         };
 
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // First cancel succeeds
         gov.cancel_proposal(&proposer, &proposal_id);
@@ -1160,7 +1164,7 @@ mod tests {
         };
 
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Register a voter and cast a vote before cancellation.
         let voter1 = soroban_sdk::Address::generate(&env);
@@ -1227,7 +1231,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov.register_voter(&admin, &voter, &200);
@@ -1306,7 +1310,7 @@ mod tests {
 
         let proposer = soroban_sdk::Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         // Cast passing votes
         let voter = soroban_sdk::Address::generate(&env);
@@ -1425,7 +1429,7 @@ mod tests {
         };
 
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32, &test_cid(&env));
 
         // Cast votes to pass the proposal
         let voter = soroban_sdk::Address::generate(&env);
@@ -3028,7 +3032,7 @@ mod tests {
         };
 
         let proposer = Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id, 1);
 
         // 6. Register voters and vote
@@ -3045,7 +3049,7 @@ mod tests {
             tx_weight: 25,
             repayment_weight: 30,
         };
-        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0);
+        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0, &test_cid(&env));
         gov.vote(&voter1, &next_proposal_id, &true, &1000);
 
         let proposal = gov.get_proposal(&proposal_id).unwrap();

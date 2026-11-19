@@ -5,7 +5,8 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, CreditOracleError, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
+    Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -54,7 +55,12 @@ pub enum GovernanceError {
     TimelockAlreadyPending = 20,
     /// A voter batch exceeds the maximum number of entries.
     VoterBatchTooLarge = 21,
+    /// Proposal metadata CID is empty or exceeds the maximum length (128 bytes).
+    InvalidMetadataCid = 22,
 }
+
+/// Maximum allowed length in bytes for a proposal metadata CID/URI.
+pub const MAX_METADATA_CID_LEN: u32 = 128;
 
 /// Maximum number of entries accepted by either voter batch operation.
 pub const MAX_VOTER_BATCH: u32 = 50;
@@ -143,6 +149,8 @@ pub struct GovernanceProposal {
     /// at proposal-creation time so later `set_quorum` calls never change
     /// the rules for a proposal already up for a vote.
     pub quorum_required: i128,
+    /// IPFS CID or URI explaining the rationale / discussion behind the proposal.
+    pub metadata_cid: String,
 }
 
 /// On-chain governance contract.
@@ -313,6 +321,7 @@ impl Governance {
         weights: ScoringWeights,
         voting_period_ledgers: u32,
         execution_delay_ledgers: u32,
+        metadata_cid: String,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
         if !weights.is_valid() {
@@ -320,6 +329,9 @@ impl Governance {
         }
         if voting_period_ledgers == 0 {
             return Err(GovernanceError::InvalidVotingPeriod);
+        }
+        if metadata_cid.len() == 0 || metadata_cid.len() > MAX_METADATA_CID_LEN {
+            return Err(GovernanceError::InvalidMetadataCid);
         }
 
         let id: u64 = env
@@ -347,6 +359,7 @@ impl Governance {
             executed: false,
             cancelled: false,
             quorum_required,
+            metadata_cid: metadata_cid.clone(),
         };
 
         env.storage()
@@ -360,7 +373,7 @@ impl Governance {
             .set(&DataKey::NextProposalId, &(id + 1));
 
         env.events()
-            .publish((symbol_short!("PropCreat"), id), (proposer, expiry_ledger));
+            .publish((symbol_short!("PropCreat"), id), (proposer, expiry_ledger, metadata_cid));
 
         Ok(id)
     }
@@ -1040,6 +1053,10 @@ mod tests {
         Env, TryIntoVal,
     };
 
+    fn test_cid(env: &Env) -> String {
+        String::from_str(env, "ipfs://QmDefaultMetadataCID123456789")
+    }
+
     #[test]
     fn test_voter_batches() {
         let env = Env::default();
@@ -1120,7 +1137,7 @@ mod tests {
         };
 
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id, 1);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
@@ -1276,7 +1293,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.quorum_required, 500);
@@ -1343,7 +1360,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
 
@@ -1376,7 +1393,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &1);
 
@@ -1414,7 +1431,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // The proposer cancels their own proposal.
         gov_client.cancel_proposal(&proposer, &proposal_id);
@@ -1473,7 +1490,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Vote before cancellation succeeds.
         let voter1 = Address::generate(&env);
@@ -1528,7 +1545,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Admin (not the proposer) cancels the proposal.
         gov_client.cancel_proposal(&admin, &proposal_id);
@@ -1576,7 +1593,7 @@ mod tests {
 
         let proposer = Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.execution_delay_ledgers, 50);
@@ -1648,7 +1665,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter_for = Address::generate(&env);
         let voter_against = Address::generate(&env);
@@ -1688,7 +1705,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &200);
@@ -1779,7 +1796,17 @@ mod tests {
         client.register_voter(&admin, &Address::generate(&env), &101);
         client.set_quorum_percent(&admin, &50);
         assert_eq!(client.get_quorum_percent(), Some(50));
-        let proposal_id = client.create_proposal(&Address::generate(&env), &ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 }, &10, &0);
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
         assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 50);
     }
 
@@ -1809,6 +1836,7 @@ mod tests {
             },
             &10,
             &0,
+            &test_cid(&env),
         );
         assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 20);
     }
@@ -1832,7 +1860,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &100);
@@ -1858,7 +1886,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -1887,7 +1915,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -1936,7 +1964,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -1982,8 +2010,8 @@ mod tests {
         let proposer = Address::generate(&env);
 
         // Create two proposals
-        let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
-        let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
+        let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id_1, 1);
         assert_eq!(proposal_id_2, 2);
 
@@ -2104,6 +2132,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_tx_zero, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2117,6 +2146,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_tx_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2130,6 +2160,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_vc_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2143,6 +2174,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_repayment_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2156,6 +2188,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(prop_id, 1);
     }
@@ -2184,6 +2217,7 @@ mod tests {
             },
             &0,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVotingPeriod)));
     }
@@ -2216,6 +2250,7 @@ mod tests {
             &proposed_weights,
             &voting_period,
             &execution_delay,
+            &test_cid(&env),
         );
 
         let voter_for = Address::generate(&env);
@@ -2277,6 +2312,7 @@ mod tests {
             &proposed_weights,
             &voting_period,
             &execution_delay,
+            &test_cid(&env),
         );
 
         let voter_for = Address::generate(&env);
@@ -2308,5 +2344,167 @@ mod tests {
             !proposal_after.executed,
             "tied proposal must not be marked as executed"
         );
+    }
+
+    #[test]
+    fn test_create_proposal_stores_and_returns_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let cid = String::from_str(&env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &cid);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.metadata_cid, cid);
+
+        let proposals = gov_client.list_proposals(&proposal_id, &1, &true);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals.get(0).unwrap().metadata_cid, cid);
+    }
+
+    #[test]
+    fn test_create_proposal_rejects_empty_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let empty_cid = String::from_str(&env, "");
+        let res = gov_client.try_create_proposal(&proposer, &proposed_weights, &100, &10, &empty_cid);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidMetadataCid)));
+    }
+
+    #[test]
+    fn test_create_proposal_rejects_oversized_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        // 129 characters (MAX_METADATA_CID_LEN is 128)
+        let oversized_str = "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        let oversized_cid = String::from_str(&env, oversized_str);
+        let res = gov_client.try_create_proposal(&proposer, &proposed_weights, &100, &10, &oversized_cid);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidMetadataCid)));
+    }
+
+    #[test]
+    fn test_create_proposal_accepts_boundary_length_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        // Boundary 1: minimum valid length (1 character)
+        let min_cid = String::from_str(&env, "x");
+        let id1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &min_cid);
+        assert_eq!(gov_client.get_proposal(&id1).unwrap().metadata_cid, min_cid);
+
+        // Boundary 2: maximum allowed length (128 characters)
+        let max_str = "12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678";
+        let max_cid = String::from_str(&env, max_str);
+        let id2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &max_cid);
+        assert_eq!(gov_client.get_proposal(&id2).unwrap().metadata_cid, max_cid);
+    }
+
+    #[test]
+    fn test_create_proposal_emits_metadata_cid_in_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let cid = String::from_str(&env, "ipfs://QmTestProposalEventCID");
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &cid);
+
+        let events = env.events().all();
+        let mut found_event = false;
+
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id == gov_id && topics.len() == 2 {
+                let symbol: soroban_sdk::Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(soroban_sdk::symbol_short!("invalid"));
+                if symbol == soroban_sdk::symbol_short!("PropCreat") {
+                    let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                    if id == proposal_id {
+                        found_event = true;
+                        let (event_proposer, expiry_ledger, event_cid): (Address, u32, String) =
+                            data.try_into_val(&env).unwrap();
+                        assert_eq!(event_proposer, proposer);
+                        assert_eq!(expiry_ledger, env.ledger().sequence() + 100);
+                        assert_eq!(event_cid, cid);
+                    }
+                }
+            }
+        }
+
+        assert!(found_event, "ProposalCreated event with metadata_cid must be emitted");
     }
 }

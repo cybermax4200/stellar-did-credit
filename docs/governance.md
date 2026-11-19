@@ -49,7 +49,7 @@ Weight changes from a passing proposal are gated by **two sequential waiting per
 Full end-to-end timeline from proposal creation to active weights:
 
 ```
-create_proposal(id=1, weights=W2, voting_period=VP, execution_delay=ED)
+create_proposal(id=1, weights=W2, voting_period=VP, execution_delay=ED, metadata_cid=CID)
   │
   ├─ current_sequence ─────────────────► proposal.expiry_ledger = seq + VP
   │                                                        │
@@ -199,17 +199,20 @@ pub fn create_proposal(
     weights: ScoringWeights,
     voting_period_ledgers: u32,
     execution_delay_ledgers: u32,
+    metadata_cid: String,
 ) -> Result<u64, GovernanceError>
 ```
 
 **Auth:** `proposer.require_auth()`. The proposer does not need to be a registered voter; any signer can create a proposal.
 
 **Errors:**
-- `InvalidWeights` if `vc_weight + tx_weight + repayment_weight != 100`.
+- `InvalidWeights` if `vc_weight + tx_weight + repayment_weight != 100` or a component is below `MIN_COMPONENT_WEIGHT` (10).
+- `InvalidVotingPeriod` if `voting_period_ledgers == 0`.
+- `InvalidMetadataCid` if `metadata_cid` is empty or exceeds `MAX_METADATA_CID_LEN` (128 characters).
 
 **Worked example — create a proposal shifting weights from tx to VC:**
 
-Default credit-oracle weights after initialization are `(vc=40, tx=30, repayment=30)`. Propose `(50, 20, 30)`, with a voting period of 14,400 ledgers (≈20 hours) and an execution delay of 1,000 ledgers (≈1.4 hours).
+Default credit-oracle weights after initialization are `(vc=40, tx=30, repayment=30)`. Propose `(50, 20, 30)`, with a voting period of 14,400 ledgers (≈20 hours), an execution delay of 1,000 ledgers (≈1.4 hours), and an IPFS CID explaining the proposal rationale.
 
 ```rust
 let new_weights = ScoringWeights {
@@ -217,12 +220,14 @@ let new_weights = ScoringWeights {
     tx_weight:        20,
     repayment_weight: 30,
 };
+let metadata_cid = String::from_str(&env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
 
 let proposal_id: u64 = gov_client.create_proposal(
     &proposer_addr,
     &new_weights,
-    &14_400,    // voting_period_ledgers — ~20h at 5s/ledger
-    &1_000,     // execution_delay_ledgers — extra reaction window after voting
+    &14_400,        // voting_period_ledgers — ~20h at 5s/ledger
+    &1_000,         // execution_delay_ledgers — extra reaction window after voting
+    &metadata_cid,  // metadata_cid — IPFS CID or URI explaining the rationale
 );
 // assert_eq!(proposal_id, 1);   // NextProposalId started at 1
 
@@ -233,11 +238,12 @@ assert_eq!(p.votes_for, 0);
 assert_eq!(p.votes_against, 0);
 assert_eq!(p.execution_delay_ledgers, 1_000);
 assert_eq!(p.quorum_required, 1_000);   // snapshotted from default at creation
+assert_eq!(p.metadata_cid, metadata_cid);
 assert!(!p.executed);
 // p.expiry_ledger == env.ledger().sequence() + 14_400
 ```
 
-Events: `PropCreat(u64 id)` with data `(proposer, expiry_ledger)`.
+Events: `PropCreat(u64 id)` with data `(proposer, expiry_ledger, metadata_cid)`.
 
 ### 3.3 `vote`
 
@@ -493,7 +499,7 @@ All events use Soroban's `(topics_tuple, data)` shape with the first topic eleme
 
 | Topic 1 (symbol) | Extra topic | Data tuple | Emitted by |
 |---|---|---|---|
-| `PropCreat` | `proposal_id: u64` | `(proposer: Address, expiry_ledger: u32)` | `create_proposal` |
+| `PropCreat` | `proposal_id: u64` | `(proposer: Address, expiry_ledger: u32, metadata_cid: String)` | `create_proposal` |
 | `Voted` | `proposal_id: u64` | `(voter: Address, vote_for: bool, vote_weight: i128)` | `vote` |
 | `PropExec` | `proposal_id: u64` | `(votes_for: i128, votes_against: i128)` | `execute` |
 | `WtApplied` | — | `(ledger_sequence_when_applied: u32)` | `apply_weights` |
