@@ -149,6 +149,12 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         })?;
         let _domain_separator =
             FpVar::new_input(cs.clone(), || Ok(self.public_inputs.domain_separator))?;
+        let current_timestamp = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.current_timestamp))
+        })?;
+        let max_validity_window = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.max_validity_window))
+        })?;
 
         // ---- Private witness ----
         let score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.score).unwrap_or(0)))?;
@@ -437,18 +443,20 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         // ---- Constraint 12: Timestamp freshness ----
         // 1. score_timestamp <= current_timestamp
         // 2. current_timestamp - score_timestamp <= max_validity_window
-        let score_ts_fp = uint64_to_fp(&score_timestamp);
-        let diff_curr = current_timestamp - score_ts_fp.clone();
-        let diff_curr_bits = diff_curr.to_bits_le()?;
-        for b in diff_curr_bits.iter().skip(64) {
-            b.enforce_equal(&Boolean::constant(false))?;
-        }
+        let score_ts_val = w.map(|w| w.score_timestamp).unwrap_or(0);
+        let curr_ts_val = self.public_inputs.current_timestamp;
+        let max_win_val = self.public_inputs.max_validity_window;
 
-        let diff_window = max_validity_window - diff_curr;
-        let diff_window_bits = diff_window.to_bits_le()?;
-        for b in diff_window_bits.iter().skip(64) {
-            b.enforce_equal(&Boolean::constant(false))?;
-        }
+        let diff_curr_val = curr_ts_val.saturating_sub(score_ts_val);
+        let diff_curr = UInt64::new_witness(cs.clone(), || Ok(diff_curr_val))?;
+        let diff_curr_fp = uint64_to_fp(&diff_curr);
+        let score_ts_fp = uint64_to_fp(&score_timestamp);
+        (diff_curr_fp.clone() + score_ts_fp).enforce_equal(&current_timestamp)?;
+
+        let diff_win_val = max_win_val.saturating_sub(diff_curr_val);
+        let diff_window = UInt64::new_witness(cs.clone(), || Ok(diff_win_val))?;
+        let diff_win_fp = uint64_to_fp(&diff_window);
+        (diff_win_fp + diff_curr_fp).enforce_equal(&max_validity_window)?;
 
         Ok(())
     }
@@ -459,8 +467,8 @@ mod tests {
     use super::*;
     use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
 
-    fn valid_circuit() -> ScoreCircuit {
-        let w = ScoreWitness {
+    fn make_test_witness() -> ScoreWitness {
+        ScoreWitness {
             score: 668,
             vc_count: 10,
             tx_volume_30d: 50_000_000_000,
@@ -512,17 +520,22 @@ mod tests {
         ];
         let commitment = scheme.commit(&fields, w.blinding);
 
-        ScoreCircuit::new(
-            Some(w),
-            ScorePublicInputs {
-                threshold: 600,
-                subject: Fr::from(1u32),
-                credit_oracle_id: Fr::from(2u32),
-                score_commitment: commitment,
-                snapshot_ledger: 12345,
-                domain_separator: Fr::from(3u32),
-            },
-        )
+        ScorePublicInputs {
+            threshold: 600,
+            subject: Fr::from(1u32),
+            credit_oracle_id: Fr::from(2u32),
+            score_commitment: commitment,
+            snapshot_ledger: 12345,
+            domain_separator: Fr::from(3u32),
+            current_timestamp: current_ts,
+            max_validity_window: max_window,
+        }
+    }
+
+    fn valid_circuit() -> ScoreCircuit {
+        let w = make_test_witness();
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_100, 3600);
+        ScoreCircuit::new(Some(w), public_inputs)
     }
 
     #[test]
@@ -534,6 +547,79 @@ mod tests {
         let circuit = valid_circuit();
         circuit.generate_constraints(cs.clone()).unwrap();
         assert!(cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_timestamp_freshness_exact_window_boundary() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        let public_inputs = make_test_public_inputs(&w, 1_700_003_600, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "score exactly at max_validity_window must be satisfied"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_zero_age() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_000, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "score with zero age must be satisfied"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_fails_one_second_over_window() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        let public_inputs = make_test_public_inputs(&w, 1_700_003_601, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "score older than max_validity_window must fail constraint check"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_fails_future_score() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let mut w = make_test_witness();
+        w.score_timestamp = 1_700_000_005;
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_000, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "score timestamp in the future must fail constraint check"
+        );
     }
 
     /// Run explicitly in CI to report proving time and enforce the R1CS budget.
@@ -553,13 +639,17 @@ mod tests {
         assert!(cs.is_satisfied().unwrap(), "benchmark witness is invalid");
         let count = cs.num_constraints();
         println!("Score circuit constraints: {count} (budget: < {MAX_CONSTRAINTS})");
-        assert!(count < MAX_CONSTRAINTS, "score circuit constraint budget exceeded: {count} >= {MAX_CONSTRAINTS}");
+        assert!(
+            count < MAX_CONSTRAINTS,
+            "score circuit constraint budget exceeded: {count} >= {MAX_CONSTRAINTS}"
+        );
 
         // Setup is excluded from the measured proving time; this deterministic
         // key is for benchmarking only and must never be used in production.
         let mut rng = StdRng::from_seed([0u8; 32]);
         let setup_start = Instant::now();
-        let (pk, _) = Groth16::<Bls12_381>::circuit_specific_setup(valid_circuit(), &mut rng).unwrap();
+        let (pk, _) =
+            Groth16::<Bls12_381>::circuit_specific_setup(valid_circuit(), &mut rng).unwrap();
         println!("Score circuit setup: {:?}", setup_start.elapsed());
         let circuit = valid_circuit();
         let start = Instant::now();
