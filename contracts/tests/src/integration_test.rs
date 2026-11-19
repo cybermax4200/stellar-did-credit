@@ -19,9 +19,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -90,7 +90,7 @@ mod tests {
         // Issue #665: governance contract must also emit an Initialized event
         // with the admin and credit-oracle target addresses so off-chain
         // indexers can detect deployments before the first admin action.
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov = GovernanceClient::new(&env, &gov_id);
         gov.initialize(&admin, &credit_id, &100i128);
 
@@ -131,7 +131,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -163,9 +163,9 @@ mod tests {
         env.mock_all_auths();
 
         // 2. Register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let _revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let _revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -237,8 +237,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -287,9 +287,9 @@ mod tests {
         env.mock_all_auths();
 
         // Setup: register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -362,8 +362,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -383,8 +383,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
@@ -407,8 +407,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
@@ -459,8 +459,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
@@ -501,8 +501,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
@@ -538,9 +538,9 @@ mod tests {
         env.mock_all_auths();
 
         // Setup: register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let _identity = IdentityOracleClient::new(&env, &identity_id);
         let _credit = CreditOracleClient::new(&env, &credit_id);
@@ -577,9 +577,9 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -705,8 +705,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -770,7 +770,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -818,7 +818,7 @@ mod tests {
     fn test_batch_revoke_requires_auth_before_size_check() {
         let env = Env::default();
         // Deliberately do NOT mock authorizations: nothing is signed.
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
         let issuer = soroban_sdk::Address::generate(&env);
@@ -855,7 +855,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -946,8 +946,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1031,8 +1031,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1066,8 +1066,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1104,8 +1104,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1143,8 +1143,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1208,8 +1208,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1284,8 +1284,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1379,10 +1379,10 @@ mod tests {
         env.mock_all_auths();
 
         // Deploy all four contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -1466,7 +1466,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1509,7 +1509,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1536,7 +1536,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1580,7 +1580,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1626,7 +1626,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1677,7 +1677,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1762,8 +1762,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -1882,7 +1882,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -1986,7 +1986,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, CreditOracleV1Mock);
+        let contract_id = env.register(CreditOracleV1Mock, ());
         let client_v1 = CreditOracleV1MockClient::new(&env, &contract_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2011,7 +2011,7 @@ mod tests {
         assert_eq!(rec1_v1.on_time_count, 1);
         assert_eq!(rec1_v1.total_count, 2);
 
-        env.register_contract(Some(&contract_id), CreditOracle);
+        env.register_at(&contract_id, CreditOracle, ());
         let client_v2 = CreditOracleClient::new(&env, &contract_id);
 
         let score1_before = client_v2.compute_score(&subject1);
@@ -2118,7 +2118,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2242,7 +2242,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2268,8 +2268,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -2321,7 +2321,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2348,7 +2348,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2391,7 +2391,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2442,8 +2442,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
@@ -2501,7 +2501,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2896,7 +2896,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2919,7 +2919,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2943,13 +2943,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let id_oracle_id = env.register_contract(None, IdentityOracle);
+        let id_oracle_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &id_oracle_id);
 
-        let rev_reg_id = env.register_contract(None, RevocationRegistry);
+        let rev_reg_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &rev_reg_id);
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = soroban_sdk::Address::generate(&env);
@@ -2999,10 +2999,10 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Deploy all four contracts
-        let credit_id = env.register_contract(None, CreditOracle);
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let identity = IdentityOracleClient::new(&env, &identity_id);
@@ -3070,8 +3070,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -3150,8 +3150,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let admin = Address::generate(&env);
@@ -3198,10 +3198,10 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Deploy all four contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -3354,9 +3354,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
 
@@ -3479,8 +3479,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);

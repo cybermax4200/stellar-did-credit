@@ -4,8 +4,7 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
-[dev-dependencies]
-soroban-sdk = { workspace = true, features = ["testutils"] }
+[dev-dependencies] 
 identity-oracle = { path = "../identity-oracle" }
 credit-oracle = { path = "../credit-oracle" }
 revocation-registry = { path = "../revocation-registry" }

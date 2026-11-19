@@ -18,9 +18,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -44,35 +44,35 @@ mod tests {
 
         let mut profiles: std::vec::Vec<GasProfileResult> = std::vec::Vec::new();
 
-        env.budget().reset_default();
+        env.cost_estimate().budget().reset_default();
         let _identity_admin = identity.get_admin();
         profiles.push(GasProfileResult {
             operation: "get_admin",
             input_size: 1,
-            cpu_instructions: env.budget().cpu_instruction_cost(),
-            memory_bytes: env.budget().memory_bytes_cost(),
+            cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+            memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
         });
 
         for count in 1..=3 {
             let vc_hash = BytesN::from_array(&env, &[count as u8; 32]);
-            env.budget().reset_default();
+            env.cost_estimate().budget().reset_default();
             identity.anchor_vc(&issuer, &subject, &vc_hash);
             profiles.push(GasProfileResult {
                 operation: "anchor_vc",
                 input_size: count,
-                cpu_instructions: env.budget().cpu_instruction_cost(),
-                memory_bytes: env.budget().memory_bytes_cost(),
+                cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+                memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
             });
         }
 
         for count in 1..=3 {
-            env.budget().reset_default();
+            env.cost_estimate().budget().reset_default();
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
             profiles.push(GasProfileResult {
                 operation: "record_repayment",
                 input_size: count,
-                cpu_instructions: env.budget().cpu_instruction_cost(),
-                memory_bytes: env.budget().memory_bytes_cost(),
+                cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+                memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
             });
         }
 
@@ -86,22 +86,22 @@ mod tests {
             },
         );
 
-        env.budget().reset_default();
+        env.cost_estimate().budget().reset_default();
         credit.compute_score(&subject);
         profiles.push(GasProfileResult {
             operation: "compute_score",
             input_size: 3,
-            cpu_instructions: env.budget().cpu_instruction_cost(),
-            memory_bytes: env.budget().memory_bytes_cost(),
+            cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+            memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
         });
 
-        env.budget().reset_default();
+        env.cost_estimate().budget().reset_default();
         let _score = credit.get_score(&subject);
         profiles.push(GasProfileResult {
             operation: "get_score",
             input_size: 1,
-            cpu_instructions: env.budget().cpu_instruction_cost(),
-            memory_bytes: env.budget().memory_bytes_cost(),
+            cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+            memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
         });
 
         for size in [1, 5, 10, 25, 50] {
@@ -110,13 +110,13 @@ mod tests {
                 let h = BytesN::from_array(&env, &[((i % 250) + 1) as u8; 32]);
                 hashes.push_back(h);
             }
-            env.budget().reset_default();
+            env.cost_estimate().budget().reset_default();
             revocation.batch_revoke(&issuer, &hashes);
             profiles.push(GasProfileResult {
                 operation: "batch_revoke",
                 input_size: size,
-                cpu_instructions: env.budget().cpu_instruction_cost(),
-                memory_bytes: env.budget().memory_bytes_cost(),
+                cpu_instructions: env.cost_estimate().budget().cpu_instruction_cost(),
+                memory_bytes: env.cost_estimate().budget().memory_bytes_cost(),
             });
         }
 
@@ -154,7 +154,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = Address::generate(&env);
@@ -165,9 +165,9 @@ mod tests {
             credit.register_feeder(&admin, &feeder);
         }
 
-        env.budget().reset_default();
+        env.cost_estimate().budget().reset_default();
         let feeders = credit.list_feeders();
-        let cpu = env.budget().cpu_instruction_cost();
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
 
         assert_eq!(feeders.len(), 50);
 
@@ -185,7 +185,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let admin = Address::generate(&env);
         identity.initialize(&admin);
@@ -201,9 +201,9 @@ mod tests {
             identity.deregister_issuer(issuer);
         }
 
-        env.budget().reset_default();
+        env.cost_estimate().budget().reset_default();
         let active = identity.list_issuers();
-        let cpu = env.budget().cpu_instruction_cost();
+        let cpu = env.cost_estimate().budget().cpu_instruction_cost();
 
         assert_eq!(active.len(), 1);
         const MAINNET_CPU_LIMIT: u64 = 600_000_000;
