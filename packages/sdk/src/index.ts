@@ -93,6 +93,7 @@ export interface GovernanceProposal {
   executed: boolean;
   cancelled: boolean;
   quorumRequired: bigint;
+  metadataCid: string;
 }
 
 /** An issuer and its configured trust multiplier, returned by listIssuerTiers. */
@@ -732,6 +733,7 @@ export class GovernanceClient {
     weights: ScoringWeights,
     votingPeriodLedgers: number,
     executionDelayLedgers: number,
+    metadataCid: string,
   ): Promise<bigint> {
     const proposer = getPublicKey(proposerKeypair);
     const contract = this.governanceContract();
@@ -743,6 +745,7 @@ export class GovernanceClient {
         scoringWeightsToScVal(weights),
         nativeToScVal(votingPeriodLedgers, { type: "u32" }),
         nativeToScVal(executionDelayLedgers, { type: "u32" }),
+        nativeToScVal(metadataCid, { type: "string" }),
       ),
       "createProposal",
     );
@@ -4122,6 +4125,7 @@ function parseGovernanceProposal(native: unknown): GovernanceProposal {
     executed: Boolean(raw["executed"]),
     cancelled: Boolean(raw["cancelled"]),
     quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
+    metadataCid: String(raw["metadata_cid"] ?? ""),
   };
 }
 
@@ -4201,6 +4205,7 @@ function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
       quorumRequired: BigInt(
         raw["quorum_required"] as bigint | number | string,
       ),
+      metadataCid: String(raw["metadata_cid"] ?? ""),
     };
   });
 }

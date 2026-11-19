@@ -51,6 +51,7 @@ The following benchmarks were recorded across the core protocol operations (`com
 | `get_score` | `credit-oracle` | 1 Subject | **45,120** | **6,800** | 1 | 0 | $O(1)$ Read-only |
 | `get_admin` | `identity-oracle` | 1 Contract | Measured by gas harness | Measured by gas harness | 1 | 0 | $O(1)$ Read-only |
 | `record_repayment` | `credit-oracle` | 1 Record | **142,300** | **18,950** | 2 | 1 | $O(1)$ Write |
+| `revoke_with_reason` | `revocation-registry` | 1 VC Hash | Not yet measured | Not yet measured | 3 | 3–7 | $O(1)$ Write |
 | `anchor_vc` | `identity-oracle` | 1 VC Hash | **185,420** | **24,110** | 3 | 2 | $O(1)$ Write + Index |
 | `compute_score` | `credit-oracle` | 3 Active VCs | **320,850** | **41,200** | 4 | 1 | $O(V)$ Score Aggregation |
 | `batch_revoke` | `revocation-registry` | 1 VC Hash | **198,500** | **26,400** | 2 | 2 | $O(N)$ Linear |

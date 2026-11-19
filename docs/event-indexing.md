@@ -104,6 +104,21 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Data:** `(subject: Address, score: u32)`
 - **Emitted When:** A subject's credit score is recomputed and updated.
 
+#### RepaymentRecorded
+
+- **Topic:** `[Symbol("RepaymentRecorded"), subject: Address, lender: Address]`
+- **Data:** `(amount: i128, on_time: bool)`
+- **Emitted When:** A trusted lender records a single repayment for a subject via `record_repayment`.
+- **feeder Action:** Update the off-chain repayment history for `subject` using `amount` and `on_time`, then recompute or refresh the repayment-rate input before the next score computation.
+- **Note:** `batch_record_repayments` emits one legacy `Repay` event per entry with topic `[Symbol("Repay")]` and data `(lender: Address, subject: Address, amount: i128, on_time: bool)`.
+
+#### TxStatsUpdated
+
+- **Topic:** `[Symbol("TxStatsUpdated"), subject: Address, feeder: Address]`
+- **Data:** `(volume_30d: i128, tx_count_30d: u32, avg_counterparties: u32)`
+- **Emitted When:** A trusted feeder pushes 30-day transaction statistics for a subject via `update_tx_stats`.
+- **feeder Action:** None required (the event is the write acknowledgement). Indexers and dashboards can cache the new `volume_30d`, `tx_count_30d`, and `avg_counterparties` values directly from the payload.
+
 #### FdrReg / FdrDeReg
 
 - **Topic:** `[Symbol("FdrReg")]` / `[Symbol("FdrDeReg")]`
@@ -140,6 +155,7 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Data:** `(subject: Address, input_key: Symbol)`
 - **Emitted When:** A subject flags one of their score inputs as possibly incorrect via `flag_score_input`. `input_key` is one of `tx_stats`, `repayment`, or `vc_count`, and the stored `DisputeRecord` starts as `Pending`.
 - **feeder Action:** Review the flagged input. Only one pending dispute per `(subject, input_key)` is allowed, so a second `flag_score_input` for the same key fails with `DisputeAlreadyPending`.
+- **Bond:** If a dispute bond is configured (`set_dispute_bond`), the bond amount is escrowed from the subject when the event is emitted. It is refunded on `DsptRslv` (accepted) and forfeited to the contract on `DsptRjct` (rejected).
 
 #### DsptRslv
 
@@ -171,7 +187,7 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 #### ProposalCreated
 
 - **Topic:** `[Symbol("PropCreat"), proposal_id: u64]`
-- **Data:** `(proposer: Address, expiry_ledger: u32)`
+- **Data:** `(proposer: Address, expiry_ledger: u32, metadata_cid: String)`
 - **Emitted When:** A new governance proposal is created.
 
 #### ProposalExecuted
@@ -184,6 +200,13 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 * **Topic:** `[Symbol("PropCanc"), proposal_id: u64]`
 * **Data:** `canceller: Address`
 * **Emitted When:** A governance proposal is cancelled.
+
+#### ProposalVetoed
+
+- **Topic:** `[Symbol("ProposalVetoed"), proposal_id: u64]`
+- **Data:** `(guardian: Address, reason: String)`
+- **Emitted When:** The designated emergency guardian calls `emergency_veto` to cancel a proposal before execution. The proposal becomes unexecutable immediately, even if it passed voting and is inside the execution-delay timelock.
+- **Indexer Action:** Treat the proposal as permanently cancelled. The reason is also readable via `get_veto_reason(proposal_id)`.
 
 #### WeightsApplied
 

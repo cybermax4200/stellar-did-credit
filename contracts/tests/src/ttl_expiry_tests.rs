@@ -3,7 +3,7 @@
 //! # Finding: Soroban testutils **does** enforce TTL expiry
 //!
 //! Issue #527 asked whether `soroban-sdk`'s test environment simulates storage
-//! archival, and to mark the tests `#[ignore]` if it does not. It does — so
+//! archival, and to mark the tests `#[ignore]` if it does not. It does â€” so
 //! none of these tests are ignored. What it does *not* do is expire entries
 //! gracefully. Reading an archived entry **panics**:
 //!
@@ -113,7 +113,7 @@ mod tests {
 
         assert_eq!(env.ledger().sequence(), 0, "tests start at ledger 0");
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
         let admin = Address::generate(&env);
@@ -166,7 +166,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn anchor_one_vc(env: &Env) -> (Address, IdentityOracleClient<'_>, Address) {
-        let id = env.register_contract(None, IdentityOracle);
+        let id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(env, &id);
 
         let admin = Address::generate(env);
@@ -200,7 +200,7 @@ mod tests {
     }
 
     /// One ledger past PERS_TTL_EXTEND the anchor is archived. Note the failure
-    /// mode: `is_verified` does not return `false`, it panics — a consumer
+    /// mode: `is_verified` does not return `false`, it panics â€” a consumer
     /// cannot distinguish "no credential" from "credential archived" by calling
     /// it, because the call never returns.
     #[test]
@@ -217,11 +217,11 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // 2. TxStats (credit-oracle) — extended by update_tx_stats
+    // 2. TxStats (credit-oracle) â€” extended by update_tx_stats
     // -----------------------------------------------------------------
 
     fn credit_with_stats(env: &Env) -> (Address, CreditOracleClient<'_>, Address, Address) {
-        let id = env.register_contract(None, CreditOracle);
+        let id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(env, &id);
 
         let admin = Address::generate(env);
@@ -267,7 +267,7 @@ mod tests {
 
     /// One ledger past PERS_TTL_EXTEND the TxStats entry is archived. As with
     /// every other key, the read panics rather than falling back to the
-    /// `unwrap_or` default — the extension buys 30 days, not immunity.
+    /// `unwrap_or` default â€” the extension buys 30 days, not immunity.
     #[test]
     #[should_panic(expected = "Error(Storage, InternalError)")]
     fn test_tx_stats_expires_past_extended_ttl() {
@@ -286,7 +286,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn credit_with_score(env: &Env) -> (Address, CreditOracleClient<'_>, Address) {
-        let id = env.register_contract(None, CreditOracle);
+        let id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(env, &id);
 
         let admin = Address::generate(env);
@@ -319,7 +319,7 @@ mod tests {
     }
 
     /// Issue #527 predicted `get_score` would return `None` after expiry. It
-    /// panics instead, so `Option::None` cannot be used to detect archival —
+    /// panics instead, so `Option::None` cannot be used to detect archival â€”
     /// `None` only ever means "never computed".
     #[test]
     #[should_panic(expected = "Error(Storage, InternalError)")]
@@ -344,7 +344,7 @@ mod tests {
     /// TrustedFeeder's 518_400, so it archives first and every feeder assertion
     /// would really be measuring TxStats.
     fn credit_with_feeder(env: &Env) -> (Address, CreditOracleClient<'_>, Address, Address) {
-        let id = env.register_contract(None, CreditOracle);
+        let id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(env, &id);
 
         let admin = Address::generate(env);
@@ -380,7 +380,7 @@ mod tests {
     }
 
     /// Past the window the feeder is not "no longer authorized" in the sense
-    /// issue #527 anticipated — the call does not return `FeederNotRegistered`,
+    /// issue #527 anticipated â€” the call does not return `FeederNotRegistered`,
     /// it panics on the archived `TrustedFeeder` lookup. Expiry is therefore a
     /// liveness failure, not a permission change, and cannot be handled by a
     /// caller inspecting the error variant.
@@ -409,7 +409,7 @@ mod tests {
     /// feeder cannot repair an expired entry by pushing fresh data over it.
     /// The feeder flag is pinned open so the TxStats entry under test archives
     /// alone; `update_tx_stats` then panics even though it only ever writes
-    /// TxStats — the host rejects the access before the contract body runs.
+    /// TxStats â€” the host rejects the access before the contract body runs.
     /// Recovery requires restoring the entry, which no contract function
     /// exposes.
     #[test]
@@ -447,8 +447,8 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// credit-oracle bumps its instance TTL in `initialize` to
-    /// `INSTANCE_BUMP_AMOUNT` (500_000), so its instance entry — holding
-    /// `Admin`, `Config`, and every other singleton — survives an idle period
+    /// `INSTANCE_BUMP_AMOUNT` (500_000), so its instance entry â€” holding
+    /// `Admin`, `Config`, and every other singleton â€” survives an idle period
     /// past the default 4096-ledger window that used to archive the whole
     /// contract.
     #[test]
@@ -456,7 +456,7 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let id = env.register_contract(None, CreditOracle);
+        let id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &id);
 
         let admin = Address::generate(&env);
@@ -500,13 +500,14 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let governance_id = env.register_contract(None, Governance);
+        let governance_id = env.register(Governance, ());
         let governance = GovernanceClient::new(&env, &governance_id);
         let admin = Address::generate(&env);
         let proposer = Address::generate(&env);
         let credit_oracle = Address::generate(&env);
 
         governance.initialize(&admin, &credit_oracle, &100);
+        let metadata_cid = soroban_sdk::String::from_str(&env, "ipfs://QmDefaultMetadataCID");
         let proposal_id = governance.create_proposal(
             &proposer,
             &ScoringWeights {
@@ -516,6 +517,7 @@ mod tests {
             },
             &100,
             &0,
+            &metadata_cid,
         );
         assert_eq!(proposal_id, 1);
 

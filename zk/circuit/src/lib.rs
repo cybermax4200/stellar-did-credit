@@ -69,7 +69,6 @@ pub fn verify_proof(
     vk: &VerifyingKey<Bls12_381>,
 ) -> Result<bool, SynthesisError> {
     // Build the public input vector in the same order the circuit declares them:
-    //   [threshold, commitment]
     let public_inputs_vec = vec![
         Fr::from(public_inputs.threshold),
         public_inputs.subject,
@@ -77,6 +76,8 @@ pub fn verify_proof(
         public_inputs.score_commitment,
         Fr::from(public_inputs.snapshot_ledger),
         public_inputs.domain_separator,
+        Fr::from(public_inputs.current_timestamp),
+        Fr::from(public_inputs.max_validity_window),
     ];
 
     Groth16::<Bls12_381>::verify(vk, &public_inputs_vec, proof)
@@ -98,6 +99,8 @@ pub fn generate_test_keys<R: RngCore + CryptoRng>(
             score_commitment: Fr::from(0u32),
             snapshot_ledger: 0,
             domain_separator: Fr::from(0u32),
+            current_timestamp: 0,
+            max_validity_window: 0,
         },
     );
     Groth16::<Bls12_381>::circuit_specific_setup(circuit, rng)
@@ -120,6 +123,7 @@ mod tests {
             last_updated: 1_700_000_000,
             computed_at_ledger: 1234567,
             stale: false,
+            score_timestamp: 1_700_000_000,
             vc_points: 50,
             on_time_count: 50,
             total_count: 100,
@@ -164,6 +168,8 @@ mod tests {
             score_commitment: commitment,
             snapshot_ledger: 12345,           // dummy for test
             domain_separator: Fr::from(3u32), // dummy for test
+            current_timestamp: 1_700_000_100,
+            max_validity_window: 3600,
         }
     }
 
@@ -185,6 +191,28 @@ mod tests {
     }
 
     #[test]
+    fn verify_wasm_proof_fixture() {
+        use ark_serialize::CanonicalSerialize;
+        use sha2::{Digest, Sha256};
+
+        let mut rng = big_rng();
+        let (pk, vk) = generate_test_keys(&mut rng).unwrap();
+        let witness = make_witness();
+        let mut inputs = make_public_inputs(&witness, 600);
+        inputs.subject = Fr::from(0u32);
+        inputs.credit_oracle_id = Fr::from(0u32);
+        inputs.domain_separator = Fr::from(0u32);
+        let proof = generate_proof(witness, inputs.clone(), &pk, &mut rng).unwrap();
+        assert!(verify_proof(&proof, &inputs, &vk).unwrap());
+        let mut bytes = Vec::new();
+        proof.a.serialize_uncompressed(&mut bytes).unwrap();
+        proof.b.serialize_uncompressed(&mut bytes).unwrap();
+        proof.c.serialize_uncompressed(&mut bytes).unwrap();
+        let expected = [0xfd, 0xa9, 0x79, 0xc3, 0x14, 0x31, 0x91, 0xb9, 0xa1, 0x41, 0xf8, 0xe6, 0x9b, 0xe6, 0x14, 0x08, 0x56, 0x56, 0xbb, 0x3b, 0x53, 0x93, 0x88, 0x87, 0x5e, 0x26, 0x01, 0x3e, 0xdf, 0x59, 0x9f, 0x88];
+        assert_eq!(&Sha256::digest(&bytes)[..], &expected);
+    }
+
+    #[test]
     fn verify_rejects_wrong_threshold() {
         let mut rng = big_rng();
         let (pk, vk) = generate_test_keys(&mut rng).unwrap();
@@ -202,8 +230,50 @@ mod tests {
             score_commitment: public_inputs.score_commitment,
             snapshot_ledger: public_inputs.snapshot_ledger,
             domain_separator: public_inputs.domain_separator,
+            current_timestamp: public_inputs.current_timestamp,
+            max_validity_window: public_inputs.max_validity_window,
         };
         let valid = verify_proof(&proof, &wrong_inputs, &vk).unwrap();
         assert!(!valid, "proof should NOT verify with wrong threshold");
+    }
+
+    #[test]
+    fn verify_rejects_tampered_current_timestamp() {
+        let mut rng = big_rng();
+        let (pk, vk) = generate_test_keys(&mut rng).unwrap();
+
+        let w = make_witness();
+        let public_inputs = make_public_inputs(&w, 600);
+
+        let proof = generate_proof(w, public_inputs.clone(), &pk, &mut rng).unwrap();
+
+        // Verify with altered current_timestamp -> should fail.
+        let mut tampered_inputs = public_inputs.clone();
+        tampered_inputs.current_timestamp += 10;
+        let valid = verify_proof(&proof, &tampered_inputs, &vk).unwrap();
+        assert!(
+            !valid,
+            "proof should NOT verify with tampered current_timestamp"
+        );
+    }
+
+    #[test]
+    fn verify_rejects_tampered_max_validity_window() {
+        let mut rng = big_rng();
+        let (pk, vk) = generate_test_keys(&mut rng).unwrap();
+
+        let w = make_witness();
+        let public_inputs = make_public_inputs(&w, 600);
+
+        let proof = generate_proof(w, public_inputs.clone(), &pk, &mut rng).unwrap();
+
+        // Verify with altered max_validity_window -> should fail.
+        let mut tampered_inputs = public_inputs.clone();
+        tampered_inputs.max_validity_window = 7200;
+        let valid = verify_proof(&proof, &tampered_inputs, &vk).unwrap();
+        assert!(
+            !valid,
+            "proof should NOT verify with tampered max_validity_window"
+        );
     }
 }

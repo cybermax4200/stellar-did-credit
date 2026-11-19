@@ -83,10 +83,26 @@
                     },
                     {
                       "key": {
+                        "symbol": "current_timestamp"
+                      },
+                      "val": {
+                        "u64": 1700000100
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "domain_separator"
                       },
                       "val": {
                         "bytes": "2222222222222222222222222222222222222222222222222222222222222222"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_validity_window"
+                      },
+                      "val": {
+                        "u64": 3600
                       }
                     },
                     {
@@ -160,10 +176,26 @@
                     },
                     {
                       "key": {
+                        "symbol": "current_timestamp"
+                      },
+                      "val": {
+                        "u64": 1700000100
+                      }
+                    },
+                    {
+                      "key": {
                         "symbol": "domain_separator"
                       },
                       "val": {
                         "bytes": "2222222222222222222222222222222222222222222222222222222222222222"
+                      }
+                    },
+                    {
+                      "key": {
+                        "symbol": "max_validity_window"
+                      },
+                      "val": {
+                        "u64": 3600
                       }
                     },
                     {

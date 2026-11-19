@@ -33,6 +33,7 @@ fuzz_target!(|data: &[u8]| {
         vc_weight,
         tx_weight,
         repayment_weight,
+        credit_oracle::MIN_SCORE,
     );
 
     assert!(

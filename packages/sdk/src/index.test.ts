@@ -278,6 +278,7 @@ describe("StellarDIDCreditSDK", () => {
         governanceWeights,
         100,
         50,
+        "ipfs://QmTestProposalMetadata",
       );
 
       expect(proposalId).toBe(7n);
@@ -287,7 +288,7 @@ describe("StellarDIDCreditSDK", () => {
         contractId: mockConfig.governanceId,
         method: "create_proposal",
       });
-      expect(mockContractCalls[0]?.args).toHaveLength(4);
+      expect(mockContractCalls[0]?.args).toHaveLength(5);
       expect(mockContractCalls[0]?.args[2]).toMatchObject({
         value: 100,
         type: "u32",
@@ -295,6 +296,10 @@ describe("StellarDIDCreditSDK", () => {
       expect(mockContractCalls[0]?.args[3]).toMatchObject({
         value: 50,
         type: "u32",
+      });
+      expect(mockContractCalls[0]?.args[4]).toMatchObject({
+        value: "ipfs://QmTestProposalMetadata",
+        type: "string",
       });
     });
 
@@ -340,6 +345,7 @@ describe("StellarDIDCreditSDK", () => {
               executed: false,
               cancelled: false,
               quorum_required: 100n,
+              metadata_cid: "ipfs://QmTestCID",
             },
           },
         },
@@ -359,6 +365,7 @@ describe("StellarDIDCreditSDK", () => {
         executed: false,
         cancelled: false,
         quorumRequired: 100n,
+        metadataCid: "ipfs://QmTestCID",
       });
       expect(mockLastContractCall?.method).toBe("get_proposal");
 
@@ -389,6 +396,7 @@ describe("StellarDIDCreditSDK", () => {
               executed: false,
               cancelled: true,
               quorum_required: 100n,
+              metadata_cid: "ipfs://QmSecondCID",
             },
           },
         },
@@ -408,6 +416,7 @@ describe("StellarDIDCreditSDK", () => {
         executed: false,
         cancelled: true,
         quorumRequired: 100n,
+        metadataCid: "ipfs://QmSecondCID",
       });
       expect(proposal?.cancelled).toBe(true);
       expect(proposal?.proposer).toBe(proposerAddress);
@@ -3708,6 +3717,7 @@ describe("test_all_exports_are_defined", () => {
       executed: false,
       cancelled: false,
       quorumRequired: 100n,
+      metadataCid: "ipfs://QmCID",
     };
     expect(_txStats).toBeDefined();
     expect(_weights).toBeDefined();
@@ -3753,6 +3763,7 @@ describe("listProposals", () => {
         executed: false,
         cancelled: false,
         quorum_required: 100n,
+        metadata_cid: "ipfs://QmMockProposalCID",
       },
     ];
 
@@ -3778,6 +3789,7 @@ describe("listProposals", () => {
       executed: false,
       cancelled: false,
       quorumRequired: 100n,
+      metadataCid: "ipfs://QmMockProposalCID",
     });
   });
 });
