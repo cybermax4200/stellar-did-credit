@@ -9,17 +9,21 @@
 //!    private inputs, including `avg_counterparties` — see ADR-001).
 //! 3. Asserts `score > threshold` as a range proof within the circuit.
 //! 4. Exposes `generate_proof` and `verify_proof`.
+//! 5. Provides a depth-20 Poseidon Merkle membership gadget (Research Q1).
 //!
 //! The circuit uses **BLS12-381** (CAP-0059 available on Stellar) for the
 //! pairing check.
 
 pub mod commitment;
+pub mod merkle;
 pub mod range;
 pub mod score;
 pub mod score_circuit;
 
 pub use score_circuit::{ScoreCircuit, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
 pub use score::{compute_score_pure, MAX_SCORE, MIN_SCORE};
+
+pub use merkle::{MerkleMembershipCircuit, MerklePublicInputs, MerkleWitness, MERKLE_DEPTH};
 
 use ark_bls12_381::{Bls12_381, Fr};
 use ark_groth16::{Groth16, Proof, ProvingKey, VerifyingKey};
