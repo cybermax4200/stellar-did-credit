@@ -363,6 +363,18 @@ pub struct RepaymentRecord {
     pub total_repaid: i128,
 }
 
+/// A repayment to record for a subject in a batch operation.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RepaymentEntry {
+    /// Subject whose repayment history is updated.
+    pub subject: Address,
+    /// Positive repayment amount.
+    pub amount: i128,
+    /// Whether the repayment was made on time.
+    pub on_time: bool,
+}
+
 /// Legacy repayment counters stored by V1 of the contract.
 ///
 /// Preserved as a distinct type so the `migrate` function can deserialise
@@ -542,20 +554,59 @@ fn increment_subjects_scored(env: &Env) {
     save_protocol_stats(env, &stats);
 }
 
-fn increment_repayments_recorded(env: &Env) {
+fn increment_repayments_recorded(env: &Env, count: u64) {
     let mut stats = load_protocol_stats(env);
     stats.total_repayments_recorded = stats
         .total_repayments_recorded
-        .checked_add(1)
+        .checked_add(count)
         .expect("total_repayments_recorded overflow");
     save_protocol_stats(env, &stats);
 
     let mut metrics = load_protocol_metrics(env);
     metrics.total_repayments_count = metrics
         .total_repayments_count
-        .checked_add(1)
+        .checked_add(count)
         .expect("total_repayments_count overflow");
     save_protocol_metrics(env, &metrics);
+}
+
+fn apply_repayment(env: &Env, entry: &RepaymentEntry, storage_version: u32) {
+    let key = DataKey::RepaymentRecord(entry.subject.clone());
+    if storage_version < 2 {
+        let mut record: RepaymentRecordV1 =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(RepaymentRecordV1 {
+                    on_time_count: 0,
+                    total_count: 0,
+                });
+        if entry.on_time {
+            record.on_time_count = record.on_time_count.saturating_add(1);
+        }
+        record.total_count = record.total_count.saturating_add(1);
+        env.storage().persistent().set(&key, &record);
+    } else {
+        let mut record: RepaymentRecord =
+            env.storage()
+                .persistent()
+                .get(&key)
+                .unwrap_or(RepaymentRecord {
+                    on_time_count: 0,
+                    total_count: 0,
+                    total_repaid: 0,
+                });
+        if entry.on_time {
+            record.on_time_count = record.on_time_count.saturating_add(1);
+        }
+        record.total_count = record.total_count.saturating_add(1);
+        record.total_repaid = record.total_repaid.saturating_add(entry.amount);
+        env.storage().persistent().set(&key, &record);
+    }
+
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
 #[contractimpl]
@@ -948,49 +999,67 @@ impl CreditOracle {
             .get(&DataKey::StorageVersion)
             .unwrap_or(1);
 
-        if current_version < 2 {
-            // Storage is still V1 layout — read and write back as RepaymentRecordV1
-            // so we don't corrupt existing data before migrate() is called.
-            let mut record: RepaymentRecordV1 = env
-                .storage()
-                .persistent()
-                .get(&DataKey::RepaymentRecord(subject.clone()))
-                .unwrap_or(RepaymentRecordV1 {
-                    on_time_count: 0,
-                    total_count: 0,
-                });
-            if on_time {
-                record.on_time_count = record.on_time_count.saturating_add(1);
-            }
-            record.total_count = record.total_count.saturating_add(1);
-            env.storage()
-                .persistent()
-                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
-        } else {
-            let mut record: RepaymentRecord = env
-                .storage()
-                .persistent()
-                .get(&DataKey::RepaymentRecord(subject.clone()))
-                .unwrap_or(RepaymentRecord {
-                    on_time_count: 0,
-                    total_count: 0,
-                    total_repaid: 0,
-                });
-            if on_time {
-                record.on_time_count = record.on_time_count.saturating_add(1);
-            }
-            record.total_count = record.total_count.saturating_add(1);
-            record.total_repaid = record.total_repaid.saturating_add(amount);
-            env.storage()
-                .persistent()
-                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
-        }
-        env.storage().persistent().extend_ttl(
-            &DataKey::RepaymentRecord(subject.clone()),
-            PERS_TTL_THRESHOLD,
-            PERS_TTL_EXTEND,
+        apply_repayment(
+            &env,
+            &RepaymentEntry {
+                subject,
+                amount,
+                on_time,
+            },
+            current_version,
         );
-        increment_repayments_recorded(&env);
+        increment_repayments_recorded(&env, 1);
+        Ok(())
+    }
+
+    /// Record repayments for multiple subjects in one authorized invocation.
+    ///
+    /// Validates all amounts before writing, and enforces a maximum batch size
+    /// of `MAX_BATCH_SIZE` (50 entries).
+    pub fn batch_record_repayments(
+        env: Env,
+        lender: Address,
+        entries: Vec<RepaymentEntry>,
+    ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
+        lender.require_auth();
+        let is_trusted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrustedLender(lender.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
+            return Err(CreditOracleError::LenderNotRegistered);
+        }
+        if entries.len() > MAX_BATCH_SIZE {
+            return Err(CreditOracleError::BatchTooLarge);
+        }
+        for entry in entries.iter() {
+            if entry.amount <= 0 {
+                return Err(CreditOracleError::InvalidAmount);
+            }
+        }
+
+        let current_version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::StorageVersion)
+            .unwrap_or(1);
+        for entry in entries.iter() {
+            apply_repayment(&env, &entry, current_version);
+            env.events().publish(
+                (symbol_short!("Repay"),),
+                (
+                    lender.clone(),
+                    entry.subject.clone(),
+                    entry.amount,
+                    entry.on_time,
+                ),
+            );
+        }
+        if !entries.is_empty() {
+            increment_repayments_recorded(&env, entries.len() as u64);
+        }
         Ok(())
     }
 
