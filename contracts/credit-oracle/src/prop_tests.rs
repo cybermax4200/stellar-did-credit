@@ -6,8 +6,8 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_SCORE,
-    MIN_SCORE, SECONDS_PER_DAY,
+    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_SCORE, MIN_SCORE,
+    SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
 
@@ -127,9 +127,12 @@ fn prop_perfect_inputs_yields_max_score() {
         100,
         8_000_000_000i128,
         100,
-        1, 1,
+        1,
+        1,
         10_000_000_000i128,
-        40, 30, 30,
+        40,
+        30,
+        30,
     );
     assert_eq!(
         score, MAX_SCORE,

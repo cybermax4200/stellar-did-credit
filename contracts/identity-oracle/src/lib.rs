@@ -54,7 +54,12 @@ fn ensure_not_paused(env: &Env) -> Result<(), IdentityOracleError> {
     }
 }
 
-fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+fn validate_contract_function<T>(
+    env: &Env,
+    contract_id: &Address,
+    func: Symbol,
+    args: Vec<Val>,
+) -> bool
 where
     T: TryFromVal<Env, Val>,
 {
@@ -75,11 +80,11 @@ fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
 }
 
 // ── Persistent TTL constants ─────────────────────────────────────
-  // Persistent entries are extended to ~30 days on every write.
-  //
-  // Threshold: if remaining TTL drops below this, extend.
-  // Extend to: the new TTL value in ledger counts (≈5 s/ledger).
-  //
+// Persistent entries are extended to ~30 days on every write.
+//
+// Threshold: if remaining TTL drops below this, extend.
+// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+//
 const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 
@@ -199,7 +204,11 @@ fn generic_credential_type(_env: &Env) -> CredentialType {
     symbol_short!("generic")
 }
 
-fn get_stored_credential_type(env: &Env, subject: &Address, vc_hash: &BytesN<32>) -> CredentialType {
+fn get_stored_credential_type(
+    env: &Env,
+    subject: &Address,
+    vc_hash: &BytesN<32>,
+) -> CredentialType {
     env.storage()
         .persistent()
         .get(&DataKey::VCCredentialType(subject.clone(), vc_hash.clone()))
@@ -250,9 +259,7 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 }
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
-    env.storage()
-        .instance()
-        .set(&DataKey::ProtocolStats, stats);
+    env.storage().instance().set(&DataKey::ProtocolStats, stats);
 }
 
 fn increment_dids_anchored(env: &Env) {
@@ -442,7 +449,9 @@ impl IdentityOracle {
         }
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
-        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -502,7 +511,9 @@ impl IdentityOracle {
         if version >= 2 {
             return Ok(());
         }
-        env.storage().instance().set(&DataKey::StorageVersion, &2u32);
+        env.storage()
+            .instance()
+            .set(&DataKey::StorageVersion, &2u32);
         Ok(())
     }
 
@@ -576,9 +587,7 @@ impl IdentityOracle {
                 .unwrap_or(Vec::new(&env));
             issuers.push_back(issuer.clone());
             let index_key = DataKey::IssuersIndex;
-            env.storage()
-                .persistent()
-                .set(&index_key, &issuers);
+            env.storage().persistent().set(&index_key, &issuers);
             env.storage()
                 .persistent()
                 .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
@@ -889,12 +898,12 @@ impl IdentityOracle {
                     .checked_sub(1)
                     .expect("active VC count underflow");
                 let active_key = DataKey::ActiveVCCount(subject.clone());
-                env.storage()
-                    .persistent()
-                    .set(&active_key, &active_count);
-                env.storage()
-                    .persistent()
-                    .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                env.storage().persistent().set(&active_key, &active_count);
+                env.storage().persistent().extend_ttl(
+                    &active_key,
+                    PERS_TTL_THRESHOLD,
+                    PERS_TTL_EXTEND,
+                );
             } else {
                 seed_active_vc_count(&env, &subject);
             }
@@ -972,8 +981,7 @@ impl IdentityOracle {
 
         record_last_state_change(&env, &subject);
 
-        env.events()
-            .publish((symbol_short!("IdReact"),), subject);
+        env.events().publish((symbol_short!("IdReact"),), subject);
     }
 
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
@@ -1075,7 +1083,11 @@ impl IdentityOracle {
     }
 
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
-    pub fn get_vc_credential_type(env: Env, subject: Address, vc_hash: BytesN<32>) -> CredentialType {
+    pub fn get_vc_credential_type(
+        env: Env,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> CredentialType {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
@@ -1225,9 +1237,7 @@ impl IdentityOracle {
     ///
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     pub fn get_revocation_registry(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .get(&DataKey::RevocationRegistryId)
+        env.storage().instance().get(&DataKey::RevocationRegistryId)
     }
 
     /// Admin-only maintenance: extend instance storage TTL so critical
@@ -1391,19 +1401,19 @@ mod tests {
 
         let (is_trusted, index_ttl, index): (bool, u32, Vec<Address>) =
             env.as_contract(&contract_id, || {
-            let index_key = DataKey::IssuersIndex;
-            (
-                env.storage()
-                    .persistent()
-                    .get(&DataKey::TrustedIssuer(issuer.clone()))
-                    .unwrap_or(true),
-                env.storage().persistent().get_ttl(&index_key),
-                env.storage()
-                    .persistent()
-                    .get(&index_key)
-                    .unwrap_or(Vec::new(&env)),
-            )
-                    });
+                let index_key = DataKey::IssuersIndex;
+                (
+                    env.storage()
+                        .persistent()
+                        .get(&DataKey::TrustedIssuer(issuer.clone()))
+                        .unwrap_or(true),
+                    env.storage().persistent().get_ttl(&index_key),
+                    env.storage()
+                        .persistent()
+                        .get(&index_key)
+                        .unwrap_or(Vec::new(&env)),
+                )
+            });
         assert!(!is_trusted);
         assert!(index.is_empty());
         assert!(index_ttl > PERS_TTL_THRESHOLD);
@@ -1606,7 +1616,10 @@ mod tests {
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
-        let cid = String::from_str(&env, "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4");
+        let cid = String::from_str(
+            &env,
+            "bafy2bzacedw4hc6k2vxtcmfmr3jtcl6yvqohqmvtqj7lhyzuejcxgxvl6yv4",
+        );
         assert!(cid.len() <= MAX_CID_LENGTH);
         client.anchor_did(&subject, &cid);
         assert_eq!(client.get_did_document(&subject), Some(cid));
@@ -1802,9 +1815,7 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &vc_hash_2);
 
         env.as_contract(&contract_id, || {
-            env.storage()
-                .instance()
-                .extend_ttl(6_000_000, 6_000_000);
+            env.storage().instance().extend_ttl(6_000_000, 6_000_000);
         });
 
         env.ledger().with_mut(|l| {
@@ -2212,7 +2223,10 @@ mod tests {
         client.initialize(&admin);
 
         let registry = client.get_revocation_registry();
-        assert!(registry.is_none(), "RevocationRegistryId should be None after initialization");
+        assert!(
+            registry.is_none(),
+            "RevocationRegistryId should be None after initialization"
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -2278,7 +2292,10 @@ mod tests {
 
         // Now should return Some
         let stored = client.get_revocation_registry();
-        assert!(stored.is_some(), "RevocationRegistryId should be Some after set_revocation_registry");
+        assert!(
+            stored.is_some(),
+            "RevocationRegistryId should be Some after set_revocation_registry"
+        );
         assert_eq!(stored.unwrap(), registry_id);
     }
 
@@ -2708,9 +2725,9 @@ mod tests {
             cid_str.push('a');
         }
         let cid = String::from_str(&env, &cid_str);
-        
+
         client.anchor_did(&subject, &cid);
-        
+
         let stored = client.get_did_document(&subject);
         assert_eq!(stored.unwrap(), cid);
     }
@@ -2728,7 +2745,7 @@ mod tests {
             cid_str.push('a');
         }
         let cid = String::from_str(&env, &cid_str);
-        
+
         let result = client.try_anchor_did(&subject, &cid);
         assert_eq!(result, Err(Ok(IdentityOracleError::InvalidCID)));
     }
@@ -2747,17 +2764,17 @@ mod tests {
         client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
-        
+
         // Test with various credential types that should work
         let credential_types = [
             "kyc",
-            "employment", 
+            "employment",
             "education",
             "identity",
             "credit_score",
             "test",
-            "a",                    // single character
-            "very_long_type_name",  // longer name
+            "a",                   // single character
+            "very_long_type_name", // longer name
         ];
 
         for (i, type_name) in credential_types.iter().enumerate() {
@@ -2765,16 +2782,20 @@ mod tests {
             hash_arr[0] = i as u8;
             hash_arr[1] = 42; // distinguishing byte
             let vc_hash = BytesN::from_array(&env, &hash_arr);
-            
+
             let credential_type = Symbol::new(&env, type_name);
             let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
-            
+
             // Should succeed for all valid credential types
-            assert!(result.is_ok(), "Failed to anchor VC with credential type: {}", type_name);
+            assert!(
+                result.is_ok(),
+                "Failed to anchor VC with credential type: {}",
+                type_name
+            );
         }
     }
 
-    #[test] 
+    #[test]
     fn test_anchor_vc_typed_vc_limit_with_credential_types() {
         let env = Env::default();
         env.mock_all_auths();
@@ -2788,33 +2809,37 @@ mod tests {
         client.register_issuer(&issuer);
 
         let subject = Address::generate(&env);
-        
+
         // Anchor exactly 100 VCs with different credential types
         for i in 0..100u8 {
             let mut hash_arr = [0u8; 32];
             hash_arr[0] = i;
             hash_arr[1] = 10; // distinguishing byte
             let vc_hash = BytesN::from_array(&env, &hash_arr);
-            
+
             // Vary credential types to simulate fuzz input
             let credential_type = match i % 4 {
                 0 => Symbol::new(&env, "kyc"),
                 1 => Symbol::new(&env, "employment"),
-                2 => Symbol::new(&env, "education"), 
+                2 => Symbol::new(&env, "education"),
                 _ => Symbol::new(&env, "identity"),
             };
-            
+
             let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash, &credential_type);
-            assert!(result.is_ok(), "Failed to anchor VC {} with credential type", i);
+            assert!(
+                result.is_ok(),
+                "Failed to anchor VC {} with credential type",
+                i
+            );
         }
-        
+
         // The 101st VC should fail with VCLimitReached
         let mut hash_arr = [0u8; 32];
         hash_arr[0] = 101;
         hash_arr[1] = 10;
         let vc_hash_101 = BytesN::from_array(&env, &hash_arr);
         let credential_type = Symbol::new(&env, "test");
-        
+
         let result = client.try_anchor_vc_typed(&issuer, &subject, &vc_hash_101, &credential_type);
         assert_eq!(result, Err(Ok(IdentityOracleError::VCLimitReached)));
     }

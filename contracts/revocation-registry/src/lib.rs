@@ -35,7 +35,11 @@ fn ensure_not_paused(env: &Env) -> Result<(), RevocationRegistryError> {
 }
 
 fn enter_guard(env: &Env) -> Result<(), RevocationRegistryError> {
-    if env.storage().temporary().has(&RevocationKey::ReentrancyLock) {
+    if env
+        .storage()
+        .temporary()
+        .has(&RevocationKey::ReentrancyLock)
+    {
         return Err(RevocationRegistryError::ReentrancyDetected);
     }
     env.storage()
@@ -365,6 +369,9 @@ impl RevocationRegistry {
         issuer: Address,
         vc_hashes: Vec<BytesN<32>>,
     ) -> Result<(), RevocationRegistryError> {
+        issuer.require_auth();
+        ensure_not_paused(&env)?;
+
         if vc_hashes.is_empty() {
             return Err(RevocationRegistryError::EmptyBatch);
         }
@@ -432,8 +439,10 @@ impl RevocationRegistry {
                 list_modified = true;
             }
 
-            env.events()
-                .publish((symbol_short!("Revoked"),), (issuer.clone(), vc_hash.clone()));
+            env.events().publish(
+                (symbol_short!("Revoked"),),
+                (issuer.clone(), vc_hash.clone()),
+            );
         }
 
         if list_modified {
@@ -545,9 +554,8 @@ mod tests {
             .try_into_val(&env)
             .expect("topic should be a Symbol");
         assert_eq!(topic, symbol_short!("IdOSet"));
-        let event_identity_oracle_id: Address = data
-            .try_into_val(&env)
-            .expect("data should be an Address");
+        let event_identity_oracle_id: Address =
+            data.try_into_val(&env).expect("data should be an Address");
         assert_eq!(event_identity_oracle_id, identity_oracle_id);
     }
 
@@ -700,7 +708,10 @@ mod tests {
 
         let mut single_hash_batch = Vec::new(&env);
         single_hash_batch.push_back(BytesN::from_array(&env, &[0u8; 32]));
-        assert_eq!(client.try_batch_revoke(&issuer, &single_hash_batch), Ok(Ok(())));
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &single_hash_batch),
+            Ok(Ok(()))
+        );
 
         let mut max_hash_batch = Vec::new(&env);
         for i in 1..=100 {
@@ -708,7 +719,10 @@ mod tests {
             hash_arr[0] = i;
             max_hash_batch.push_back(BytesN::from_array(&env, &hash_arr));
         }
-        assert_eq!(client.try_batch_revoke(&issuer, &max_hash_batch), Ok(Ok(())));
+        assert_eq!(
+            client.try_batch_revoke(&issuer, &max_hash_batch),
+            Ok(Ok(()))
+        );
     }
 
     #[test]
@@ -1040,7 +1054,9 @@ mod tests {
         assert!(client.is_revoked(&vc_hash));
 
         let lock_present: bool = env.as_contract(&contract_id, || {
-            env.storage().temporary().has(&RevocationKey::ReentrancyLock)
+            env.storage()
+                .temporary()
+                .has(&RevocationKey::ReentrancyLock)
         });
         assert!(
             !lock_present,
@@ -1074,7 +1090,10 @@ mod tests {
                 .set(&RevocationKey::ReentrancyLock, &true);
             exit_guard(&env);
             // After exit_guard the lock must be gone.
-            assert!(!env.storage().temporary().has(&RevocationKey::ReentrancyLock));
+            assert!(!env
+                .storage()
+                .temporary()
+                .has(&RevocationKey::ReentrancyLock));
             // And enter_guard must now succeed.
             assert!(enter_guard(&env).is_ok());
         });

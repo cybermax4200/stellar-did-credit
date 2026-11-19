@@ -1,10 +1,5 @@
 #[cfg(test)]
 mod tests {
-    use soroban_sdk::{
-        contract, contractimpl, symbol_short,
-        testutils::{Address as _, Events, Ledger as _},
-        Address, BytesN, Env, String, Symbol, TryIntoVal,
-    };
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
         RepaymentRecord, RepaymentRecordV1, ScoringWeights, TxStats,
@@ -12,6 +7,11 @@ mod tests {
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
+    use soroban_sdk::{
+        contract, contractimpl, symbol_short,
+        testutils::{Address as _, Events, Ledger as _},
+        Address, BytesN, Env, String, Symbol, TryIntoVal,
+    };
 
     #[test]
     fn test_score_freshness_enforcement() {
@@ -1266,7 +1266,7 @@ mod tests {
     }
 
     /// Integration test for governance execution timelock:
-    /// vote passes  advance past voting  execution rejected (timelock) 
+    /// vote passes  advance past voting  execution rejected (timelock)
     /// advance past delay  execution succeeds.
     ///
     /// This follows the double-timelock model from docs/governance.md 2.2:
@@ -1996,7 +1996,8 @@ mod tests {
         let admin = soroban_sdk::Address::generate(&env);
         let issuer = soroban_sdk::Address::generate(&env);
         let subject = soroban_sdk::Address::generate(&env);
-        let did_uri = String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
+        let did_uri =
+            String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
 
         let mut hash_bytes = [0u8; 32];
         hash_bytes[0] = 42;
@@ -2020,26 +2021,29 @@ mod tests {
                 .has(&identity_oracle::DataKey::StorageVersion));
 
             // Persistent storage: simulate pre-migration identity records
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::TrustedIssuer(issuer.clone()), &true);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::TrustedIssuer(issuer.clone()),
+                &true,
+            );
             let mut issuers = soroban_sdk::Vec::new(&env);
             issuers.push_back(issuer.clone());
             env.storage()
                 .persistent()
                 .set(&identity_oracle::DataKey::IssuersIndex, &issuers);
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::DIDDocument(subject.clone()), &did_uri);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::DIDDocument(subject.clone()),
+                &did_uri,
+            );
 
             let mut vcs = soroban_sdk::Vec::new(&env);
             vcs.push_back(vc_record);
             env.storage()
                 .persistent()
                 .set(&identity_oracle::DataKey::VCAnchors(subject.clone()), &vcs);
-            env.storage()
-                .persistent()
-                .set(&identity_oracle::DataKey::ActiveVCCount(subject.clone()), &1u32);
+            env.storage().persistent().set(
+                &identity_oracle::DataKey::ActiveVCCount(subject.clone()),
+                &1u32,
+            );
         });
 
         // Verify StorageVersion is absent before migration
@@ -2532,7 +2536,11 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let inflated_score = credit.compute_score(&subject);
-        assert!(inflated_score > 300, "expected score > 300, got {}", inflated_score);
+        assert!(
+            inflated_score > 300,
+            "expected score > 300, got {}",
+            inflated_score
+        );
 
         // Step 1: subject flags tx_stats; exactly one DsptFild with the right payload.
         let input_key = Symbol::new(&env, "tx_stats");
@@ -2540,7 +2548,11 @@ mod tests {
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "flag_score_input must emit exactly one DsptFild(subject, input_key)"
         );
         assert_eq!(
@@ -2553,7 +2565,11 @@ mod tests {
         let resolve_events = dispute_events(&env, &credit_id);
         assert_eq!(
             resolve_events,
-            vec![(symbol_short!("DsptRslv"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptRslv"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "accepting a dispute must emit exactly one DsptRslv(subject, input_key)"
         );
         assert_eq!(
@@ -2574,7 +2590,8 @@ mod tests {
             },
         );
 
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         let corrected_score = credit.compute_score(&subject);
         assert!(
             corrected_score < inflated_score,
@@ -2627,14 +2644,22 @@ mod tests {
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
         );
 
         // Admin rejects: exactly one DsptRjct, and no DsptRslv for the feeder to act on.
         credit.resolve_dispute(&subject, &input_key, &false);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptRjct"), subject.clone(), input_key.clone())],
+            vec![(
+                symbol_short!("DsptRjct"),
+                subject.clone(),
+                input_key.clone()
+            )],
             "rejecting a dispute must emit exactly one DsptRjct and no DsptRslv"
         );
         assert_eq!(
@@ -2643,14 +2668,19 @@ mod tests {
         );
 
         // No resync happened, so recomputing yields the same score.
-        env.ledger().set_sequence_number(env.ledger().sequence() + 1);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), score_before);
 
         // A rejected dispute does not block filing a new one for the same key.
         credit.flag_score_input(&subject, &input_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), input_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
         );
         assert_eq!(
             credit.get_dispute(&subject, &input_key).unwrap().status,
@@ -2684,7 +2714,11 @@ mod tests {
         credit.flag_score_input(&subject, &repay_key, &reason);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptFild"), subject.clone(), repay_key.clone())]
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                repay_key.clone()
+            )]
         );
 
         // Accept tx_stats only: the event names tx_stats, repayment stays Pending.
@@ -2711,7 +2745,11 @@ mod tests {
         credit.resolve_dispute(&subject, &repay_key, &false);
         assert_eq!(
             dispute_events(&env, &credit_id),
-            vec![(symbol_short!("DsptRjct"), subject.clone(), repay_key.clone())]
+            vec![(
+                symbol_short!("DsptRjct"),
+                subject.clone(),
+                repay_key.clone()
+            )]
         );
         assert_eq!(
             credit.get_dispute(&subject, &tx_key).unwrap().status,
@@ -2771,7 +2809,6 @@ mod tests {
             "expected DisputeAlreadyPending when re-filing a pending dispute"
         );
     }
-
 
     #[test]
     fn test_persistent_storage_ttl_survival_after_ledger_advance() {

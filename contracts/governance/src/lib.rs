@@ -232,17 +232,26 @@ impl Governance {
 
     /// Configure the quorum for future proposals as a percentage of currently
     /// registered voting weight. The computed quorum is snapshotted at proposal creation.
-    pub fn set_quorum_percent(env: Env, admin: Address, percent: u32) -> Result<(), GovernanceError> {
+    pub fn set_quorum_percent(
+        env: Env,
+        admin: Address,
+        percent: u32,
+    ) -> Result<(), GovernanceError> {
         if percent == 0 || percent > 100 {
             return Err(GovernanceError::InvalidQuorum);
         }
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .ok_or(GovernanceError::NotAuthorized)?;
         if admin != stored_admin {
             return Err(GovernanceError::NotAuthorized);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::QuorumPercent, &percent);
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumPercent, &percent);
         Ok(())
     }
 
@@ -297,12 +306,27 @@ impl Governance {
             .get(&DataKey::NextProposalId)
             .unwrap_or(FIRST_PROPOSAL_ID);
         let expiry_ledger = env.ledger().sequence() + voting_period_ledgers;
-        let quorum_required = match env.storage().instance().get::<_, u32>(&DataKey::QuorumPercent) {
+        let quorum_required = match env
+            .storage()
+            .instance()
+            .get::<_, u32>(&DataKey::QuorumPercent)
+        {
             Some(percent) => {
-                let total: i128 = env.storage().instance().get(&DataKey::TotalRegisteredWeight).unwrap_or(0);
-                total.checked_mul(i128::from(percent)).ok_or(GovernanceError::InvalidQuorum)? / 100
+                let total: i128 = env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::TotalRegisteredWeight)
+                    .unwrap_or(0);
+                total
+                    .checked_mul(i128::from(percent))
+                    .ok_or(GovernanceError::InvalidQuorum)?
+                    / 100
             }
-            None => env.storage().instance().get(&DataKey::QuorumRequired).unwrap_or(0),
+            None => env
+                .storage()
+                .instance()
+                .get(&DataKey::QuorumRequired)
+                .unwrap_or(0),
         };
 
         let proposal = GovernanceProposal {
@@ -501,11 +525,7 @@ impl Governance {
             .expect("no credit oracle");
 
         // Use propose_weights to start the timelock, not update_weights which bypasses it
-        CreditOracleClient::propose_weights(
-            &env,
-            &credit_oracle_addr,
-            &proposal.proposed_weights,
-        );
+        CreditOracleClient::propose_weights(&env, &credit_oracle_addr, &proposal.proposed_weights);
 
         proposal.executed = true;
         env.storage().persistent().set(&proposal_key, &proposal);
@@ -562,10 +582,8 @@ impl Governance {
                 .remove(&DataKey::VoteWeightUsed(proposal_id, voter.clone()));
         }
 
-        env.events().publish(
-            (symbol_short!("VCln"), proposal_id),
-            voters.len(),
-        );
+        env.events()
+            .publish((symbol_short!("VCln"), proposal_id), voters.len());
 
         Ok(())
     }
@@ -672,9 +690,10 @@ impl Governance {
             .instance()
             .get(&DataKey::TotalRegisteredWeight)
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
+        env.storage().instance().set(
+            &DataKey::TotalRegisteredWeight,
+            &(total - old_weight + weight),
+        );
 
         env.events()
             .publish((symbol_short!("VoterReg"), voter.clone()), weight);
@@ -733,9 +752,10 @@ impl Governance {
             .instance()
             .get(&DataKey::TotalRegisteredWeight)
             .unwrap_or(0);
-        env.storage()
-            .instance()
-            .set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
+        env.storage().instance().set(
+            &DataKey::TotalRegisteredWeight,
+            &(total - old_weight + weight),
+        );
 
         env.events()
             .publish((symbol_short!("VoterUpd"), voter.clone()), weight);
@@ -935,10 +955,8 @@ impl Governance {
         proposal.cancelled = true;
         env.storage().persistent().set(&proposal_key, &proposal);
 
-        env.events().publish(
-            (symbol_short!("PropCanc"), proposal_id),
-            canceller,
-        );
+        env.events()
+            .publish((symbol_short!("PropCanc"), proposal_id), canceller);
 
         Ok(())
     }
@@ -1243,11 +1261,8 @@ mod tests {
 
         env.as_contract(&gov_id, || {
             let proposal_key = DataKey::Proposal(proposal_id);
-            let mut proposal: GovernanceProposal = env
-                .storage()
-                .persistent()
-                .get(&proposal_key)
-                .unwrap();
+            let mut proposal: GovernanceProposal =
+                env.storage().persistent().get(&proposal_key).unwrap();
             proposal.votes_for = i128::MAX;
             env.storage().persistent().set(&proposal_key, &proposal);
         });
@@ -1307,7 +1322,10 @@ mod tests {
 
         // Verify the proposal is now marked cancelled on-chain.
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
-        assert!(proposal.cancelled, "proposal.cancelled must be true after cancel_proposal");
+        assert!(
+            proposal.cancelled,
+            "proposal.cancelled must be true after cancel_proposal"
+        );
         assert!(!proposal.executed, "proposal.executed must remain false");
     }
 
@@ -1640,8 +1658,20 @@ mod tests {
         client.register_voter(&admin, &Address::generate(&env), &101);
         client.set_quorum_percent(&admin, &50);
         assert_eq!(client.get_quorum_percent(), Some(50));
-        let proposal_id = client.create_proposal(&Address::generate(&env), &ScoringWeights { vc_weight: 40, tx_weight: 30, repayment_weight: 30 }, &10, &0);
-        assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 50);
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            50
+        );
     }
 
     #[test]
@@ -1671,7 +1701,10 @@ mod tests {
             &10,
             &0,
         );
-        assert_eq!(client.get_proposal(&proposal_id).unwrap().quorum_required, 20);
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            20
+        );
     }
 
     #[test]
@@ -1819,7 +1852,10 @@ mod tests {
         gov_client.vote(&voter, &proposal_id, &false, &40);
 
         assert_eq!(gov_client.get_vote_weight_used(&proposal_id, &voter), 100);
-        assert_eq!(gov_client.get_available_vote_weight(&proposal_id, &voter), 0);
+        assert_eq!(
+            gov_client.get_available_vote_weight(&proposal_id, &voter),
+            0
+        );
     }
 
     #[test]

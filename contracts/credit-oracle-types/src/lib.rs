@@ -182,7 +182,10 @@ impl CreditOracleClient {
     }
 
     /// Get the current scoring weights from the credit-oracle.
-    pub fn get_scoring_weights(env: &Env, contract_id: &Address) -> Result<ScoringWeights, CreditOracleError> {
+    pub fn get_scoring_weights(
+        env: &Env,
+        contract_id: &Address,
+    ) -> Result<ScoringWeights, CreditOracleError> {
         match env.try_invoke_contract::<ScoringWeights, CreditOracleError>(
             contract_id,
             &Symbol::new(env, "get_scoring_weights"),
@@ -219,7 +222,11 @@ impl IdentityOracleClient {
         env.invoke_contract(
             contract_id,
             &Symbol::new(env, "get_vc_credential_type"),
-            soroban_sdk::vec![env, subject.clone().into_val(env), vc_hash.clone().into_val(env)],
+            soroban_sdk::vec![
+                env,
+                subject.clone().into_val(env),
+                vc_hash.clone().into_val(env)
+            ],
         )
     }
 }
