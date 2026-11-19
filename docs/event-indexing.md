@@ -140,6 +140,7 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Data:** `(subject: Address, input_key: Symbol)`
 - **Emitted When:** A subject flags one of their score inputs as possibly incorrect via `flag_score_input`. `input_key` is one of `tx_stats`, `repayment`, or `vc_count`, and the stored `DisputeRecord` starts as `Pending`.
 - **feeder Action:** Review the flagged input. Only one pending dispute per `(subject, input_key)` is allowed, so a second `flag_score_input` for the same key fails with `DisputeAlreadyPending`.
+- **Bond:** If a dispute bond is configured (`set_dispute_bond`), the bond amount is escrowed from the subject when the event is emitted. It is refunded on `DsptRslv` (accepted) and forfeited to the contract on `DsptRjct` (rejected).
 
 #### DsptRslv
 
