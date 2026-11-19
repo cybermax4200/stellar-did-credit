@@ -330,7 +330,7 @@ impl Governance {
         if voting_period_ledgers == 0 {
             return Err(GovernanceError::InvalidVotingPeriod);
         }
-        if metadata_cid.len() == 0 || metadata_cid.len() > MAX_METADATA_CID_LEN {
+        if metadata_cid.is_empty() || metadata_cid.len() > MAX_METADATA_CID_LEN {
             return Err(GovernanceError::InvalidMetadataCid);
         }
 
