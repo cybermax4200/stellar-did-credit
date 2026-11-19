@@ -1888,6 +1888,7 @@ mod tests {
             },
             &10,
             &0,
+            &test_cid(&env),
         );
         assert_eq!(
             client.get_proposal(&proposal_id).unwrap().quorum_required,
