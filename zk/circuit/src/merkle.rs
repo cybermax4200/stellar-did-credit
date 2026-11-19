@@ -183,7 +183,8 @@ impl ConstraintSynthesizer<Fr> for MerkleMembershipCircuit {
         })?;
 
         let mut siblings: [FpVar<Fr>; MERKLE_DEPTH] = core::array::from_fn(|_| FpVar::zero());
-        let mut directions: [Boolean<Fr>; MERKLE_DEPTH] = core::array::from_fn(|_| Boolean::constant(false));
+        let mut directions: [Boolean<Fr>; MERKLE_DEPTH] =
+            core::array::from_fn(|_| Boolean::constant(false));
         for level in 0..MERKLE_DEPTH {
             siblings[level] = FpVar::new_witness(cs.clone(), || {
                 Ok(w.map(|w| w.siblings[level])

@@ -3084,10 +3084,22 @@ mod tests {
         assert_eq!(results.get(3).unwrap(), false);
 
         // Verify matches individual verify_vc
-        assert_eq!(results.get(0).unwrap(), client.verify_vc(&subject, &vc_valid1));
-        assert_eq!(results.get(1).unwrap(), client.verify_vc(&subject, &vc_unknown));
-        assert_eq!(results.get(2).unwrap(), client.verify_vc(&subject, &vc_valid2));
-        assert_eq!(results.get(3).unwrap(), client.verify_vc(&subject, &vc_revoked));
+        assert_eq!(
+            results.get(0).unwrap(),
+            client.verify_vc(&subject, &vc_valid1)
+        );
+        assert_eq!(
+            results.get(1).unwrap(),
+            client.verify_vc(&subject, &vc_unknown)
+        );
+        assert_eq!(
+            results.get(2).unwrap(),
+            client.verify_vc(&subject, &vc_valid2)
+        );
+        assert_eq!(
+            results.get(3).unwrap(),
+            client.verify_vc(&subject, &vc_revoked)
+        );
     }
 
     #[test]
