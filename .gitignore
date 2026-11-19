@@ -10,6 +10,8 @@ node_modules/
 dist/
 coverage/
 **/pkg/
+packages/zk-wasm/pkg-baseline/
+packages/zk-wasm/pkg-web/
 .env
 .env.*
 !.env.example
