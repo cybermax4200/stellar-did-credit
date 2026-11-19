@@ -1319,7 +1319,7 @@ impl IdentityOracle {
     /// Returns a paginated sub-slice of currently registered (active) trusted issuers.
     ///
     /// `start_index` is the zero-based offset into the active issuer list.
-    /// `limit` is bounded to at most [`MAX_ISSUER_PAGE_LIMIT`] (50).
+    /// `limit` is bounded to at most `MAX_ISSUER_PAGE_LIMIT` (50).
     /// If `start_index` is at or beyond the total number of issuers, an empty vector is returned.
     pub fn get_issuers_paginated(env: Env, start_index: u32, limit: u32) -> Vec<Address> {
         let active = get_active_issuers(&env);
@@ -1337,7 +1337,7 @@ impl IdentityOracle {
 
     /// Returns the currently registered (non-deregistered) trusted issuers, bounded to the first page.
     ///
-    /// Deprecated: Prefer [`Self::get_issuers_paginated`] to avoid unbounded return vectors
+    /// Deprecated: Prefer `get_issuers_paginated` to avoid unbounded return vectors
     /// and gas exhaustion on networks with many issuers.
     #[deprecated(note = "use `get_issuers_paginated` instead")]
     pub fn list_issuers(env: Env) -> Vec<Address> {
