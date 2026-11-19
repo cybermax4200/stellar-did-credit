@@ -3269,11 +3269,13 @@ mod tests {
         let subject = soroban_sdk::Address::generate(&env);
 
         identity.initialize(&admin);
-        identity.register_issuer(&issuer);
-        identity.set_revocation_registry(&revocation_id);
-
         revocation.initialize(&admin);
+
+        // Link identity-oracle to revocation-registry
+        identity.set_revocation_registry(&revocation_id);
         revocation.set_identity_oracle(&identity_id);
+
+        identity.register_issuer(&issuer);
 
         let hash_valid1 = BytesN::from_array(&env, &[1u8; 32]);
         let hash_valid2 = BytesN::from_array(&env, &[2u8; 32]);
