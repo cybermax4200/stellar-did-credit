@@ -34,6 +34,9 @@ jobs:
       - name: Run tests (regenerate snapshots if needed)
         run: SOROBAN_TEST_SNAPSHOT_FILE_UPDATE=true cargo test --workspace
 
+      - name: Check score circuit constraint budget and prover time
+        run: cargo test -p zk-circuit benchmark_score_circuit -- --ignored --nocapture
+
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
