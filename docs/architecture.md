@@ -368,17 +368,22 @@ The `input_key` parameter must be one of three recognised values:
 | `repayment`  | On-time / total repayment counts                    |
 | `vc_count`   | Cached verifiable credential count                  |
 
-### Anti-griefing
+### Anti-griefing and review timeout
 
-Only **one pending dispute per `(subject, input_key)` pair** is allowed at a time. Attempting to re-file while an existing dispute is `Pending` returns `DisputeAlreadyPending`. After the admin resolves a dispute (`Resolved` or `Rejected`), the subject may file a new one for the same key.
+Only **one pending dispute per `(subject, input_key)` pair** is allowed at a time. Attempting to re-file while an existing dispute is `Pending` returns `DisputeAlreadyPending`. After the admin resolves a dispute (`Resolved` or `Rejected`), or the review window expires (`Expired`), the subject may file a new one for the same key.
+
+A `Pending` dispute records `created_at_ledger`. If it is still pending after `dispute_timeout_ledgers` (default **172,800 ledgers**, ≈ 10 days), **anyone** may call `expire_dispute(subject, input_key)` to move it to `Expired`. This guarantees an abandoned admin review cannot lock a subject's input forever. Expiration is a liveness fallback, not a ruling: the flagged input is left unchanged and no feeder re-sync is requested. Calling `expire_dispute` before the timeout elapses returns `DisputeNotExpired`; once a dispute is resolved or expired, `expire_dispute` and `resolve_dispute` return `DisputeNotFound`.
+
+The admin can change the window with `set_dispute_timeout_ledgers(admin, ledgers)` (`ledgers > 0`), and read it with `get_dispute_timeout_ledgers()`.
 
 ### Dispute lifecycle
 
 ```
-[filed]    subject calls flag_score_input  ->  Pending
+[filed]    subject calls flag_score_input  ->  Pending (created_at_ledger recorded)
 [accepted] admin calls resolve_dispute(accepted=true)  ->  Resolved
 [rejected] admin calls resolve_dispute(accepted=false) ->  Rejected
-[re-filed] after Resolved/Rejected, subject may file again ->  Pending
+[expired]  anyone calls expire_dispute after timeout  ->  Expired
+[re-filed] after Resolved, Rejected, or Expired, subject may file again ->  Pending
 ```
 
 ### Resolution and feeder re-sync
@@ -393,8 +398,11 @@ When the admin rejects a dispute, a `DsptRjct` event is emitted. The subject may
 | -------- | ------ | ----------- |
 | `flag_score_input(subject, input_key, reason)` | subject | Files a dispute against a score input |
 | `resolve_dispute(subject, input_key, accepted)` | admin   | Accepts or rejects a pending dispute |
+| `expire_dispute(subject, input_key)`            | anyone  | Expires a pending dispute after the review timeout |
 | `get_dispute(subject, input_key)`               | anyone  | Returns the dispute record, or `None` |
 | `list_disputes(subject)`                        | anyone  | Returns all dispute records for a subject |
+| `get_dispute_timeout_ledgers()`                 | anyone  | Returns the review timeout in ledgers |
+| `set_dispute_timeout_ledgers(admin, ledgers)`   | admin   | Updates the review timeout (`ledgers > 0`) |
 
 ### Storage (credit-oracle)
 
@@ -402,6 +410,7 @@ When the admin rejects a dispute, a `DsptRjct` event is emitted. The subject may
 | -------------------------- | --------------- | ----------- |
 | `Dispute(Address, Symbol)` | `DisputeRecord` | Persistent - one record per (subject, input_key) pair |
 | `DisputeIndex(Address)`    | `Vec<Symbol>`   | Persistent - index of all disputed input keys for a subject |
+| `DisputeTimeoutLedgers`    | `u32`           | Instance - pending review window; default 172,800 ledgers |
 
 ### Out of scope
 

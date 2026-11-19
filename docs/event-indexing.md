@@ -155,7 +155,14 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Emitted When:** The admin rejects the dispute with `resolve_dispute(subject, input_key, false)`, moving the record to `Rejected`. The flagged input stands, so no re-fetch is needed.
 - **feeder Action:** None. The subject may file a new dispute for the same key afterwards.
 
-`get_dispute(subject, input_key)` and `list_disputes(subject)` return the stored `DisputeRecord` (`subject`, `input_key`, `reason`, `filed_at_ledger`, `status`) for consumers that prefer a storage read over indexing.
+#### DsptExpr
+
+- **Topic:** `[Symbol("DsptExpr")]`
+- **Data:** `(subject: Address, input_key: Symbol)`
+- **Emitted When:** Anyone calls `expire_dispute(subject, input_key)` after the dispute has been `Pending` for `dispute_timeout_ledgers`, moving the record to `Expired`. The review window is a liveness fallback, not a ruling: the flagged input is unchanged.
+- **feeder Action:** None (no re-fetch). The subject may file a new dispute for the same key afterwards.
+
+`get_dispute(subject, input_key)` and `list_disputes(subject)` return the stored `DisputeRecord` (`subject`, `input_key`, `reason`, `created_at_ledger`, `status`) for consumers that prefer a storage read over indexing.
 
 ---
 
@@ -281,7 +288,7 @@ To maintain a real-time credit score, the off-chain feeder performs the followin
 
 ### Scenario C: Dispute Resolved
 
-1. Subscribe to `DsptFild`, `DsptRslv`, and `DsptRjct` on `credit-oracle` with `sdk.subscribeToDisputeEvents(subject, callback)`.
+1. Subscribe to `DsptFild`, `DsptRslv`, `DsptRjct`, and `DsptExpr` on `credit-oracle` with `sdk.subscribeToDisputeEvents(subject, callback)`.
 2. On a `DsptRslv` event, re-fetch the input named by `inputKey` (`tx_stats`, `repayment`, or `vc_count`) from its source of truth.
 3. Resubmit the corrected value with `update_tx_stats`, `record_repayment`, or `set_vc_count`.
-4. `DsptFild` is informational (an admin still has to rule); `DsptRjct` means the existing input was confirmed correct, so no resubmission is needed.
+4. `DsptFild` is informational (an admin still has to rule); `DsptRjct` means the existing input was confirmed correct, so no resubmission is needed; `DsptExpr` means the review window elapsed without a decision, so the input is unchanged and the dispute lock is cleared.

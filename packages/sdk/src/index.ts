@@ -78,7 +78,7 @@ export interface DisputeRecord {
   subject: string;
   inputKey: string;
   reason: string;
-  filedAtLedger: number;
+  createdAtLedger: number;
   status: DisputeStatus;
 }
 
@@ -132,10 +132,10 @@ export interface ProtocolConfig {
 export type Unsubscribe = () => void;
 
 /** Credit-oracle event topics of the dispute lifecycle. */
-export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct";
+export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct" | "DsptExpr";
 
 /** `DisputeStatus` stored by the credit-oracle once a dispute event fires. */
-export type DisputeStatus = "Pending" | "Resolved" | "Rejected";
+export type DisputeStatus = "Pending" | "Resolved" | "Rejected" | "Expired";
 
 /**
  * A score event emitted by the credit-oracle on every successful
@@ -158,7 +158,7 @@ export interface ScoreEvent {
  * {@link StellarDIDCreditSDK.subscribeToDisputeEvents}.
  */
 export interface DisputeEvent {
-  /** Lifecycle transition: DsptFild, DsptRslv or DsptRjct. */
+  /** Lifecycle transition: DsptFild, DsptRslv, DsptRjct or DsptExpr. */
   eventType: DisputeEventType;
   /** Subject address the dispute was filed against. */
   subject: string;
@@ -172,12 +172,14 @@ const DISPUTE_EVENT_STATUS: Record<DisputeEventType, DisputeStatus> = {
   DsptFild: "Pending",
   DsptRslv: "Resolved",
   DsptRjct: "Rejected",
+  DsptExpr: "Expired",
 };
 
 const DISPUTE_EVENT_TOPICS: DisputeEventType[] = [
   "DsptFild",
   "DsptRslv",
   "DsptRjct",
+  "DsptExpr",
 ];
 
 export type SDKErrorCode =
@@ -4167,7 +4169,9 @@ function parseDisputeRecord(native: unknown): DisputeRecord {
     subject: String(raw["subject"]),
     inputKey: String(raw["input_key"]),
     reason: String(raw["reason"]),
-    filedAtLedger: Number(raw["filed_at_ledger"]),
+    createdAtLedger: Number(
+      raw["created_at_ledger"] ?? raw["filed_at_ledger"],
+    ),
     status,
   };
 }

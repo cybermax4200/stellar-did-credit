@@ -90,6 +90,10 @@ pub enum CreditOracleError {
     InvalidComputeCooldown = 18,
     /// Batch size exceeds maximum allowed.
     BatchTooLarge = 19,
+    /// Dispute review timeout must be greater than zero.
+    InvalidDisputeTimeout = 20,
+    /// The dispute's review timeout has not elapsed yet.
+    DisputeNotExpired = 21,
 }
 
 /// Weights used in credit score calculation.

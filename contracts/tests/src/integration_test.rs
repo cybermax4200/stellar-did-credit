@@ -3,7 +3,7 @@ mod tests {
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
         ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
-        SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
+        SubjectTxStatsEntry, TxStats, DEFAULT_DISPUTE_TIMEOUT_LEDGERS, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -2858,6 +2858,7 @@ mod tests {
             symbol_short!("DsptFild"),
             symbol_short!("DsptRslv"),
             symbol_short!("DsptRjct"),
+            symbol_short!("DsptExpr"),
         ];
         let mut out = Vec::new();
         for (id, topics, data) in env.events().all().iter() {
@@ -3188,6 +3189,81 @@ mod tests {
             Err(Ok(CreditOracleError::DisputeAlreadyPending)),
             "expected DisputeAlreadyPending when re-filing a pending dispute"
         );
+    }
+
+    /// Issue #1160: a Pending dispute expires after the review timeout, emits
+    /// `DsptExpr`, clears the pending lock, and can be re-filed.
+    #[test]
+    fn test_dispute_expires_after_timeout_and_allows_refile_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register_contract(None, CreditOracle);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        credit.initialize(&admin);
+
+        assert_eq!(
+            credit.get_dispute_timeout_ledgers(),
+            DEFAULT_DISPUTE_TIMEOUT_LEDGERS
+        );
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is inflated");
+        let created = env.ledger().sequence();
+        credit.flag_score_input(&subject, &input_key, &reason);
+        let filed_events = dispute_events(&env, &credit_id);
+        assert_eq!(
+            filed_events,
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
+        );
+
+        // One ledger before the timeout the dispute cannot be expired.
+        env.ledger()
+            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS - 1);
+        assert_eq!(
+            credit.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotExpired))
+        );
+        assert_eq!(
+            credit.get_dispute(&subject, &input_key).unwrap().status,
+            DisputeStatus::Pending
+        );
+
+        // At the timeout, anyone can expire it; exactly one DsptExpr is emitted
+        // for the right subject and input key.
+        env.ledger()
+            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        credit.expire_dispute(&subject, &input_key);
+
+        // Read events immediately after the call (the host buffers per invocation).
+        let events = dispute_events(&env, &credit_id);
+        assert_eq!(
+            events,
+            vec![(
+                symbol_short!("DsptExpr"),
+                subject.clone(),
+                input_key.clone()
+            )],
+            "expiration must emit exactly one DsptExpr for the dispute"
+        );
+
+        let expired = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(expired.status, DisputeStatus::Expired);
+        assert_eq!(expired.created_at_ledger, created);
+
+        // The pending lock is cleared: re-filing succeeds and starts fresh.
+        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after timeout");
+        credit.flag_score_input(&subject, &input_key, &reason2);
+        let refiled = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(refiled.status, DisputeStatus::Pending);
+        assert_eq!(refiled.created_at_ledger, env.ledger().sequence());
     }
 
     #[test]

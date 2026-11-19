@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `credit-oracle`: disputes now expire after a configurable review window. `DisputeRecord` stores `created_at_ledger`; `set_dispute_timeout_ledgers`/`get_dispute_timeout_ledgers` manage the window (default 172,800 ledgers, ≈ 10 days); anyone can call `expire_dispute` after the timeout to move a stale `Pending` dispute to `Expired`, clearing the pending lock so the subject can re-file. Emits `DsptExpr`. New errors `InvalidDisputeTimeout = 20` and `DisputeNotExpired = 21` (#1160)
 - `credit-oracle`: added `batch_record_repayments(lender, entries)` for recording up to 50 positive repayment entries in one authorized call, with per-entry `Repay` events and validation before any storage updates (#1149)
 - `identity-oracle`: implemented `get_issuers_paginated(env, start_index, limit)` returning bounded sub-slices of trusted issuers (enforcing `limit <= 50`), added `get_issuer_count(env)` total count helper, and retained `list_issuers(env)` bounded to the first 50 issuers as a deprecated compatibility entrypoint (#1164)
 - `credit-oracle`: introduced `ProtocolMetrics` struct and `DataKey::ProtocolMetrics` storage key tracking cumulative volume scored, unique borrowers scored, and recorded repayments count; updated `compute_score` to accumulate volume and borrowers idempotently; added live view function `get_protocol_metrics(env)` (#1168)
