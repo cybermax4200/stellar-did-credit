@@ -2254,6 +2254,103 @@ mod tests {
         );
     }
 
+    /// A cached score must be reported stale once the current ledger is more
+    /// than `STALE_LEDGER_AGE` (~30 days / 86_400 ledgers) ahead of the ledger
+    /// it was computed at.
+    #[test]
+    fn test_get_score_stale_by_ledger_age() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleAge"));
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
+
+        credit.compute_score(&subject);
+        let record = credit.get_score(&subject).unwrap();
+        let computed_at = record.computed_at_ledger;
+        assert!(!record.stale, "a freshly computed score must not be stale");
+
+        // `STALE_LEDGER_AGE` is 86_400 ledgers and the check is a strict `>`,
+        // so advancing exactly that many ledgers plus one crosses the threshold.
+        env.ledger().set_sequence_number(computed_at + 86_400 + 1);
+
+        let record = credit.get_score(&subject).unwrap();
+        assert!(
+            record.stale,
+            "score older than STALE_LEDGER_AGE must be reported stale"
+        );
+        assert_eq!(
+            record.computed_at_ledger, computed_at,
+            "staleness is computed at read time; the stored ledger must not change"
+        );
+    }
+
+    /// A cached score must be reported stale once the subject's identity state
+    /// changes after the score was computed (here: a new VC is anchored).
+    #[test]
+    fn test_get_score_stale_by_identity_state_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = soroban_sdk::Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleIdentity"));
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
+
+        credit.compute_score(&subject);
+        let record = credit.get_score(&subject).unwrap();
+        let computed_at = record.computed_at_ledger;
+        assert!(!record.stale, "a freshly computed score must not be stale");
+
+        // Advance one ledger so the identity mutation is strictly newer than the
+        // score, then anchor a second VC for the subject.
+        env.ledger().set_sequence_number(computed_at + 1);
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[9u8; 32]));
+
+        assert!(
+            identity.get_last_state_change_ledger(&subject).unwrap() > computed_at,
+            "identity mutation must be recorded after the score was computed"
+        );
+
+        let record = credit.get_score(&subject).unwrap();
+        assert!(
+            record.stale,
+            "score must be stale after the identity state changed"
+        );
+        assert_eq!(
+            record.computed_at_ledger, computed_at,
+            "staleness is computed at read time; the stored ledger must not change"
+        );
+    }
+
     /// Deterministic scoring: identical inputs produce identical scores.
     #[test]
     fn test_compute_score_deterministic() {
