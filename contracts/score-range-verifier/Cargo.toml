@@ -10,5 +10,14 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 soroban-sdk = { workspace = true }
 
+[build-dependencies]
+ark-bls12-381 = "0.4"
+ark-serialize = "0.4"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
+ark-bls12-381 = "0.4"
+ark-ff = "0.4"
+ark-serialize = "0.4"
+ark-std = "0.4"
+zk-circuit = { path = "../../zk/circuit" }

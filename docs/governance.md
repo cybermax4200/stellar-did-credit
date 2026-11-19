@@ -411,13 +411,15 @@ Events: `WtApplied` with data `(env.ledger().sequence())`.
 
 ### 3.6 Admin-only Config Functions
 
-All three require `admin.require_auth()` AND verify the passed `admin` argument equals the stored `DataKey::Admin` (i.e., you can't pass an arbitrary authorized address — it has to be the actual stored admin).
+Voter and quorum configuration functions require `admin.require_auth()` AND verify the passed `admin` argument equals the stored `DataKey::Admin` (i.e., you can't pass an arbitrary authorized address — it has to be the actual stored admin).
 
 | Function | Signature | Errors |
 |---|---|---|
 | `set_quorum` | `(env, admin, quorum_required: i128) -> Result<()>` | `InvalidQuorum` if <= 0; `NotAuthorized` if caller mismatch. |
 | `register_voter` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight <= 0; `NotAuthorized`. |
 | `update_voter_weight` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight < 0; `NotAuthorized`. Passing weight = 0 deletes the VoterWeight key (same as deregister). |
+| `batch_register_voters` | `(env, admin, entries: Vec<VoterWeightEntry>) -> Result<()>` | `NotAuthorized`, `InvalidVoteWeight` if any weight <= 0, or `VoterBatchTooLarge` above 50 entries. |
+| `batch_update_voter_weights` | `(env, admin, entries: Vec<VoterWeightEntry>) -> Result<()>` | `NotAuthorized`, `InvalidVoteWeight` if any weight < 0, or `VoterBatchTooLarge` above 50 entries. |
 | `deregister_voter` | `(env, admin, voter: Address) -> Result<()>` | `NotAuthorized`. |
 | `accept_oracle_admin` | `(env) -> Result<()>` | `NotAuthorized` if gov admin missing or credit-oracle missing. Requires admin signer. |
 
@@ -425,6 +427,8 @@ Events:
 - `VoterReg(voter_addr)` with data `weight`
 - `VoterUpd(voter_addr)` with data `new_weight`
 - `VoterDer(voter_addr)` with unit data
+
+Each `VoterWeightEntry` contains `voter: Address` and `weight: i128`. Batch calls accept an empty list and process entries in order: if an address occurs more than once, the last entry sets its final weight. Registration replaces an existing weight; updates can also add an address and a zero weight removes it. A batch emits the same per-entry events as the corresponding single-voter operation. If any entry is invalid, the entire batch fails without applying changes. The limit counts entries, including duplicates.
 
 **Note on updating voter weights mid-proposal:** If the admin calls `update_voter_weight` for a voter who has already partially voted on a proposal, the registered-total check in the next `vote` call uses the *new* total, but the used-weight counter is already persisted. This means:
 
