@@ -7,7 +7,7 @@ mod tests {
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
-    use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
+    use revocation_registry::{RevocationReason, RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
         contract, contractimpl, symbol_short,
         testutils::{Address as _, Events, Ledger as _},
@@ -608,6 +608,60 @@ mod tests {
             identity.list_revoked_for_subject(&subject),
             soroban_sdk::vec![&env, vc_hash.clone()]
         );
+    }
+
+    #[test]
+    fn test_revocation_reason_codes_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let default_hash = BytesN::from_array(&env, &[124u8; 32]);
+        let reason_hash = BytesN::from_array(&env, &[125u8; 32]);
+
+        revocation.initialize(&admin);
+        env.events().all();
+
+        revocation.revoke(&issuer, &subject, &default_hash);
+        assert_eq!(
+            revocation.get_revocation_reason(&default_hash),
+            Some(RevocationReason::Unspecified as u32)
+        );
+
+        revocation.revoke_with_reason(
+            &issuer,
+            &subject,
+            &reason_hash,
+            &(RevocationReason::Superseded as u32),
+        );
+        let events = env.events().all();
+        assert_eq!(
+            revocation.get_revocation_reason(&reason_hash),
+            Some(RevocationReason::Superseded as u32)
+        );
+
+        let mut found_reason_event = false;
+        for i in 0..events.len() {
+            let (_, topics, data) = events.get(i).unwrap();
+            if topics.len() != 1 {
+                continue;
+            }
+            let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+            if topic != symbol_short!("Revoked") {
+                continue;
+            }
+            let (_, event_hash, event_reason): (Address, BytesN<32>, u32) =
+                data.try_into_val(&env).unwrap();
+            if event_hash == reason_hash {
+                assert_eq!(event_reason, RevocationReason::Superseded as u32);
+                found_reason_event = true;
+            }
+        }
+        assert!(found_reason_event);
     }
 
     #[test]

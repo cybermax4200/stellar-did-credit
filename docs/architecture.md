@@ -127,7 +127,9 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | Function                          | Caller   | Description                                   |
 | --------------------------------- | -------- | --------------------------------------------- |
 | `initialize(admin)`               | deployer | Sets the contract administrator               |
-| `revoke(issuer, subject, vc_hash)` | issuer   | Marks a VC hash as revoked (issuer authority enforced per `vc_hash`); forwards `subject` to the linked identity-oracle |
+| `revoke(issuer, subject, vc_hash)` | issuer   | Marks a VC hash as revoked with reason `0` (Unspecified); forwards `subject` to the linked identity-oracle |
+| `revoke_with_reason(issuer, subject, vc_hash, reason)` | issuer | Records a standard revocation reason code (`0`–`4`) and emits it in the `Revoked` event |
+| `get_revocation_reason(vc_hash)` | anyone | Returns the recorded reason code (`0` for legacy revoked entries), or `None` if the VC is not revoked |
 | `batch_revoke(issuer, vc_hashes)` | issuer   | Revokes multiple VC hashes in one transaction (issuer authority enforced per `vc_hash`) |
 
 | `is_revoked(vc_hash)`             | anyone   | Returns true if the hash has been revoked     |
@@ -140,6 +142,7 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 | `Status(BytesN<32>)`     | `bool`    | Persistent — revocation flag for a VC hash  |
 | `RegisteredVCIssuer(BytesN<32>)` | `Address` | Persistent — authority that is allowed to revoke this hash (first issuer wins) |
 | `IssuerOfVC(BytesN<32>)` | `Address` | Persistent — which issuer performed the latest revoke call for this hash |
+| `RevocationReason(BytesN<32>)` | `u32` | Persistent — standard reason code for the revocation (`0` Unspecified through `4` Cessation of Operation) |
 
 
 ---
