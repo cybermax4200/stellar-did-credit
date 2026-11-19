@@ -953,6 +953,14 @@ impl CreditOracle {
             PERS_TTL_THRESHOLD,
             PERS_TTL_EXTEND,
         );
+        env.events().publish(
+            (Symbol::new(&env, "TxStatsUpdated"), subject, feeder),
+            (
+                stats.volume_30d,
+                stats.tx_count_30d,
+                stats.avg_counterparties,
+            ),
+        );
         Ok(())
     }
 
@@ -1019,11 +1027,15 @@ impl CreditOracle {
         apply_repayment(
             &env,
             &RepaymentEntry {
-                subject,
+                subject: subject.clone(),
                 amount,
                 on_time,
             },
             current_version,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "RepaymentRecorded"), subject, lender),
+            (amount, on_time),
         );
         increment_repayments_recorded(&env, 1);
         Ok(())
@@ -3156,6 +3168,136 @@ mod tests {
 
         let zero_result = client.try_record_repayment(&lender, &subject, &0, &true);
         assert_eq!(zero_result, Err(Ok(CreditOracleError::InvalidAmount)));
+    }
+
+    #[test]
+    fn test_record_repayment_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        // Clear setup events so only the repayment event is inspected.
+        env.events().all();
+
+        client.record_repayment(&lender, &subject, &1_000, &true);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+        assert_eq!(
+            topics.len(),
+            3,
+            "expected event name, subject, and lender topics"
+        );
+
+        let topic_sym: Symbol = topics
+            .get(0)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(
+            topic_sym,
+            Symbol::new(&env, "RepaymentRecorded"),
+            "expected RepaymentRecorded topic"
+        );
+
+        let event_subject: Address = topics
+            .get(1)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("subject topic should be an Address");
+        assert_eq!(event_subject, subject, "event subject mismatch");
+
+        let event_lender: Address = topics
+            .get(2)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("lender topic should be an Address");
+        assert_eq!(event_lender, lender, "event lender mismatch");
+
+        let (event_amount, event_on_time): (i128, bool) = data
+            .try_into_val(&env)
+            .expect("data should be (i128, bool)");
+        assert_eq!(event_amount, 1_000, "event amount mismatch");
+        assert!(event_on_time, "event on_time mismatch");
+    }
+
+    #[test]
+    fn test_update_tx_stats_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Clear setup events so only the stats event is inspected.
+        env.events().all();
+
+        let stats = TxStats {
+            volume_30d: 5_000_000,
+            tx_count_30d: 42,
+            avg_counterparties: 7,
+        };
+        client.update_tx_stats(&feeder, &subject, &stats);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+        assert_eq!(
+            topics.len(),
+            3,
+            "expected event name, subject, and feeder topics"
+        );
+
+        let topic_sym: Symbol = topics
+            .get(0)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(
+            topic_sym,
+            Symbol::new(&env, "TxStatsUpdated"),
+            "expected TxStatsUpdated topic"
+        );
+
+        let event_subject: Address = topics
+            .get(1)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("subject topic should be an Address");
+        assert_eq!(event_subject, subject, "event subject mismatch");
+
+        let event_feeder: Address = topics
+            .get(2)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("feeder topic should be an Address");
+        assert_eq!(event_feeder, feeder, "event feeder mismatch");
+
+        let (event_volume, event_tx_count, event_avg): (i128, u32, u32) = data
+            .try_into_val(&env)
+            .expect("data should be (i128, u32, u32)");
+        assert_eq!(event_volume, 5_000_000, "event volume_30d mismatch");
+        assert_eq!(event_tx_count, 42, "event tx_count_30d mismatch");
+        assert_eq!(event_avg, 7, "event avg_counterparties mismatch");
     }
 
     #[test]
