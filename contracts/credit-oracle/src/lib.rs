@@ -248,9 +248,14 @@ pub fn compute_score_pure(
         .saturating_add(repay_score.saturating_mul(repayment_weight as u128))
         .saturating_div(100);
 
-    let score = (MIN_SCORE as u128)
-        .saturating_add(composite.saturating_mul(550).saturating_div(100));
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let score =
+        (MIN_SCORE as u128).saturating_add(composite.saturating_mul(550).saturating_div(100));
+    let mut score = score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
+    // Issue #1167: subjects with repayment history never decay below the floor.
+    if total_count > 0 {
+        score = score.max(decay_floor_score.min(MAX_SCORE));
+    }
+    score
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -1303,16 +1308,12 @@ impl CreditOracle {
         // is never computed, so the per-VC arithmetic below is identical to the
         // pre-#530 code path.
         let recency_config = load_recency_config(&env);
-        let decay_floor_score = if recency_config.enabled
-            && env
-                .storage()
-                .instance()
-                .has(&DataKey::IdentityOracleId)
-        {
-            recency_config.decay_floor_score
-        } else {
-            MIN_SCORE
-        };
+        let decay_floor_score =
+            if recency_config.enabled && env.storage().instance().has(&DataKey::IdentityOracleId) {
+                recency_config.decay_floor_score
+            } else {
+                MIN_SCORE
+            };
         let recency = if recency_config.enabled {
             Some(recency_config)
         } else {
@@ -2066,8 +2067,7 @@ mod tests {
 
     #[test]
     fn test_compute_score_pure_applies_decay_floor_only_with_repayment_history() {
-        let score_with_history =
-            compute_score_pure(0, 0, 0, 0, 1, 0, 40, 30, 30, 600);
+        let score_with_history = compute_score_pure(0, 0, 0, 0, 1, 0, 40, 30, 30, 600);
         assert_eq!(score_with_history, 600);
 
         let score_without_history = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, 600);
@@ -2076,22 +2076,54 @@ mod tests {
 
     #[test]
     fn test_scoring_spec_example_2_moderate_scores_569() {
-        let score = compute_score_pure(60, 3_000_000_000, 0, 8, 10, 3_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            60,
+            3_000_000_000,
+            0,
+            8,
+            10,
+            3_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 569);
     }
 
     #[test]
     fn test_scoring_spec_example_3_strong_scores_817() {
-        let score = compute_score_pure(100, 8_000_000_000, 0, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            8_000_000_000,
+            0,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 817);
     }
 
     #[test]
     fn test_scoring_spec_perfect_scores_850() {
-        let score =
-            compute_score_pure(100, 10_000_000_000, 100, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            10_000_000_000,
+            100,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 850);
     }
@@ -2100,8 +2132,8 @@ mod tests {
     fn test_compute_score_pure_u32_max_counterparties_is_clamped_to_bonus_cap() {
         // counterparty_bonus = min(avg_counterparties / 5, 20); at 100 the cap is
         // already reached, so `u32::MAX` must yield exactly the same score.
-        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30);
-        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(at_cap, at_max);
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2112,12 +2144,13 @@ mod tests {
         // volume_score = min(volume_30d / 1e8, 80). `u32::MAX` raw units is 42
         // units — below the 80-unit cap — so it must match the equivalent
         // explicit unit count, while `i128::MAX` saturates the cap at 80.
-        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_units = compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_units =
+            compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_max, at_units);
 
-        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_cap, at_i128_max);
 
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2138,6 +2171,7 @@ mod tests {
             u32::MAX,
             u32::MAX,
             u32::MAX,
+            MIN_SCORE,
         );
 
         assert!(
@@ -2151,7 +2185,18 @@ mod tests {
     fn test_compute_score_pure_negative_and_zero_inputs_do_not_panic() {
         // i128::MIN volumes and a zero repayment divisor (no repayment history)
         // are the other malformed-edge shapes the scoring path must survive.
-        let score = compute_score_pure(0, i128::MIN, 0, u32::MAX, 0, i128::MIN, 40, 30, 30);
+        let score = compute_score_pure(
+            0,
+            i128::MIN,
+            0,
+            u32::MAX,
+            0,
+            i128::MIN,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert!(
             (MIN_SCORE..=MAX_SCORE).contains(&score),
@@ -4439,13 +4484,7 @@ mod tests {
 
         let before = client.compute_score(&user);
 
-        client.set_recency_decay(
-            &admin,
-            &true,
-            &5,
-            &5_000,
-            &DEFAULT_DECAY_FLOOR_SCORE,
-        );
+        client.set_recency_decay(&admin, &true, &5, &5_000, &DEFAULT_DECAY_FLOOR_SCORE);
         // Age the ledger by 5 years and recompute.
         env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
         env.ledger()

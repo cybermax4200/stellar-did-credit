@@ -127,31 +127,21 @@ impl ScoreCircuit {
 }
 
 impl ConstraintSynthesizer<Fr> for ScoreCircuit {
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<Fr>,
-    ) -> Result<(), SynthesisError> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let w = self.witness.as_ref();
 
         // ---- Public inputs ----
-        let threshold = FpVar::new_input(cs.clone(), || {
-            Ok(Fr::from(self.public_inputs.threshold))
-        })?;
-        let _subject = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.subject)
-        })?;
-        let _credit_oracle_id = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.credit_oracle_id)
-        })?;
-        let commitment = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.score_commitment)
-        })?;
+        let threshold =
+            FpVar::new_input(cs.clone(), || Ok(Fr::from(self.public_inputs.threshold)))?;
+        let _subject = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.subject))?;
+        let _credit_oracle_id =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.credit_oracle_id))?;
+        let commitment = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.score_commitment))?;
         let _snapshot_ledger = FpVar::new_input(cs.clone(), || {
             Ok(Fr::from(self.public_inputs.snapshot_ledger))
         })?;
-        let _domain_separator = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.domain_separator)
-        })?;
+        let _domain_separator =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.domain_separator))?;
 
         // ---- Private witness ----
         let score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.score).unwrap_or(0)))?;
@@ -162,76 +152,56 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         let avg_counterparties = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.avg_counterparties).unwrap_or(0))
         })?;
-        let repayment_rate = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repayment_rate).unwrap_or(0))
-        })?;
-        let last_updated = UInt64::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.last_updated).unwrap_or(0))
-        })?;
+        let repayment_rate =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repayment_rate).unwrap_or(0)))?;
+        let last_updated =
+            UInt64::new_witness(cs.clone(), || Ok(w.map(|w| w.last_updated).unwrap_or(0)))?;
         let computed_at_ledger = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.computed_at_ledger).unwrap_or(0))
         })?;
         let stale = Boolean::new_witness(cs.clone(), || Ok(w.map(|w| w.stale).unwrap_or(false)))?;
 
         // Raw scoring inputs
-        let vc_points = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_points).unwrap_or(0))
-        })?;
-        let on_time_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.on_time_count).unwrap_or(0))
-        })?;
-        let total_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.total_count).unwrap_or(0))
-        })?;
+        let vc_points =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_points).unwrap_or(0)))?;
+        let on_time_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.on_time_count).unwrap_or(0)))?;
+        let total_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.total_count).unwrap_or(0)))?;
         let total_repaid = UInt64::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.total_repaid.max(0) as u64).unwrap_or(0))
         })?;
-        let vc_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_weight).unwrap_or(0))
-        })?;
-        let tx_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_weight).unwrap_or(0))
-        })?;
+        let vc_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_weight).unwrap_or(0)))?;
+        let tx_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_weight).unwrap_or(0)))?;
         let repayment_weight = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_weight).unwrap_or(0))
         })?;
 
         // Intermediate values
-        let vc_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_score).unwrap_or(0))
-        })?;
-        let volume_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.volume_score).unwrap_or(0))
-        })?;
+        let vc_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_score).unwrap_or(0)))?;
+        let volume_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.volume_score).unwrap_or(0)))?;
         let counterparty_bonus = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.counterparty_bonus).unwrap_or(0))
         })?;
-        let tx_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_score).unwrap_or(0))
-        })?;
+        let tx_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_score).unwrap_or(0)))?;
         let repayment_rate_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_rate_score).unwrap_or(0))
         })?;
         let repayment_volume_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_volume_score).unwrap_or(0))
         })?;
-        let repay_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repay_score).unwrap_or(0))
-        })?;
-        let composite = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.composite).unwrap_or(0))
-        })?;
+        let repay_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repay_score).unwrap_or(0)))?;
+        let composite =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.composite).unwrap_or(0)))?;
 
         // Integer-division quotients
-        let q_volume = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_volume).unwrap_or(0))
-        })?;
-        let q_cp = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_cp).unwrap_or(0))
-        })?;
-        let q_rv = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_rv).unwrap_or(0))
-        })?;
+        let q_volume = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_volume).unwrap_or(0)))?;
+        let q_cp = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_cp).unwrap_or(0)))?;
+        let q_rv = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_rv).unwrap_or(0)))?;
 
         let blinding = FpVar::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.blinding).unwrap_or(Fr::from(0u32)))

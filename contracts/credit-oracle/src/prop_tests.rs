@@ -136,6 +136,7 @@ fn prop_perfect_inputs_yields_max_score() {
         40,
         30,
         30,
+        MIN_SCORE,
     );
     assert_eq!(
         score, MAX_SCORE,
@@ -449,6 +450,7 @@ proptest! {
         total_count         in extreme_u32(),
         total_repaid        in extreme_i128(),
         (vc_w, tx_w, repay_w) in valid_weights(),
+        MIN_SCORE,
     ) {
         let score = compute_score_pure(
             vc_points, volume_30d, avg_counterparties,
