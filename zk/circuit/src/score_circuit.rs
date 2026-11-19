@@ -32,6 +32,10 @@ pub struct ScorePublicInputs {
     pub snapshot_ledger: u32,
     /// Domain separator.
     pub domain_separator: Fr,
+    /// Current timestamp in seconds (verifier time).
+    pub current_timestamp: u64,
+    /// Maximum validity window in seconds.
+    pub max_validity_window: u64,
 }
 
 /// Private witness for the circuit.
@@ -46,6 +50,8 @@ pub struct ScoreWitness {
     pub last_updated: u64,
     pub computed_at_ledger: u32,
     pub stale: bool,
+    /// Timestamp when the score was recorded (seconds).
+    pub score_timestamp: u64,
     // Raw scoring inputs
     pub vc_points: u32,
     pub on_time_count: u32,
@@ -86,6 +92,7 @@ impl Default for ScoreWitness {
             last_updated: 0,
             computed_at_ledger: 0,
             stale: false,
+            score_timestamp: 0,
             vc_points: 0,
             on_time_count: 0,
             total_count: 0,
@@ -127,30 +134,26 @@ impl ScoreCircuit {
 }
 
 impl ConstraintSynthesizer<Fr> for ScoreCircuit {
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<Fr>,
-    ) -> Result<(), SynthesisError> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let w = self.witness.as_ref();
 
         // ---- Public inputs ----
-        let threshold = FpVar::new_input(cs.clone(), || {
-            Ok(Fr::from(self.public_inputs.threshold))
-        })?;
-        let _subject = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.subject)
-        })?;
-        let _credit_oracle_id = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.credit_oracle_id)
-        })?;
-        let commitment = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.score_commitment)
-        })?;
+        let threshold =
+            FpVar::new_input(cs.clone(), || Ok(Fr::from(self.public_inputs.threshold)))?;
+        let _subject = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.subject))?;
+        let _credit_oracle_id =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.credit_oracle_id))?;
+        let commitment = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.score_commitment))?;
         let _snapshot_ledger = FpVar::new_input(cs.clone(), || {
             Ok(Fr::from(self.public_inputs.snapshot_ledger))
         })?;
-        let _domain_separator = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.domain_separator)
+        let _domain_separator =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.domain_separator))?;
+        let current_timestamp = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.current_timestamp))
+        })?;
+        let max_validity_window = FpVar::new_input(cs.clone(), || {
+            Ok(Fr::from(self.public_inputs.max_validity_window))
         })?;
 
         // ---- Private witness ----
@@ -162,76 +165,58 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         let avg_counterparties = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.avg_counterparties).unwrap_or(0))
         })?;
-        let repayment_rate = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repayment_rate).unwrap_or(0))
-        })?;
-        let last_updated = UInt64::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.last_updated).unwrap_or(0))
-        })?;
+        let repayment_rate =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repayment_rate).unwrap_or(0)))?;
+        let last_updated =
+            UInt64::new_witness(cs.clone(), || Ok(w.map(|w| w.last_updated).unwrap_or(0)))?;
         let computed_at_ledger = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.computed_at_ledger).unwrap_or(0))
         })?;
         let stale = Boolean::new_witness(cs.clone(), || Ok(w.map(|w| w.stale).unwrap_or(false)))?;
+        let score_timestamp =
+            UInt64::new_witness(cs.clone(), || Ok(w.map(|w| w.score_timestamp).unwrap_or(0)))?;
 
         // Raw scoring inputs
-        let vc_points = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_points).unwrap_or(0))
-        })?;
-        let on_time_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.on_time_count).unwrap_or(0))
-        })?;
-        let total_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.total_count).unwrap_or(0))
-        })?;
+        let vc_points =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_points).unwrap_or(0)))?;
+        let on_time_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.on_time_count).unwrap_or(0)))?;
+        let total_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.total_count).unwrap_or(0)))?;
         let total_repaid = UInt64::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.total_repaid.max(0) as u64).unwrap_or(0))
         })?;
-        let vc_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_weight).unwrap_or(0))
-        })?;
-        let tx_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_weight).unwrap_or(0))
-        })?;
+        let vc_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_weight).unwrap_or(0)))?;
+        let tx_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_weight).unwrap_or(0)))?;
         let repayment_weight = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_weight).unwrap_or(0))
         })?;
 
         // Intermediate values
-        let vc_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_score).unwrap_or(0))
-        })?;
-        let volume_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.volume_score).unwrap_or(0))
-        })?;
+        let vc_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_score).unwrap_or(0)))?;
+        let volume_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.volume_score).unwrap_or(0)))?;
         let counterparty_bonus = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.counterparty_bonus).unwrap_or(0))
         })?;
-        let tx_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_score).unwrap_or(0))
-        })?;
+        let tx_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_score).unwrap_or(0)))?;
         let repayment_rate_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_rate_score).unwrap_or(0))
         })?;
         let repayment_volume_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_volume_score).unwrap_or(0))
         })?;
-        let repay_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repay_score).unwrap_or(0))
-        })?;
-        let composite = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.composite).unwrap_or(0))
-        })?;
+        let repay_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repay_score).unwrap_or(0)))?;
+        let composite =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.composite).unwrap_or(0)))?;
 
         // Integer-division quotients
-        let q_volume = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_volume).unwrap_or(0))
-        })?;
-        let q_cp = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_cp).unwrap_or(0))
-        })?;
-        let q_rv = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_rv).unwrap_or(0))
-        })?;
+        let q_volume = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_volume).unwrap_or(0)))?;
+        let q_cp = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_cp).unwrap_or(0)))?;
+        let q_rv = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_rv).unwrap_or(0)))?;
 
         let blinding = FpVar::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.blinding).unwrap_or(Fr::from(0u32)))
@@ -455,6 +440,22 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         acc += blinding;
         acc.enforce_equal(&commitment)?;
 
+        // ---- Constraint 12: Timestamp freshness ----
+        // 1. score_timestamp <= current_timestamp
+        // 2. current_timestamp - score_timestamp <= max_validity_window
+        let score_ts_fp = uint64_to_fp(&score_timestamp);
+        let diff_curr = current_timestamp - score_ts_fp.clone();
+        let diff_curr_bits = diff_curr.to_bits_le()?;
+        for b in diff_curr_bits.iter().skip(64) {
+            b.enforce_equal(&Boolean::constant(false))?;
+        }
+
+        let diff_window = max_validity_window - diff_curr;
+        let diff_window_bits = diff_window.to_bits_le()?;
+        for b in diff_window_bits.iter().skip(64) {
+            b.enforce_equal(&Boolean::constant(false))?;
+        }
+
         Ok(())
     }
 }
@@ -464,14 +465,8 @@ mod tests {
     use super::*;
     use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
 
-    #[test]
-    fn circuit_satisfied_for_valid_witness() {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        cs.set_mode(SynthesisMode::Prove {
-            construct_matrices: true,
-        });
-
-        let w = ScoreWitness {
+    fn make_test_witness() -> ScoreWitness {
+        ScoreWitness {
             score: 668,
             vc_count: 10,
             tx_volume_30d: 50_000_000_000,
@@ -480,6 +475,7 @@ mod tests {
             last_updated: 1_700_000_000,
             computed_at_ledger: 1234567,
             stale: false,
+            score_timestamp: 1_700_000_000,
             vc_points: 50,
             on_time_count: 50,
             total_count: 100,
@@ -501,9 +497,14 @@ mod tests {
             total_count_is_zero: false,
             total_count_inv: 0,
             blinding: Fr::from(42u32),
-        };
+        }
+    }
 
-        // Compute the commitment.
+    fn make_test_public_inputs(
+        w: &ScoreWitness,
+        current_ts: u64,
+        max_window: u64,
+    ) -> ScorePublicInputs {
         let scheme = PedersenCommitment::new(CIRCUIT_DOMAIN);
         let fields = [
             Fr::from(w.score),
@@ -517,18 +518,107 @@ mod tests {
         ];
         let commitment = scheme.commit(&fields, w.blinding);
 
-        let circuit = ScoreCircuit::new(
-            Some(w),
-            ScorePublicInputs {
-                threshold: 600,
-                subject: Fr::from(1u32),
-                credit_oracle_id: Fr::from(2u32),
-                score_commitment: commitment,
-                snapshot_ledger: 12345,
-                domain_separator: Fr::from(3u32),
-            },
-        );
+        ScorePublicInputs {
+            threshold: 600,
+            subject: Fr::from(1u32),
+            credit_oracle_id: Fr::from(2u32),
+            score_commitment: commitment,
+            snapshot_ledger: 12345,
+            domain_separator: Fr::from(3u32),
+            current_timestamp: current_ts,
+            max_validity_window: max_window,
+        }
+    }
+
+    #[test]
+    fn circuit_satisfied_for_valid_witness() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_100, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
         circuit.generate_constraints(cs.clone()).unwrap();
         assert!(cs.is_satisfied().unwrap());
+    }
+
+    #[test]
+    fn test_timestamp_freshness_exact_window_boundary() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        // exactly at boundary: current_timestamp - score_timestamp == max_validity_window
+        let public_inputs = make_test_public_inputs(&w, 1_700_003_600, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "score exactly at max_validity_window must be satisfied"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_zero_age() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        // zero age: current_timestamp == score_timestamp
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_000, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            cs.is_satisfied().unwrap(),
+            "score with zero age must be satisfied"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_fails_one_second_over_window() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let w = make_test_witness();
+        // 1 second over window: 3601 > 3600
+        let public_inputs = make_test_public_inputs(&w, 1_700_003_601, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "score older than max_validity_window must fail constraint check"
+        );
+    }
+
+    #[test]
+    fn test_timestamp_freshness_fails_future_score() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+
+        let mut w = make_test_witness();
+        // future score: score_timestamp > current_timestamp
+        w.score_timestamp = 1_700_000_005;
+        let public_inputs = make_test_public_inputs(&w, 1_700_000_000, 3600);
+
+        let circuit = ScoreCircuit::new(Some(w), public_inputs);
+        circuit.generate_constraints(cs.clone()).unwrap();
+        assert!(
+            !cs.is_satisfied().unwrap(),
+            "score timestamp in the future must fail constraint check"
+        );
     }
 }
