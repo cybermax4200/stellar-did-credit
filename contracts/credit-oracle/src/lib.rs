@@ -4,8 +4,8 @@ pub use credit_oracle_types::{
     PendingWeightsRecord, ScoringWeights,
 };
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
-    Symbol, TryFromVal, Val, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, IntoVal,
+    String, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -98,6 +98,14 @@ pub enum DataKey {
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
+    /// Escrowed bond paid for a specific pending dispute
+    DisputeBond(Address, Symbol),
+    /// Bond amount (in `DisputeBondToken`) required to file a dispute.
+    /// Zero (the default) disables bonds.
+    DisputeBondAmount,
+    /// SEP-41 token contract used to collect and refund dispute bonds
+    /// (typically the native XLM Stellar Asset Contract).
+    DisputeBondToken,
     /// Whether the contract is currently paused for writes.
     Paused,
     /// Issue #530: whether VC recency decay is applied inside `compute_score`.
@@ -439,6 +447,22 @@ pub struct DisputeRecord {
     pub filed_at_ledger: u32,
     /// Current resolution status.
     pub status: DisputeStatus,
+}
+
+/// Escrowed bond recorded for a pending dispute.
+///
+/// Stored separately from [`DisputeRecord`] so the bond can be refunded using
+/// the exact token and amount that were paid, even if the admin later changes
+/// the bond configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeBondRecord {
+    /// Token contract the bond was paid in.
+    pub token: Address,
+    /// Amount escrowed.
+    pub amount: i128,
+    /// Subject that paid the bond and receives the refund if accepted.
+    pub depositor: Address,
 }
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
@@ -1926,6 +1950,94 @@ impl CreditOracle {
         active
     }
 
+    /// Set the dispute bond amount, denominated in the configured bond token.
+    ///
+    /// When non-zero, `flag_score_input` escrows this amount from the subject
+    /// before recording the dispute. Accepted disputes refund the bond;
+    /// rejected disputes forfeit it to the contract. Set to `0` to disable
+    /// bonds entirely (the default).
+    ///
+    /// A positive amount requires `set_dispute_bond_token` to have configured a
+    /// token contract first.
+    ///
+    /// Auth: admin only.
+    pub fn set_dispute_bond(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if amount < 0 {
+            return Err(CreditOracleError::InvalidDisputeBondAmount);
+        }
+        if amount > 0 && !env.storage().instance().has(&DataKey::DisputeBondToken) {
+            return Err(CreditOracleError::DisputeBondTokenNotConfigured);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeBondAmount, &amount);
+        Ok(())
+    }
+
+    /// Return the configured dispute bond amount. `0` means bonds are disabled.
+    pub fn get_dispute_bond(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(0)
+    }
+
+    /// Configure the SEP-41 token contract used to collect dispute bonds.
+    ///
+    /// For XLM, pass the Stellar Asset Contract (SAC) address of the native
+    /// asset. Changing the token does not affect bonds already escrowed for
+    /// pending disputes, because each bond records the token it was paid in.
+    ///
+    /// Auth: admin only.
+    pub fn set_dispute_bond_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeBondToken, &token);
+        Ok(())
+    }
+
+    /// Return the configured dispute bond token, if any.
+    pub fn get_dispute_bond_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::DisputeBondToken)
+    }
+
+    /// Return the escrowed bond for a `(subject, input_key)` dispute, if paid.
+    pub fn get_dispute_bond_record(
+        env: Env,
+        subject: Address,
+        input_key: Symbol,
+    ) -> Option<DisputeBondRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeBond(subject, input_key))
+    }
+
     /// Flag a specific score input as potentially incorrect.
     ///
     /// The subject authenticates themselves and names which of the three score
@@ -1967,6 +2079,22 @@ impl CreditOracle {
             }
         }
 
+        let bond_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(0);
+        let bond_token: Option<Address> = if bond_amount > 0 {
+            Some(
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DisputeBondToken)
+                    .ok_or(CreditOracleError::DisputeBondTokenNotConfigured)?,
+            )
+        } else {
+            None
+        };
+
         let record = DisputeRecord {
             subject: subject.clone(),
             input_key: input_key.clone(),
@@ -2001,6 +2129,27 @@ impl CreditOracle {
             env.storage()
                 .persistent()
                 .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
+
+        // Escrow the bond after the dispute is recorded so a reentrant token
+        // contract cannot file the same dispute twice. A failed transfer panics
+        // and reverts the whole invocation, including the stored record.
+        if let Some(token_id) = bond_token {
+            let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+            let bond = DisputeBondRecord {
+                token: token_id.clone(),
+                amount: bond_amount,
+                depositor: subject.clone(),
+            };
+            env.storage().persistent().set(&bond_key, &bond);
+            env.storage()
+                .persistent()
+                .extend_ttl(&bond_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            token::TokenClient::new(&env, &token_id).transfer(
+                &subject,
+                &env.current_contract_address(),
+                &bond_amount,
+            );
         }
 
         env.events()
@@ -2051,6 +2200,25 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        // Settle any escrowed bond. Accepted disputes refund the depositor;
+        // rejected disputes forfeit the bond to the contract. The escrow record
+        // is removed either way so it can never be refunded twice.
+        let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+        if let Some(bond) = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeBondRecord>(&bond_key)
+        {
+            if accepted {
+                token::TokenClient::new(&env, &bond.token).transfer(
+                    &env.current_contract_address(),
+                    &bond.depositor,
+                    &bond.amount,
+                );
+            }
+            env.storage().persistent().remove(&bond_key);
+        }
 
         if accepted {
             // DsptRslv signals feeders to re-fetch and correct the flagged input.
@@ -2136,6 +2304,7 @@ mod tests {
     // from `credit-oracle-types` at the crate root.
     use identity_oracle::IdentityOracle;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::token::{StellarAssetClient, TokenClient};
     use soroban_sdk::TryIntoVal;
 
     #[test]
@@ -4167,6 +4336,194 @@ mod tests {
         assert_eq!(record.input_key, input_key);
         assert_eq!(record.status, DisputeStatus::Pending);
         assert_eq!(record.filed_at_ledger, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_dispute_bond_admin_setter_validates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Bonds are disabled by default.
+        assert_eq!(client.get_dispute_bond(), 0);
+        assert!(client.get_dispute_bond_token().is_none());
+
+        assert_eq!(
+            client.try_set_dispute_bond(&non_admin, &1),
+            Err(Ok(CreditOracleError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_set_dispute_bond(&admin, &-1),
+            Err(Ok(CreditOracleError::InvalidDisputeBondAmount))
+        );
+        // Enabling a positive bond before configuring a token is rejected.
+        assert_eq!(
+            client.try_set_dispute_bond(&admin, &100),
+            Err(Ok(CreditOracleError::DisputeBondTokenNotConfigured))
+        );
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        assert_eq!(
+            client.try_set_dispute_bond_token(&non_admin, &token_id),
+            Err(Ok(CreditOracleError::NotAuthorized))
+        );
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        assert_eq!(client.get_dispute_bond(), 100);
+        assert_eq!(client.get_dispute_bond_token(), Some(token_id));
+    }
+
+    #[test]
+    fn test_flag_score_input_escrows_bond_and_refunds_on_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "tx_stats");
+        let reason = String::from_str(&env, "wrong volume");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Bond moved from the subject to the contract.
+        assert_eq!(token.balance(&subject), 900);
+        assert_eq!(token.balance(&contract_id), 100);
+        let bond = client
+            .get_dispute_bond_record(&subject, &input_key)
+            .expect("bond should be escrowed");
+        assert_eq!(bond.token, token_id);
+        assert_eq!(bond.amount, 100);
+        assert_eq!(bond.depositor, subject);
+
+        // Accepted dispute refunds the bond and clears the escrow record.
+        client.resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_rejected_dispute_forfeits_bond() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &500);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "repayment");
+        let reason = String::from_str(&env, "counts look wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(token.balance(&subject), 400);
+
+        // Rejected dispute forfeits the bond: the tokens stay in the contract.
+        client.resolve_dispute(&subject, &input_key, &false);
+        assert_eq!(token.balance(&subject), 400);
+        assert_eq!(token.balance(&contract_id), 100);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_dispute_bond_zero_disables_escrow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &0);
+
+        let input_key = Symbol::new(&env, "vc_count");
+        let reason = String::from_str(&env, "count mismatch");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_pending_bond_refund_uses_original_amount_after_config_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "tx_stats");
+        let reason = String::from_str(&env, "stale volume");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Raising the bond after filing must not change the pending refund.
+        client.set_dispute_bond(&admin, &250);
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
     }
 
     #[test]
