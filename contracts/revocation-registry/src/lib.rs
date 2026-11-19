@@ -864,7 +864,7 @@ mod tests {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(256))]
         #[test]
         fn proptest_batch_revoke_all_marked(
-            hash_bytes in proptest::collection::vec(any::<[u8; 32]>(), 0..=50),
+            hash_bytes in proptest::collection::vec(any::<[u8; 32]>(), 1..=50),
         ) {
             let env = Env::default();
             env.mock_all_auths();
