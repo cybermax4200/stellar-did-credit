@@ -24,6 +24,18 @@ pub struct ProtocolStats {
     pub total_repayments_recorded: u64,
 }
 
+/// Protocol-wide aggregate metrics for DeFi protocols and ecosystem dashboards.
+#[contracttype]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
+pub struct ProtocolMetrics {
+    /// Total cumulative transaction volume scored across all unique borrowers.
+    pub total_volume_scored: i128,
+    /// Total number of unique borrowers scored.
+    pub total_borrowers: u64,
+    /// Total count of repayments recorded in the protocol.
+    pub total_repayments_count: u64,
+}
+
 /// Storage keys for the credit oracle contract
 #[contracttype]
 pub enum DataKey {
@@ -52,6 +64,8 @@ pub enum DataKey {
     RepaymentRecord(Address),
     /// Credit score for a user
     Score(Address),
+    /// Bounded history of computed scores for a user
+    ScoreHistory(Address),
     /// Cached VC count for a user
     VcCount(Address),
     /// Stored VC list per user with type tags
@@ -66,6 +80,8 @@ pub enum DataKey {
     ComputeCooldownLedgers,
     /// Aggregate protocol-level counters
     ProtocolStats,
+    /// Protocol-wide aggregate metrics (total volume scored, total borrowers, repayments count)
+    ProtocolMetrics,
     /// Append-only index of every address ever registered as a trusted
     /// feeder. Entries are never removed on deregistration (that would
     /// require an O(n) rewrite on every `deregister_feeder` call) — a
@@ -179,8 +195,14 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
 ///
 /// This function contains no Soroban environment dependencies, making it
 /// suitable for fuzz testing and property-based testing.
-/// Scores for subjects with repayment history are clamped to the configured
-/// decay floor and `MAX_SCORE`; all others are clamped to `[MIN_SCORE, MAX_SCORE]`.
+/// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
+///
+/// Every intermediate step uses saturating arithmetic (or `checked_div` where
+/// the divisor may be zero) so that malformed feeder inputs — `u32::MAX`
+/// counterparty counts, `i128::MAX` volumes, skewed weights — can never panic
+/// under the workspace's `overflow-checks = true` release profile. The inputs
+/// are otherwise clamped (`vc_points`/`volume_score`/`counterparty_bonus`) so
+/// the composite stays far inside the `u128` range even in the worst case.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_score_pure(
     vc_points: u32,
@@ -194,35 +216,53 @@ pub fn compute_score_pure(
     repayment_weight: u32,
     decay_floor_score: u32,
 ) -> u32 {
-    let vc_score = (vc_points).min(100) as u128;
+    // Clamped to 100 before widening, so the later multiply cannot overflow.
+    let vc_score = vc_points.min(100) as u128;
+
+    // `i128` division by a non-zero constant cannot overflow; `max(0)` makes the
+    // widening cast to `u128` lossless for negative (malformed) volumes too.
     let volume_score = ((volume_30d / 100_000_000i128).max(0) as u128).min(80);
-    let counterparty_bonus = (avg_counterparties / 5).min(20) as u128;
-    let tx_score = (volume_score + counterparty_bonus).min(100);
+
+    // `saturating_div` documents the intent: the counterparty term must stay
+    // well-defined for any feeder-supplied `avg_counterparties`, up to and
+    // including `u32::MAX`, before the `min(20)` clamp caps the bonus.
+    let counterparty_bonus = avg_counterparties.saturating_div(5).min(20) as u128;
+    let tx_score = volume_score.saturating_add(counterparty_bonus).min(100);
+
+    // `total_count` may legitimately be 0 (a brand-new subject), so the only
+    // divisor that can be zero uses `checked_div`; the fixed divisors below do
+    // not need it but stay saturating for uniformity.
     let repayment_rate_score = (on_time_count as u128)
         .saturating_mul(10_000)
         .checked_div(total_count as u128)
-        .map(|r| r / 100)
+        .map(|r| r.saturating_div(100))
         .unwrap_or(0);
     let repayment_volume_score = ((total_repaid / 100_000_000i128).max(0) as u128).min(100);
-    let repay_score = (repayment_rate_score + repayment_volume_score) / 2;
-    let composite = (vc_score * vc_weight as u128
-        + tx_score * tx_weight as u128
-        + repay_score * repayment_weight as u128)
-        / 100;
-    let score = MIN_SCORE as u128 + composite.saturating_mul(550) / 100;
-    let score_floor = if total_count > 0 {
-        decay_floor_score.max(MIN_SCORE).min(MAX_SCORE)
-    } else {
-        MIN_SCORE
-    };
-    score.min(MAX_SCORE as u128).max(score_floor as u128) as u32
+    let repay_score = repayment_rate_score
+        .saturating_add(repayment_volume_score)
+        .saturating_div(2);
+
+    let composite = vc_score
+        .saturating_mul(vc_weight as u128)
+        .saturating_add(tx_score.saturating_mul(tx_weight as u128))
+        .saturating_add(repay_score.saturating_mul(repayment_weight as u128))
+        .saturating_div(100);
+
+    let score = (MIN_SCORE as u128)
+        .saturating_add(composite.saturating_mul(550).saturating_div(100));
+    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
 }
 
 /// Number of ledgers after which a score is considered stale.
 /// Roughly 30 days at 5-second ledgers (~86,400 ledgers).
 const STALE_LEDGER_AGE: u32 = 86_400;
 
-fn validate_contract_function<T>(env: &Env, contract_id: &Address, func: Symbol, args: Vec<Val>) -> bool
+fn validate_contract_function<T>(
+    env: &Env,
+    contract_id: &Address,
+    func: Symbol,
+    args: Vec<Val>,
+) -> bool
 where
     T: TryFromVal<Env, Val>,
 {
@@ -285,9 +325,23 @@ pub struct ScoreRecord {
     pub stale: bool,
 }
 
+/// A score computation retained for historical progression queries.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct HistoricalScore {
+    /// Credit score value.
+    pub score: u32,
+    /// Ledger sequence at which the score was computed.
+    pub computed_at_ledger: u32,
+    /// Unix timestamp at which the score was computed.
+    pub computed_at_timestamp: u64,
+}
+
+const MAX_SCORE_HISTORY: u32 = 6;
+
 /// Transaction statistics for a user
 #[contracttype]
-#[derive(Clone)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TxStats {
     /// Total transaction volume in last 30 days
     pub volume_30d: i128,
@@ -295,6 +349,16 @@ pub struct TxStats {
     pub tx_count_30d: u32,
     /// Average number of counterparties
     pub avg_counterparties: u32,
+}
+
+/// A batch entry pairing a subject address with its transaction statistics.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubjectTxStatsEntry {
+    /// Target subject address whose transaction stats are being updated.
+    pub subject: Address,
+    /// 30-day transaction statistics for the subject.
+    pub stats: TxStats,
 }
 
 /// Internal repayment counters for a subject
@@ -369,6 +433,12 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
+/// Instance-storage TTL bump threshold (ledgers).
+const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
+/// Instance-storage TTL bump amount (≈ 29 days at 5 s/ledger).
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+/// Maximum number of entries allowed in a single batch operation.
+pub const MAX_BATCH_SIZE: u32 = 50;
 
 #[contract]
 pub struct CreditOracle;
@@ -382,6 +452,54 @@ fn load_protocol_stats(env: &Env) -> ProtocolStats {
 
 fn save_protocol_stats(env: &Env, stats: &ProtocolStats) {
     env.storage().instance().set(&DataKey::ProtocolStats, stats);
+}
+
+fn load_protocol_metrics(env: &Env) -> ProtocolMetrics {
+    env.storage()
+        .instance()
+        .get(&DataKey::ProtocolMetrics)
+        .unwrap_or_default()
+}
+
+fn save_protocol_metrics(env: &Env, metrics: &ProtocolMetrics) {
+    env.storage()
+        .instance()
+        .set(&DataKey::ProtocolMetrics, metrics);
+}
+
+fn update_protocol_metrics_on_score(env: &Env, volume: i128) {
+    let mut metrics = load_protocol_metrics(env);
+    metrics.total_borrowers = metrics
+        .total_borrowers
+        .checked_add(1)
+        .expect("total_borrowers overflow");
+    if volume > 0 {
+        metrics.total_volume_scored = metrics.total_volume_scored.saturating_add(volume);
+    }
+    save_protocol_metrics(env, &metrics);
+}
+
+fn append_score_history(env: &Env, subject: &Address, score: u32) {
+    let history_key = DataKey::ScoreHistory(subject.clone());
+    let mut history: Vec<HistoricalScore> = env
+        .storage()
+        .persistent()
+        .get(&history_key)
+        .unwrap_or(Vec::new(env));
+
+    while history.len() >= MAX_SCORE_HISTORY {
+        history.remove(0);
+    }
+
+    history.push_back(HistoricalScore {
+        score,
+        computed_at_ledger: env.ledger().sequence(),
+        computed_at_timestamp: env.ledger().timestamp(),
+    });
+    env.storage().persistent().set(&history_key, &history);
+    env.storage()
+        .persistent()
+        .extend_ttl(&history_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 }
 
 /// Read the recency decay configuration from instance storage (issue #530).
@@ -426,7 +544,6 @@ fn ensure_not_paused(env: &Env) -> Result<(), CreditOracleError> {
     } else {
         Ok(())
     }
-
 }
 
 fn increment_subjects_scored(env: &Env) {
@@ -445,6 +562,13 @@ fn increment_repayments_recorded(env: &Env) {
         .checked_add(1)
         .expect("total_repayments_recorded overflow");
     save_protocol_stats(env, &stats);
+
+    let mut metrics = load_protocol_metrics(env);
+    metrics.total_repayments_count = metrics
+        .total_repayments_count
+        .checked_add(1)
+        .expect("total_repayments_count overflow");
+    save_protocol_metrics(env, &metrics);
 }
 
 #[contractimpl]
@@ -474,6 +598,11 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
+        // Keep the instance entry (Admin, Config, singletons) from archiving
+        // after the default instance TTL window.
+        env.storage()
+            .instance()
+            .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
         env.events()
             .publish((Symbol::new(&env, "Initialized"),), admin.clone());
         Ok(())
@@ -481,15 +610,24 @@ impl CreditOracle {
 
     /// Return the number of ledgers a subject must wait between score computations.
     pub fn get_compute_cooldown_ledgers(env: Env) -> u32 {
-        env.storage().instance().get(&DataKey::ComputeCooldownLedgers)
+        env.storage()
+            .instance()
+            .get(&DataKey::ComputeCooldownLedgers)
             .unwrap_or(DEFAULT_COMPUTE_COOLDOWN_LEDGERS)
     }
 
     /// Update the compute-score cooldown. Admin only.
     ///
     /// `ledgers` must be in `1..=86_400`, allowing up to approximately five days.
-    pub fn set_compute_cooldown_ledgers(env: Env, admin: Address, ledgers: u32) -> Result<(), CreditOracleError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+    pub fn set_compute_cooldown_ledgers(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .expect("not initialized");
         if admin != stored_admin {
             return Err(CreditOracleError::NotAuthorized);
@@ -498,8 +636,11 @@ impl CreditOracle {
             return Err(CreditOracleError::InvalidComputeCooldown);
         }
         admin.require_auth();
-        env.storage().instance().set(&DataKey::ComputeCooldownLedgers, &ledgers);
-        env.events().publish((Symbol::new(&env, "CooldownUpdated"),), ledgers);
+        env.storage()
+            .instance()
+            .set(&DataKey::ComputeCooldownLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "CooldownUpdated"),), ledgers);
         Ok(())
     }
 
@@ -751,7 +892,45 @@ impl CreditOracle {
         }
         env.storage()
             .persistent()
-            .set(&DataKey::TxStats(subject), &stats);
+            .set(&DataKey::TxStats(subject.clone()), &stats);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TxStats(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+        Ok(())
+    }
+
+    /// Update transaction statistics for multiple subjects in a single atomic invocation.
+    ///
+    /// Feeder authorization is checked once at the entrypoint. Enforces a maximum
+    /// batch size of `MAX_BATCH_SIZE` (50 entries) and updates persistent storage
+    /// and TTL for all subjects.
+    pub fn batch_update_tx_stats(
+        env: Env,
+        feeder: Address,
+        entries: Vec<SubjectTxStatsEntry>,
+    ) -> Result<(), CreditOracleError> {
+        ensure_not_paused(&env)?;
+        feeder.require_auth();
+        let is_trusted: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TrustedFeeder(feeder.clone()))
+            .unwrap_or(false);
+        if !is_trusted {
+            return Err(CreditOracleError::FeederNotRegistered);
+        }
+        if entries.len() > MAX_BATCH_SIZE {
+            return Err(CreditOracleError::BatchTooLarge);
+        }
+        for entry in entries.iter() {
+            let key = DataKey::TxStats(entry.subject.clone());
+            env.storage().persistent().set(&key, &entry.stats);
+            env.storage()
+                .persistent()
+                .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        }
         Ok(())
     }
 
@@ -799,7 +978,7 @@ impl CreditOracle {
             record.total_count = record.total_count.saturating_add(1);
             env.storage()
                 .persistent()
-                .set(&DataKey::RepaymentRecord(subject), &record);
+                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
         } else {
             let mut record: RepaymentRecord = env
                 .storage()
@@ -817,8 +996,13 @@ impl CreditOracle {
             record.total_repaid = record.total_repaid.saturating_add(amount);
             env.storage()
                 .persistent()
-                .set(&DataKey::RepaymentRecord(subject), &record);
+                .set(&DataKey::RepaymentRecord(subject.clone()), &record);
         }
+        env.storage().persistent().extend_ttl(
+            &DataKey::RepaymentRecord(subject.clone()),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
         increment_repayments_recorded(&env);
         Ok(())
     }
@@ -884,10 +1068,8 @@ impl CreditOracle {
 
         // Emit deprecation warning if identity oracle is configured
         if env.storage().instance().has(&DataKey::IdentityOracleId) {
-            env.events().publish(
-                (symbol_short!("VcCntDep"),),
-                (subject.clone(), count),
-            );
+            env.events()
+                .publish((symbol_short!("VcCntDep"),), (subject.clone(), count));
         }
 
         env.storage()
@@ -1150,6 +1332,7 @@ impl CreditOracle {
                 soroban_sdk::vec![&env, subject.clone().into_val(&env)],
             );
             if is_deactivated {
+                append_score_history(&env, &subject, MIN_SCORE);
                 return Ok(MIN_SCORE);
             }
 
@@ -1163,7 +1346,11 @@ impl CreditOracle {
                 let is_verified = env.invoke_contract::<bool>(
                     &identity_oracle_id,
                     &Symbol::new(&env, "verify_vc"),
-                    soroban_sdk::vec![&env, subject.clone().into_val(&env), record.vc_hash.clone().into_val(&env)],
+                    soroban_sdk::vec![
+                        &env,
+                        subject.clone().into_val(&env),
+                        record.vc_hash.clone().into_val(&env)
+                    ],
                 );
                 if !is_verified {
                     continue;
@@ -1204,7 +1391,7 @@ impl CreditOracle {
                 .persistent()
                 .get(&vc_list_key)
                 .unwrap_or(Vec::new(&env));
-            
+
             if !vc_list.is_empty() {
                 vc_count = vc_list.len();
                 for entry in vc_list.iter() {
@@ -1284,6 +1471,7 @@ impl CreditOracle {
         if needs_write {
             if is_first_computation {
                 increment_subjects_scored(&env);
+                update_protocol_metrics_on_score(&env, tx_stats.volume_30d);
             }
             let score_key = DataKey::Score(subject.clone());
             env.storage().persistent().set(
@@ -1303,6 +1491,8 @@ impl CreditOracle {
                 .persistent()
                 .extend_ttl(&score_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
+
+        append_score_history(&env, &subject, score);
 
         env.events()
             .publish((symbol_short!("Score"),), (subject.clone(), score));
@@ -1377,6 +1567,14 @@ impl CreditOracle {
                 }
                 record
             })
+    }
+
+    /// Return the most recent score computations for a user, oldest first.
+    pub fn get_score_history(env: Env, subject: Address) -> Vec<HistoricalScore> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::ScoreHistory(subject))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Propose new scoring weights with timelock
@@ -1494,11 +1692,10 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::IdentityOracleId, &identity_oracle_id);
-        env.events()
-            .publish(
-                (Symbol::new(&env, "IdentityOracleUpdated"),),
-                identity_oracle_id,
-            );
+        env.events().publish(
+            (Symbol::new(&env, "IdentityOracleUpdated"),),
+            identity_oracle_id,
+        );
         Ok(())
     }
 
@@ -1590,7 +1787,11 @@ impl CreditOracle {
     }
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
-    pub fn upgrade(env: Env, admin: Address, new_wasm_hash: BytesN<32>) -> Result<(), CreditOracleError> {
+    pub fn upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
             .instance()
@@ -1610,6 +1811,11 @@ impl CreditOracle {
     /// on-chain operational metrics without requiring an external indexer.
     pub fn get_protocol_stats(env: Env) -> ProtocolStats {
         load_protocol_stats(&env)
+    }
+
+    /// Returns live protocol-wide aggregate metrics (total volume scored, total unique borrowers, total repayments).
+    pub fn get_protocol_metrics(env: Env) -> ProtocolMetrics {
+        load_protocol_metrics(&env)
     }
 
     /// Returns all currently registered (non-deregistered) feeder addresses.
@@ -1870,56 +2076,88 @@ mod tests {
 
     #[test]
     fn test_scoring_spec_example_2_moderate_scores_569() {
-        let score = compute_score_pure(
-            60,
-            3_000_000_000,
-            0,
-            8,
-            10,
-            3_000_000_000,
-            40,
-            30,
-            30,
-            MIN_SCORE,
-        );
+        let score = compute_score_pure(60, 3_000_000_000, 0, 8, 10, 3_000_000_000, 40, 30, 30);
 
         assert_eq!(score, 569);
     }
 
     #[test]
     fn test_scoring_spec_example_3_strong_scores_817() {
-        let score = compute_score_pure(
-            100,
-            8_000_000_000,
-            0,
-            20,
-            20,
-            10_000_000_000,
-            40,
-            30,
-            30,
-            MIN_SCORE,
-        );
+        let score = compute_score_pure(100, 8_000_000_000, 0, 20, 20, 10_000_000_000, 40, 30, 30);
 
         assert_eq!(score, 817);
     }
 
     #[test]
     fn test_scoring_spec_perfect_scores_850() {
-        let score = compute_score_pure(
-            100,
-            10_000_000_000,
-            100,
-            20,
-            20,
-            10_000_000_000,
-            40,
-            30,
-            30,
-            MIN_SCORE,
-        );
+        let score =
+            compute_score_pure(100, 10_000_000_000, 100, 20, 20, 10_000_000_000, 40, 30, 30);
 
         assert_eq!(score, 850);
+    }
+
+    #[test]
+    fn test_compute_score_pure_u32_max_counterparties_is_clamped_to_bonus_cap() {
+        // counterparty_bonus = min(avg_counterparties / 5, 20); at 100 the cap is
+        // already reached, so `u32::MAX` must yield exactly the same score.
+        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30);
+        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30);
+
+        assert_eq!(at_cap, at_max);
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
+    }
+
+    #[test]
+    fn test_compute_score_pure_u32_max_volume_30d_is_handled_without_overflow() {
+        // volume_score = min(volume_30d / 1e8, 80). `u32::MAX` raw units is 42
+        // units — below the 80-unit cap — so it must match the equivalent
+        // explicit unit count, while `i128::MAX` saturates the cap at 80.
+        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_units = compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        assert_eq!(at_max, at_units);
+
+        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30);
+        assert_eq!(at_cap, at_i128_max);
+
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
+        assert!((MIN_SCORE..=MAX_SCORE).contains(&at_i128_max));
+    }
+
+    #[test]
+    fn test_compute_score_pure_extreme_inputs_do_not_panic_and_clamp() {
+        // Acceptance criteria: u32::MAX / i128::MAX inputs must not panic under
+        // `overflow-checks = true` and must yield a score within [300, 850].
+        let score = compute_score_pure(
+            u32::MAX,
+            i128::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+            i128::MAX,
+            u32::MAX,
+            u32::MAX,
+            u32::MAX,
+        );
+
+        assert!(
+            (MIN_SCORE..=MAX_SCORE).contains(&score),
+            "extreme inputs produced out-of-range score {}",
+            score
+        );
+    }
+
+    #[test]
+    fn test_compute_score_pure_negative_and_zero_inputs_do_not_panic() {
+        // i128::MIN volumes and a zero repayment divisor (no repayment history)
+        // are the other malformed-edge shapes the scoring path must survive.
+        let score = compute_score_pure(0, i128::MIN, 0, u32::MAX, 0, i128::MIN, 40, 30, 30);
+
+        assert!(
+            (MIN_SCORE..=MAX_SCORE).contains(&score),
+            "negative/zero inputs produced out-of-range score {}",
+            score
+        );
     }
 
     #[test]
@@ -2099,7 +2337,9 @@ mod tests {
         // reverting every future `compute_score` call for this subject.
         let on_time_count: u32 = 1_000_000;
         env.as_contract(&contract_id, || {
-            env.storage().instance().set(&DataKey::StorageVersion, &2u32);
+            env.storage()
+                .instance()
+                .set(&DataKey::StorageVersion, &2u32);
             env.storage().persistent().set(
                 &DataKey::RepaymentRecord(subject.clone()),
                 &RepaymentRecord {
@@ -2355,7 +2595,10 @@ mod tests {
             tx_weight: 46,
             repayment_weight: 9,
         });
-        assert_eq!(res_repayment_low, Err(Ok(CreditOracleError::InvalidWeights)));
+        assert_eq!(
+            res_repayment_low,
+            Err(Ok(CreditOracleError::InvalidWeights))
+        );
 
         // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
         let res_valid_min = client.try_propose_weights(&ScoringWeights {
@@ -2407,7 +2650,10 @@ mod tests {
         });
 
         let pending = client.get_pending_weights();
-        assert!(pending.is_some(), "get_pending_weights should return Some after proposal");
+        assert!(
+            pending.is_some(),
+            "get_pending_weights should return Some after proposal"
+        );
         let record = pending.unwrap();
         assert_eq!(record.weights.vc_weight, 50);
         assert_eq!(record.weights.tx_weight, 30);
@@ -2509,6 +2755,234 @@ mod tests {
             },
         );
         assert_eq!(result, Err(Ok(CreditOracleError::FeederNotRegistered)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_success_multiple_subjects() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let stats1 = TxStats {
+            volume_30d: 10_000,
+            tx_count_30d: 20,
+            avg_counterparties: 5,
+        };
+        let stats2 = TxStats {
+            volume_30d: 50_000,
+            tx_count_30d: 100,
+            avg_counterparties: 15,
+        };
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject1.clone(),
+            stats: stats1.clone(),
+        });
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject2.clone(),
+            stats: stats2.clone(),
+        });
+
+        assert!(client.try_batch_update_tx_stats(&feeder, &entries).is_ok());
+
+        let stored1: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject1.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored1, stats1);
+
+        let stored2: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject2.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored2, stats2);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_empty_batch_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let empty_entries: Vec<SubjectTxStatsEntry> = Vec::new(&env);
+        let res = client.try_batch_update_tx_stats(&feeder, &empty_entries);
+        assert!(res.is_ok(), "empty batch should succeed as a valid no-op");
+
+        // Feeder authorization is still checked at entrypoint even for empty batch
+        env.mock_auths(&[]);
+        let unauth_res = client.try_batch_update_tx_stats(&feeder, &empty_entries);
+        assert!(
+            unauth_res.is_err(),
+            "empty batch requires feeder authorization"
+        );
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_partial_duplicates() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let stats_a_initial = TxStats {
+            volume_30d: 1_000,
+            tx_count_30d: 2,
+            avg_counterparties: 1,
+        };
+        let stats_b = TxStats {
+            volume_30d: 5_000,
+            tx_count_30d: 10,
+            avg_counterparties: 4,
+        };
+        let stats_a_final = TxStats {
+            volume_30d: 9_999,
+            tx_count_30d: 99,
+            avg_counterparties: 9,
+        };
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: stats_a_initial,
+        });
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_b.clone(),
+            stats: stats_b.clone(),
+        });
+        // Duplicate subject_a later in the batch (partial duplicate)
+        entries.push_back(SubjectTxStatsEntry {
+            subject: subject_a.clone(),
+            stats: stats_a_final.clone(),
+        });
+
+        assert!(client.try_batch_update_tx_stats(&feeder, &entries).is_ok());
+
+        // The later entry for subject_a should have overwritten the earlier one
+        let stored_a: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject_a.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored_a, stats_a_final);
+
+        // subject_b should be intact
+        let stored_b: TxStats = env.as_contract(&contract_id, || {
+            env.storage()
+                .persistent()
+                .get(&DataKey::TxStats(subject_b.clone()))
+                .unwrap()
+        });
+        assert_eq!(stored_b, stats_b);
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_exceeds_max_batch_size() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        let mut entries = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            entries.push_back(SubjectTxStatsEntry {
+                subject: Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert_eq!(res, Err(Ok(CreditOracleError::BatchTooLarge)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_feeder_not_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        let mut entries = Vec::new(&env);
+        entries.push_back(SubjectTxStatsEntry {
+            subject: Address::generate(&env),
+            stats: TxStats {
+                volume_30d: 100,
+                tx_count_30d: 1,
+                avg_counterparties: 1,
+            },
+        });
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert_eq!(res, Err(Ok(CreditOracleError::FeederNotRegistered)));
+    }
+
+    #[test]
+    fn test_batch_update_tx_stats_requires_auth_before_size_check() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let feeder = Address::generate(&env);
+
+        let mut entries = Vec::new(&env);
+        for _ in 0..(MAX_BATCH_SIZE + 1) {
+            entries.push_back(SubjectTxStatsEntry {
+                subject: Address::generate(&env),
+                stats: TxStats {
+                    volume_30d: 100,
+                    tx_count_30d: 1,
+                    avg_counterparties: 1,
+                },
+            });
+        }
+
+        let res = client.try_batch_update_tx_stats(&feeder, &entries);
+        assert!(res.is_err());
+        assert_ne!(res, Err(Ok(CreditOracleError::BatchTooLarge)));
     }
 
     #[test]
@@ -2662,10 +3136,7 @@ mod tests {
         client.initialize(&admin);
 
         // No feeder ever registered -> FeedersIndex unset -> empty Vec.
-        assert_eq!(
-            client.list_feeders(),
-            Vec::<Address>::new(&env)
-        );
+        assert_eq!(client.list_feeders(), Vec::<Address>::new(&env));
     }
 
     #[test]
@@ -2679,10 +3150,7 @@ mod tests {
         client.initialize(&admin);
 
         // No lender ever registered -> LendersIndex unset -> empty Vec.
-        assert_eq!(
-            client.list_lenders(),
-            Vec::<Address>::new(&env)
-        );
+        assert_eq!(client.list_lenders(), Vec::<Address>::new(&env));
     }
 
     #[test]
@@ -2753,12 +3221,14 @@ mod tests {
         let topic_sym: Symbol = topic_val
             .try_into_val(&env)
             .expect("topic should be a Symbol");
-        assert_eq!(topic_sym, symbol_short!("FdrDeReg"), "expected FdrDeReg topic");
+        assert_eq!(
+            topic_sym,
+            symbol_short!("FdrDeReg"),
+            "expected FdrDeReg topic"
+        );
 
         // Verify the data payload is the feeder address
-        let event_feeder: Address = data
-            .try_into_val(&env)
-            .expect("data should be Address");
+        let event_feeder: Address = data.try_into_val(&env).expect("data should be Address");
         assert_eq!(event_feeder, feeder, "event feeder mismatch");
     }
 
@@ -2797,12 +3267,14 @@ mod tests {
         let topic_sym: Symbol = topic_val
             .try_into_val(&env)
             .expect("topic should be a Symbol");
-        assert_eq!(topic_sym, symbol_short!("LndDeReg"), "expected LndDeReg topic");
+        assert_eq!(
+            topic_sym,
+            symbol_short!("LndDeReg"),
+            "expected LndDeReg topic"
+        );
 
         // Verify the data payload is the lender address
-        let event_lender: Address = data
-            .try_into_val(&env)
-            .expect("data should be Address");
+        let event_lender: Address = data.try_into_val(&env).expect("data should be Address");
         assert_eq!(event_lender, lender, "event lender mismatch");
     }
 
@@ -3167,6 +3639,52 @@ mod tests {
     }
 
     #[test]
+    fn test_score_history_rolls_over_and_preserves_order() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        assert!(client.get_score_history(&subject).is_empty());
+
+        let start_timestamp = env.ledger().timestamp();
+        let start_ledger = env.ledger().sequence();
+        let mut computed_scores = Vec::new(&env);
+        for i in 0..8u32 {
+            env.ledger().set_timestamp(start_timestamp + i as u64 * 60);
+            env.ledger().set_sequence_number(start_ledger + i);
+            client.update_tx_stats(
+                &feeder,
+                &subject,
+                &TxStats {
+                    volume_30d: i as i128 * 1_000_000_000,
+                    tx_count_30d: i,
+                    avg_counterparties: 0,
+                },
+            );
+            computed_scores.push_back(client.compute_score(&subject));
+        }
+
+        let history = client.get_score_history(&subject);
+        assert_eq!(history.len(), MAX_SCORE_HISTORY);
+        for i in 0..MAX_SCORE_HISTORY {
+            let entry = history.get(i).unwrap();
+            let expected_index = i + 2;
+            assert_eq!(entry.score, computed_scores.get(expected_index).unwrap());
+            assert_eq!(entry.computed_at_ledger, start_ledger + expected_index);
+            assert_eq!(
+                entry.computed_at_timestamp,
+                start_timestamp + expected_index as u64 * 60
+            );
+        }
+    }
+
+    #[test]
     fn test_protocol_stats_default_zero() {
         let env = Env::default();
         let contract_id = env.register_contract(None, CreditOracle);
@@ -3246,6 +3764,130 @@ mod tests {
         client.compute_score(&subject);
         let stats2 = client.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
+    }
+
+    #[test]
+    fn test_protocol_metrics_default_zero() {
+        let env = Env::default();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let metrics = client.get_protocol_metrics();
+        assert_eq!(metrics.total_volume_scored, 0);
+        assert_eq!(metrics.total_borrowers, 0);
+        assert_eq!(metrics.total_repayments_count, 0);
+    }
+
+    #[test]
+    fn test_protocol_metrics_increments_on_record_repayment() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        client.record_repayment(&lender, &subject, &1000, &true);
+        let metrics1 = client.get_protocol_metrics();
+        assert_eq!(metrics1.total_repayments_count, 1);
+        assert_eq!(metrics1.total_borrowers, 0);
+        assert_eq!(metrics1.total_volume_scored, 0);
+
+        client.record_repayment(&lender, &subject, &2000, &false);
+        let metrics2 = client.get_protocol_metrics();
+        assert_eq!(metrics2.total_repayments_count, 2);
+    }
+
+    #[test]
+    fn test_protocol_metrics_accumulates_volume_and_borrowers_idempotently() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+        client.register_lender(&admin, &lender);
+
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
+
+        client.update_tx_stats(
+            &feeder,
+            &subject1,
+            &TxStats {
+                volume_30d: 500_000_000,
+                tx_count_30d: 10,
+                avg_counterparties: 3,
+            },
+        );
+        client.update_tx_stats(
+            &feeder,
+            &subject2,
+            &TxStats {
+                volume_30d: 1_200_000_000,
+                tx_count_30d: 25,
+                avg_counterparties: 8,
+            },
+        );
+
+        // Record a repayment for subject1 before score computation
+        client.record_repayment(&lender, &subject1, &50_000_000, &true);
+
+        // Score subject1 for the first time
+        client.compute_score(&subject1);
+        let m1 = client.get_protocol_metrics();
+        assert_eq!(m1.total_borrowers, 1);
+        assert_eq!(m1.total_volume_scored, 500_000_000);
+        assert_eq!(m1.total_repayments_count, 1);
+
+        // Advance ledger and re-score subject1: must be idempotent!
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        client.compute_score(&subject1);
+        let m1_rescore = client.get_protocol_metrics();
+        assert_eq!(m1_rescore.total_borrowers, 1);
+        assert_eq!(m1_rescore.total_volume_scored, 500_000_000);
+        assert_eq!(m1_rescore.total_repayments_count, 1);
+
+        // Score subject2 for the first time: metrics accumulate
+        client.compute_score(&subject2);
+        let m2 = client.get_protocol_metrics();
+        assert_eq!(m2.total_borrowers, 2);
+        assert_eq!(m2.total_volume_scored, 1_700_000_000);
+        assert_eq!(m2.total_repayments_count, 1);
+
+        // Record another repayment for subject2
+        client.record_repayment(&lender, &subject2, &100_000_000, &true);
+        let m2_repay = client.get_protocol_metrics();
+        assert_eq!(m2_repay.total_borrowers, 2);
+        assert_eq!(m2_repay.total_volume_scored, 1_700_000_000);
+        assert_eq!(m2_repay.total_repayments_count, 2);
+
+        // Re-score subject2 after stats change: total_borrowers and total_volume_scored must remain idempotent
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        client.update_tx_stats(
+            &feeder,
+            &subject2,
+            &TxStats {
+                volume_30d: 2_000_000_000,
+                tx_count_30d: 30,
+                avg_counterparties: 10,
+            },
+        );
+        client.compute_score(&subject2);
+        let m2_final = client.get_protocol_metrics();
+        assert_eq!(m2_final.total_borrowers, 2);
+        assert_eq!(m2_final.total_volume_scored, 1_700_000_000);
+        assert_eq!(m2_final.total_repayments_count, 2);
     }
 
     // ── Dispute mechanism tests ───────────────────────────────────────────
@@ -3480,11 +4122,7 @@ mod tests {
         for i in 0..events.len() {
             let (id, topics, _) = events.get(i).unwrap();
             if id == contract_id && topics.len() == 1 {
-                let topic: soroban_sdk::Symbol = topics
-                    .get(0)
-                    .unwrap()
-                    .try_into_val(&env)
-                    .unwrap();
+                let topic: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
                 if topic == symbol_short!("DsptFild") {
                     dispute_count += 1;
                 }
@@ -3555,13 +4193,13 @@ mod tests {
 
         client.initialize(&admin);
         client.register_feeder(&admin, &feeder);
-        
+
         // Configure identity oracle
         client.set_identity_oracle(&admin, &identity_oracle_id);
 
         // Clear any existing events from setup
         env.events().all().len(); // Just to consume them
-        
+
         // Call set_vc_count - should emit deprecation warning
         client.set_vc_count(&feeder, &subject, &5);
 
@@ -3715,8 +4353,14 @@ mod tests {
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &0), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
-        assert_eq!(client.try_set_compute_cooldown_ledgers(&admin, &(MAX_COMPUTE_COOLDOWN_LEDGERS + 1)), Err(Ok(CreditOracleError::InvalidComputeCooldown)));
+        assert_eq!(
+            client.try_set_compute_cooldown_ledgers(&admin, &0),
+            Err(Ok(CreditOracleError::InvalidComputeCooldown))
+        );
+        assert_eq!(
+            client.try_set_compute_cooldown_ledgers(&admin, &(MAX_COMPUTE_COOLDOWN_LEDGERS + 1)),
+            Err(Ok(CreditOracleError::InvalidComputeCooldown))
+        );
     }
 
     #[test]
