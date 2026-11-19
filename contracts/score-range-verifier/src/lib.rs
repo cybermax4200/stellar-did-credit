@@ -88,10 +88,9 @@ const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
 /// trusted for production proof verification. A ceremony key and a matching
 /// proof fixture are needed before this verifier can be deployed securely.
 ///
-/// The generator uses arkworks uncompressed serialization, whereas Soroban's
-/// BLS host functions require big-endian field encodings. The conversion and
-/// point validation must be verified when replacing the key. The supplied
-/// `vk_hash` is currently stored without being checked against this key.
+/// The current uncompressed key encoding is tested against Soroban's BLS host
+/// functions. Revalidate encoding and point membership when replacing the key.
+/// The supplied `vk_hash` is currently stored without being checked against it.
 fn embedded_verification_key(env: &Env) -> VerificationKey {
     // Development-only output; see the warning above.
     let alpha_bytes = [
@@ -234,13 +233,10 @@ fn embedded_verification_key(env: &Env) -> VerificationKey {
     }
 }
 
-/// Encode a u32 as a 32-byte little-endian field element.
+/// Encode a u32 as a 32-byte big-endian field element.
 fn u32_to_field(env: &Env, value: u32) -> BytesN<32> {
     let mut buf = [0u8; 32];
-    buf[0] = (value & 0xFF) as u8;
-    buf[1] = ((value >> 8) & 0xFF) as u8;
-    buf[2] = ((value >> 16) & 0xFF) as u8;
-    buf[3] = ((value >> 24) & 0xFF) as u8;
+    buf[28..].copy_from_slice(&value.to_be_bytes());
     BytesN::from_array(env, &buf)
 }
 
@@ -479,8 +475,79 @@ impl ScoreRangeVerifier {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ark_bls12_381::Fr as ArkFr;
+    use ark_ff::{BigInteger, PrimeField};
+    use ark_serialize::CanonicalSerialize;
+    use ark_std::rand::{rngs::StdRng, SeedableRng};
+    use zk_circuit::{commitment::PedersenCommitment, generate_proof, generate_test_keys, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
+
+    #[test]
+    fn test_circuit_proof_with_development_key() {
+        let (env, _, contract_id) = setup();
+        let client = ScoreRangeVerifierClient::new(&env, &contract_id);
+        let witness = ScoreWitness {
+            score: 668, vc_count: 10, tx_volume_30d: 50_000_000_000,
+            avg_counterparties: 10, repayment_rate: 5000, last_updated: 1_700_000_000,
+            computed_at_ledger: 1234567, stale: false, vc_points: 50, on_time_count: 50,
+            total_count: 100, total_repaid: 20_000_000_000, vc_weight: 40, tx_weight: 30,
+            repayment_weight: 30, vc_score: 50, volume_score: 80, counterparty_bonus: 2,
+            tx_score: 82, repayment_rate_score: 50, repayment_volume_score: 100,
+            repay_score: 75, composite: 67, q_volume: 500, q_cp: 2, q_rv: 200,
+            total_count_is_zero: false, total_count_inv: 0, blinding: ArkFr::from(42u32),
+        };
+        let fields = [witness.score as u64, witness.vc_count as u64, witness.tx_volume_30d as u64,
+            witness.avg_counterparties as u64, witness.repayment_rate as u64, witness.last_updated,
+            witness.computed_at_ledger as u64, witness.stale as u64].map(ArkFr::from);
+        let commitment = PedersenCommitment::new(CIRCUIT_DOMAIN).commit(&fields, witness.blinding);
+        let mut commitment_bytes = [0u8; 32];
+        let encoded = commitment.into_bigint().to_bytes_be();
+        commitment_bytes[32 - encoded.len()..].copy_from_slice(&encoded);
+        let inputs = ScoreRangePublicInputs {
+            threshold: 600, subject: Address::generate(&env), credit_oracle_id: Address::generate(&env),
+            score_commitment: BytesN::from_array(&env, &commitment_bytes), snapshot_ledger: 12345,
+            domain_separator: BytesN::from_array(&env, &[0u8; 32]),
+        };
+        let public = ScorePublicInputs {
+            threshold: inputs.threshold,
+            subject: ArkFr::from_be_bytes_mod_order(&address_to_field(&env, &inputs.subject).to_array()),
+            credit_oracle_id: ArkFr::from_be_bytes_mod_order(&address_to_field(&env, &inputs.credit_oracle_id).to_array()),
+            score_commitment: commitment, snapshot_ledger: inputs.snapshot_ledger,
+            domain_separator: ArkFr::from(0u32),
+        };
+        let mut rng = StdRng::from_seed([0u8; 32]);
+        let (pk, vk) = generate_test_keys(&mut rng).unwrap();
+        let embedded = embedded_verification_key(&env);
+        let mut serialized = ark_std::vec::Vec::new();
+        vk.alpha_g1.serialize_uncompressed(&mut serialized).unwrap();
+        assert_eq!(serialized.as_slice(), &embedded.alpha.to_array());
+        serialized.clear();
+        vk.beta_g2.serialize_uncompressed(&mut serialized).unwrap();
+        assert_eq!(serialized.as_slice(), &embedded.beta.to_array());
+        serialized.clear();
+        vk.gamma_g2.serialize_uncompressed(&mut serialized).unwrap();
+        assert_eq!(serialized.as_slice(), &embedded.gamma.to_array());
+        serialized.clear();
+        vk.delta_g2.serialize_uncompressed(&mut serialized).unwrap();
+        assert_eq!(serialized.as_slice(), &embedded.delta.to_array());
+        assert_eq!(vk.gamma_abc_g1.len(), embedded.gamma_abc.len() as usize);
+        for (index, point) in vk.gamma_abc_g1.iter().enumerate() {
+            serialized.clear();
+            point.serialize_uncompressed(&mut serialized).unwrap();
+            assert_eq!(serialized.as_slice(), &embedded.gamma_abc.get(index as u32).unwrap().to_array());
+        }
+        let proof = generate_proof(witness, public, &pk, &mut rng).unwrap();
+        let mut bytes = ark_std::vec::Vec::new();
+        proof.a.serialize_uncompressed(&mut bytes).unwrap();
+        proof.b.serialize_uncompressed(&mut bytes).unwrap();
+        proof.c.serialize_uncompressed(&mut bytes).unwrap();
+        let proof = Bytes::from_slice(&env, &bytes);
+        assert!(client.verify_score_range(&proof, &inputs));
+        let mut wrong = inputs.clone();
+        wrong.threshold = 601;
+        assert!(!client.verify_score_range(&proof, &wrong));
+    }
 
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
