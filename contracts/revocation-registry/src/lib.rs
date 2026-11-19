@@ -379,8 +379,6 @@ impl RevocationRegistry {
             return Err(RevocationRegistryError::BatchTooLarge);
         }
 
-        ensure_not_paused(&env)?;
-        issuer.require_auth();
         let batch_limit: u32 = env
             .storage()
             .instance()
