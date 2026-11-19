@@ -58,7 +58,8 @@ The protocol admin must register each trusted issuer before that address can cal
 | `anchor_did(subject, did_doc_cid)`          | subject  | Stores an IPFS CID pointing to the subject's DID document   |
 | `anchor_vc(issuer, subject, vc_hash)`       | issuer   | Records a SHA-256 hash of an off-chain VC                   |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | issuer   | Marks a specific VC as revoked                              |
-| `list_revoked_for_subject(subject)`         | anyone   | Returns the VC hashes revoked for a subject (local flags + linked registry) |
+| `list_revoked_for_subject(subject, start_index, limit)` | anyone | Returns a page of at most 50 revoked VC hashes (local flags + linked registry) |
+| `get_revoked_count_for_subject(subject)` | anyone | Returns the total revoked VC count for a subject |
 | `is_verified(subject)`                      | anyone   | Returns true if the subject has at least one non-revoked VC |
 | `get_active_vc_count(subject)`              | anyone   | Returns the cached active VC count; seeded lazily from existing anchors and then maintained on `anchor_vc` / `mark_vc_revoked` |
 | `verify_vc(subject, vc_hash)`               | anyone   | Returns true if a specific VC exists and is not revoked     |

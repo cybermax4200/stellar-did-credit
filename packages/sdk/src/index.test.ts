@@ -3426,6 +3426,10 @@ describe("StellarDIDCreditSDK", () => {
       
       const proof = await sdk.generateScoreProof(subjectAddress, 600);
       expect(proof).toBeInstanceOf(Uint8Array);
+      expect(zkWasm.initZkWasm).toHaveBeenCalledTimes(1);
+      expect(zkWasm.initZkWasm.mock.invocationCallOrder[0]).toBeLessThan(
+        zkWasm.generate_score_proof.mock.invocationCallOrder[0],
+      );
     });
   });
 

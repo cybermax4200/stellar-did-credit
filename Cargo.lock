@@ -1415,6 +1415,7 @@ dependencies = [
  "ark-ff",
  "ark-serialize",
  "ark-std",
+ "proptest",
  "soroban-sdk",
  "zk-circuit",
 ]

@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `identity-oracle`: paginated `list_revoked_for_subject(subject, start_index, limit)` with a 50-hash cap and `get_revoked_count_for_subject`, including local and registry revocations (#1152).
+- `score-range-verifier`: authenticated `verify_proof` and successful `ProofVerified` events from verification and consumption, with verifier, threshold, commitment, and snapshot epoch (#1187).
 - `credit-oracle`: added `batch_record_repayments(lender, entries)` for recording up to 50 positive repayment entries in one authorized call, with per-entry `Repay` events and validation before any storage updates (#1149)
 - `identity-oracle`: implemented `get_issuers_paginated(env, start_index, limit)` returning bounded sub-slices of trusted issuers (enforcing `limit <= 50`), added `get_issuer_count(env)` total count helper, and retained `list_issuers(env)` bounded to the first 50 issuers as a deprecated compatibility entrypoint (#1164)
 - `credit-oracle`: introduced `ProtocolMetrics` struct and `DataKey::ProtocolMetrics` storage key tracking cumulative volume scored, unique borrowers scored, and recorded repayments count; updated `compute_score` to accumulate volume and borrowers idempotently; added live view function `get_protocol_metrics(env)` (#1168)
@@ -30,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `zk-wasm`: conditional ESM/CommonJS exports and `initZkWasm` for Node buffers and browser URLs, with Node, Vite, and Webpack initialization smoke tests (#1186).
+- `score-range-verifier`: reject malformed, infinite, off-curve, and non-subgroup proof points with `InvalidProof` before unsafe host calls; exercise the contract with a 100000-case property runner (#1188).
 - `governance`: prevent proposal execution while credit-oracle weights are under an active timelock; allow execution after the timelock expires (#1169)
 - SDK: restore the missing `IssuerTier` result type used by `listIssuerTiers` (#1071).
 - CLI: restore missing issuer-tier formatting helpers for `get`, `list`, and `set` commands (#1071).

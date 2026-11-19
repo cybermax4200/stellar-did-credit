@@ -56,10 +56,48 @@ Fix applied above: `avg_counterparties` is now part of both the witness and the 
 Approximately 2,400 gates (32-bit comparisons including the `avg_counterparties >= 10` threshold check, integer divisions, weighted sum, Pedersen commitment of 8 scalars, 7 range checks). Revised upward slightly from the original 2,200 estimate to account for the added `avg_counterparties` binding — see §4. Treat as an order-of-magnitude estimate until a reference circuit is implemented (roadmap step 1 in zk-proof-design.md).
 
 ## 6. Soroban Verifier
-env.crypto().groth16_verify(&VERIFICATION_KEY, &public_inputs, &proof) with public inputs: threshold, subject, credit_oracle_id, score_commitment, snapshot_ledger, domain_separator.
+The contract uses Soroban's BLS12-381 pairing host functions against the embedded
+verification key. `verify_score_range(proof, public_inputs)` remains a read-only
+boolean query and maps invalid proof encodings to `false`.
+
+`verify_proof(verifier, proof, public_inputs)` requires `verifier` authorization.
+On success it returns `Ok(true)` and publishes these event fields:
+
+| Field | Encoding |
+|-------|----------|
+| Topics | `(Symbol::new(&env, "ProofVerified"), verifier: Address, threshold: u32)` |
+| Data | `(commitment: BytesN<32>, epoch: u32)` |
+
+`commitment` is `score_commitment`; `epoch` is the proof's `snapshot_ledger`, the
+existing public input representing the score snapshot. No circuit inputs are
+added or reordered. `verify_and_consume` publishes the same event after successful
+verification and replay protection, using its authenticated consumer as verifier.
+Invalid encodings, incorrect pairing results, authorization failures, and replay
+rejections publish no `ProofVerified` event. A well-formed incorrect proof returns
+`Ok(false)`. The new entrypoint returns `InvalidProof` for malformed lengths and
+points; the existing consume entrypoint retains `InvalidProofSize` for wrong lengths.
+
+Before any point arithmetic, the verifier rejects noncanonical coordinates,
+compression/sort flags, infinity, and off-curve points using fallible decoding
+with the same arkworks encoding used by the host. Only finite on-curve points
+reach host subgroup queries; non-subgroup points return `InvalidProof` before
+pairing. This avoids host decoding traps for malicious proof bytes.
+
+Run the property harness with:
+
+```bash
+PROPTEST_CASES=100000 cargo test -p score-range-verifier fuzz_verify_proof_bytes -- --nocapture
+```
+
+It invokes the actual contract with arbitrary lengths, fixed-size random streams,
+and valid prefixes followed by corrupted A, B, or C points. Every generated
+malformed proof must return `Err(VerifierError::InvalidProof)` without host traps
+or verification events. Separate deterministic tests cover finite non-subgroup
+points in both groups, illegal flags, infinity, successful circuit proofs, and
+failed pairing checks.
 
 ## 7. Proof System
-Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. Proof size ~192 bytes.
+Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. The on-chain encoding is 384 bytes: uncompressed A (G1, 96 bytes), B (G2, 192 bytes), and C (G1, 96 bytes).
 
 ## 8. Prover Flow
 Subject calls compute_score() -> reads ScoreRecord + Weights from chain -> generates witness with random blinding -> runs Groth16 prover in browser WASM -> submits proof to verifier contract.

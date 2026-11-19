@@ -601,9 +601,55 @@ mod tests {
 
         // The subject forwarded to revoke() enables the per-subject revoked list
         assert_eq!(
-            identity.list_revoked_for_subject(&subject),
+            identity.list_revoked_for_subject(&subject, &0, &50),
             soroban_sdk::vec![&env, vc_hash.clone()]
         );
+    }
+
+    #[test]
+    fn test_revoked_pagination_with_linked_registry() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        identity.register_issuer(&issuer);
+        identity.set_revocation_registry(&revocation_id);
+        // Leave the registry's identity link unset to exercise registry-only
+        // revocations, which do not change the local anchor's revoked flag.
+        let mut hashes = soroban_sdk::Vec::new(&env);
+        for i in 0..5u8 {
+            let hash = BytesN::from_array(&env, &[i; 32]);
+            identity.anchor_vc(&issuer, &subject, &hash);
+            hashes.push_back(hash);
+        }
+        identity.mark_vc_revoked(&issuer, &subject, &hashes.get(1).unwrap());
+        revocation.revoke(&issuer, &subject, &hashes.get(3).unwrap());
+        revocation.revoke(&issuer, &subject, &hashes.get(4).unwrap());
+        assert_eq!(identity.get_revoked_count_for_subject(&subject), 3);
+        assert_eq!(
+            identity.list_revoked_for_subject(&subject, &0, &2),
+            soroban_sdk::vec![&env, hashes.get(1).unwrap(), hashes.get(3).unwrap()]
+        );
+        assert_eq!(
+            identity.list_revoked_for_subject(&subject, &2, &50),
+            soroban_sdk::vec![&env, hashes.get(4).unwrap()]
+        );
+        assert!(identity
+            .list_revoked_for_subject(&subject, &3, &50)
+            .is_empty());
+        assert!(identity
+            .list_revoked_for_subject(&subject, &u32::MAX, &50)
+            .is_empty());
+        assert!(identity
+            .list_revoked_for_subject(&subject, &0, &0)
+            .is_empty());
     }
 
     #[test]

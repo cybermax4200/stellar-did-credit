@@ -72,7 +72,7 @@ echo "-----------------------------------------------------------------"
 if [[ "$MODE" == "test" ]]; then
   echo "[1/2] Running Soroban contract budget profiling test harness..."
   if command -v cargo >/dev/null 2>&1; then
-    cargo test --package tests gas_profiling -- --nocapture
+    cargo test --package integration-tests gas_profiling -- --nocapture
   else
     echo "[INFO] cargo executable not found in PATH."
     echo "[INFO] Displaying baseline empirical gas measurement profiles:"
