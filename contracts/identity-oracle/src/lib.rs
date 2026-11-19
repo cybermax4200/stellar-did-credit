@@ -2,7 +2,7 @@
 //! Identity oracle contract for the Stellar DID Credit protocol.
 //!
 //! Manages trusted credential issuers, DID document anchoring, and
-//! verifiable credential (VC) lifecycle — including anchoring, revocation,
+//! verifiable credential (VC) lifecycle â€” including anchoring, revocation,
 //! and active-count queries used by the credit-oracle.
 #[cfg(test)]
 extern crate std;
@@ -79,11 +79,11 @@ fn validate_revocation_registry_ref(env: &Env, registry_id: &Address) -> bool {
     )
 }
 
-// ── Persistent TTL constants ─────────────────────────────────────
+// â”€â”€ Persistent TTL constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // Persistent entries are extended to ~30 days on every write.
 //
 // Threshold: if remaining TTL drops below this, extend.
-// Extend to: the new TTL value in ledger counts (≈5 s/ledger).
+// Extend to: the new TTL value in ledger counts (â‰ˆ5 s/ledger).
 //
 const PERS_TTL_THRESHOLD: u32 = 120_960; // ~7 days
 const PERS_TTL_EXTEND: u32 = 518_400; // ~30 days
@@ -148,7 +148,7 @@ pub enum DataKey {
     StorageVersion,
     /// Append-only index of every address ever registered as a trusted
     /// issuer. Entries are never removed on deregistration (that would
-    /// require an O(n) rewrite on every `deregister_issuer` call) — a
+    /// require an O(n) rewrite on every `deregister_issuer` call) â€” a
     /// deregistered issuer's entry is left in place and its `TrustedIssuer`
     /// flag is flipped to `false` instead. Use `list_issuers` (which filters
     /// this index against `TrustedIssuer`) to get the currently-active set.
@@ -171,7 +171,7 @@ pub enum DataKey {
     ActiveVCCount(Address),
     /// The ID of the revocation registry contract.
     RevocationRegistryId,
-    /// Issuer trust multiplier in basis points (100 = 1×). Defaults to 100 when unset.
+    /// Issuer trust multiplier in basis points (100 = 1Ã—). Defaults to 100 when unset.
     IssuerTier(Address),
     /// Credential type label for a subject's anchored VC hash.
     VCCredentialType(Address, BytesN<32>),
@@ -192,7 +192,7 @@ pub enum DataKey {
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 
-/// Default issuer trust multiplier: 100 basis points (1×).
+/// Default issuer trust multiplier: 100 basis points (1Ã—).
 pub const DEFAULT_ISSUER_TIER_BPS: u32 = 100;
 /// Maximum allowed issuer trust multiplier.
 pub const MAX_ISSUER_TIER_BPS: u32 = 300;
@@ -234,8 +234,8 @@ fn store_credential_type(
 
 /// Returns true if `s` starts with `prefix`.
 ///
-/// Uses `copy_into_slice` — the only byte-level accessor on
-/// `soroban_sdk::String` in SDK v22 — to extract the relevant bytes into a
+/// Uses `copy_into_slice` â€” the only byte-level accessor on
+/// `soroban_sdk::String` in SDK v22 â€” to extract the relevant bytes into a
 /// fixed-size stack buffer before comparing.
 fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
     let plen = prefix.len() as usize;
@@ -410,7 +410,7 @@ fn record_last_state_change(env: &Env, subject: &Address) {
 /// 3. Zeroes the cached active-VC count.
 /// 4. Bumps the `total_vcs_revoked` protocol stat.
 ///
-/// Does **not** touch the DID document CID or emit any event — callers are
+/// Does **not** touch the DID document CID or emit any event â€” callers are
 /// responsible for those two pieces, since that's the only place the two
 /// public functions actually differ.
 ///
@@ -524,7 +524,7 @@ impl IdentityOracle {
 
     /// Upgrade the storage layout to the latest version.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn migrate(env: Env) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         let version: u32 = env
@@ -553,7 +553,7 @@ impl IdentityOracle {
     ///
     /// See `docs/mainnet-deployment.md` for the required deployment order.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn validate_revocation_registry(env: Env, registry_id: Address) -> bool {
         validate_revocation_registry_ref(&env, &registry_id)
     }
@@ -589,7 +589,7 @@ impl IdentityOracle {
 
     /// Register a trusted credential issuer authorized to anchor verifiable credentials.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn register_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage()
@@ -632,7 +632,7 @@ impl IdentityOracle {
     /// The issuer is tombstoned and removed from `IssuersIndex` by rebuilding
     /// the index from the remaining trusted issuer flags.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn deregister_issuer(env: Env, issuer: Address) -> Result<(), IdentityOracleError> {
         require_admin(&env);
         env.storage()
@@ -696,7 +696,7 @@ impl IdentityOracle {
     ///
     /// **Authentication:** The `subject` must provide a valid signature.
     ///
-    /// **Overwrite behavior:** This function is idempotent — calling it multiple times with
+    /// **Overwrite behavior:** This function is idempotent â€” calling it multiple times with
     /// different CIDs will silently replace the previous value in storage. Each call emits
     /// a `DIDAnch` event. DID documents are considered **mutable** in this protocol;
     /// subjects may update their DID document (e.g., to rotate keys or add service
@@ -751,7 +751,7 @@ impl IdentityOracle {
     }
 
     /// Deactivate the subject's DID. This is the **canonical, full**
-    /// deactivation path — prefer this over `deactivate_identity`
+    /// deactivation path â€” prefer this over `deactivate_identity`
     /// unless you specifically need to keep the DID document resolvable
     /// (see that function's doc comment for when that applies).
     ///
@@ -759,20 +759,20 @@ impl IdentityOracle {
     ///    so `is_deactivated` returns `true` and `is_verified` /
     ///    credit scoring are suppressed for this subject via `credit-oracle`.
     /// 2. Revokes all active verifiable credentials anchored for the subject.
-    /// 3. Removes the anchored DID Document CID entirely — after this call,
+    /// 3. Removes the anchored DID Document CID entirely â€” after this call,
     ///    `get_did_document` returns `None`.
     /// 4. Emits a `DIDDeact` event.
     ///
     /// Reversible via `reactivate_identity`, which clears the `Deactivated`
     /// flag but does **not** restore the removed DID document CID or any
-    /// revoked VCs — the subject must re-anchor a DID document (and their
+    /// revoked VCs â€” the subject must re-anchor a DID document (and their
     /// issuers must re-anchor VCs) after reactivating.
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
         subject.require_auth();
 
-        // 1 & 2: shared with `deactivate_identity` — sets the Deactivated
+        // 1 & 2: shared with `deactivate_identity` â€” sets the Deactivated
         // flag and revokes all anchored VCs.
         deactivate_core(&env, &subject);
 
@@ -955,7 +955,7 @@ impl IdentityOracle {
     /// Use this instead of `deactivate_did` only when the subject
     /// wants to suppress verification and credit scoring while keeping
     /// their DID document CID resolvable (e.g. `get_did_document` still
-    /// returns a value) — for example, a temporary suspension where the
+    /// returns a value) â€” for example, a temporary suspension where the
     /// document itself should remain publicly retrievable. For a full,
     /// permanent-style deactivation, prefer `deactivate_did`.
     ///
@@ -1115,9 +1115,9 @@ impl IdentityOracle {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
-    /// Set an issuer's trust multiplier in basis points (100 = 1×, 200 = 2×).
+    /// Set an issuer's trust multiplier in basis points (100 = 1Ã—, 200 = 2Ã—).
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn set_issuer_tier(
         env: Env,
         admin: Address,
@@ -1225,7 +1225,7 @@ impl IdentityOracle {
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
     /// The transfer only completes once `new_admin` calls `accept_admin`.
     ///
-    /// Auth: current admin only — verified via `require_admin`.
+    /// Auth: current admin only â€” verified via `require_admin`.
     pub fn propose_new_admin(env: Env, new_admin: Address) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1267,7 +1267,7 @@ impl IdentityOracle {
 
     /// Upgrade the contract WASM in-place, preserving address and all stored state.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1284,7 +1284,7 @@ impl IdentityOracle {
     /// # Important
     ///
     /// If `None` is returned, `is_verified`, `get_active_vc_count`, and
-    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag —
+    /// `verify_vc` will **only** check the local `mark_vc_revoked` flag â€”
     /// any revocations performed through the `RevocationRegistry` contract
     /// will be **silently ignored**.
     ///
@@ -1301,7 +1301,7 @@ impl IdentityOracle {
     /// configuration (Admin, RevocationRegistryId) does not expire on
     /// an idle contract.
     ///
-    /// Auth: admin only — verified via `require_admin`.
+    /// Auth: admin only â€” verified via `require_admin`.
     pub fn maintain_storage(env: Env) -> Result<(), IdentityOracleError> {
         ensure_not_paused(&env)?;
         require_admin(&env);
@@ -1388,7 +1388,7 @@ mod tests {
     fn test_deactivate_did_removes_did_and_revokes_vcs() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1417,7 +1417,7 @@ mod tests {
     fn test_anchor_vc_by_trusted_issuer() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1435,7 +1435,7 @@ mod tests {
     fn test_unregistered_issuer_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -1449,7 +1449,7 @@ mod tests {
     fn test_deregister_issuer_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1488,7 +1488,7 @@ mod tests {
     fn test_deregistered_issuer_cannot_anchor_vc() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1512,7 +1512,7 @@ mod tests {
     fn test_list_issuers_reflects_register_and_deregister_operations() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1559,7 +1559,7 @@ mod tests {
     fn test_reregistering_deregistered_issuer_does_not_duplicate_index() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1587,7 +1587,7 @@ mod tests {
     fn test_get_issuer_count_and_paginated_basic() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1646,7 +1646,7 @@ mod tests {
     fn test_get_issuers_paginated_enforces_max_limit_50() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1692,7 +1692,7 @@ mod tests {
     fn test_is_verified_true_after_vc_anchored() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1714,7 +1714,7 @@ mod tests {
     fn test_anchor_did_stores_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1726,7 +1726,7 @@ mod tests {
     fn test_anchor_did_rejects_empty_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1739,7 +1739,7 @@ mod tests {
     fn test_anchor_did_rejects_single_space_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1752,7 +1752,7 @@ mod tests {
     fn test_anchor_did_rejects_invalid_prefix() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1767,7 +1767,7 @@ mod tests {
         // CIDv0: base58btc multihash, starts with "Qm", 46 chars total.
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1782,7 +1782,7 @@ mod tests {
         // CIDv1: multibase base32, starts with "bafy".
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1800,7 +1800,7 @@ mod tests {
         // Strings that are not valid IPFS CIDs must be rejected.
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1830,7 +1830,7 @@ mod tests {
     fn test_anchor_did_accepts_valid_ipfs_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1856,7 +1856,7 @@ mod tests {
     fn test_get_did_document_returns_cid_after_anchor() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1878,7 +1878,7 @@ mod tests {
     fn test_get_did_document_returns_none_for_unknown_subject() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1891,7 +1891,7 @@ mod tests {
     fn test_anchor_did_overwrite() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -1916,7 +1916,7 @@ mod tests {
     fn test_vc_count_increments_correctly() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1942,7 +1942,7 @@ mod tests {
     fn test_duplicate_vc_hash_same_issuer_is_noop() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1969,7 +1969,7 @@ mod tests {
     fn test_get_active_vc_count_survives_extended_ttl() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1999,7 +1999,7 @@ mod tests {
     fn test_get_active_vc_count_excludes_revoked() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2029,7 +2029,7 @@ mod tests {
     fn test_get_active_vc_count_cached_cost_stays_flat() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2086,7 +2086,7 @@ mod tests {
     fn test_get_active_vc_count_cached_cost_stays_flat_with_registry() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2095,7 +2095,7 @@ mod tests {
         let issuer = Address::generate(&env);
         client.register_issuer(&issuer);
 
-        let registry_id = env.register_contract(None, MockRevocationRegistry);
+        let registry_id = env.register(MockRevocationRegistry, ());
         client.set_revocation_registry(&registry_id);
 
         let mut costs = Vec::new(&env);
@@ -2146,7 +2146,7 @@ mod tests {
     fn test_mark_vc_revoked_panics_for_unknown_hash() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2168,7 +2168,7 @@ mod tests {
     fn test_revoked_vc_fails_is_verified() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2192,7 +2192,7 @@ mod tests {
     fn test_list_revoked_for_subject() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2222,7 +2222,7 @@ mod tests {
     fn test_upgrade_rejects_without_admin_auth() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2232,7 +2232,7 @@ mod tests {
         // require_auth() inside require_admin() has nothing authorizing the
         // invocation, so it fails before the call ever reaches
         // deployer().update_current_contract_wasm() (which would separately
-        // fail on an unregistered hash regardless of auth — that's not what
+        // fail on an unregistered hash regardless of auth â€” that's not what
         // this test is checking).
         env.mock_auths(&[]);
         let res = client.try_upgrade(&BytesN::from_array(&env, &[0u8; 32]));
@@ -2243,7 +2243,7 @@ mod tests {
     fn test_initialize_sets_admin_and_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2259,7 +2259,7 @@ mod tests {
     fn test_get_admin_returns_none_until_initialized_then_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         assert_eq!(client.get_admin(), None);
@@ -2273,7 +2273,7 @@ mod tests {
     fn test_is_paused_default_false_and_pause_unpause() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         assert!(!client.is_paused());
@@ -2293,7 +2293,7 @@ mod tests {
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -2316,7 +2316,7 @@ mod tests {
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -2334,7 +2334,7 @@ mod tests {
     fn test_maintain_storage_succeeds_for_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2349,7 +2349,7 @@ mod tests {
     fn test_maintain_storage_fails_for_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2366,7 +2366,7 @@ mod tests {
     fn test_initialize_already_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2386,7 +2386,7 @@ mod tests {
     fn test_get_revocation_registry_returns_none_after_initialize() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2406,7 +2406,7 @@ mod tests {
     #[test]
     fn test_protocol_stats_default_zero() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let stats = client.get_protocol_stats();
@@ -2419,7 +2419,7 @@ mod tests {
     fn test_protocol_stats_increments_on_anchor_did() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2446,10 +2446,10 @@ mod tests {
     fn test_set_revocation_registry_sets_address() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
-        let registry_id = env.register_contract(None, MockRevocationRegistry);
+        let registry_id = env.register(MockRevocationRegistry, ());
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -2473,7 +2473,7 @@ mod tests {
     fn test_protocol_stats_increments_on_anchor_vc() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2502,11 +2502,11 @@ mod tests {
     fn test_set_revocation_registry_can_update() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
-        let registry_id_1 = env.register_contract(None, MockRevocationRegistry);
-        let registry_id_2 = env.register_contract(None, MockRevocationRegistry);
+        let registry_id_1 = env.register(MockRevocationRegistry, ());
+        let registry_id_2 = env.register(MockRevocationRegistry, ());
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -2524,7 +2524,7 @@ mod tests {
     fn test_protocol_stats_increments_on_mark_vc_revoked() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2548,7 +2548,7 @@ mod tests {
     fn test_protocol_stats_increments_on_deactivate_did() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2578,7 +2578,7 @@ mod tests {
     fn test_deactivate_did_sets_deactivated_flag_and_removes_did_document() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2619,7 +2619,7 @@ mod tests {
     fn test_deactivate_identity_does_not_remove_did_document() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2641,7 +2641,7 @@ mod tests {
     fn test_deactivate_identity_sets_flag_and_revokes_vcs() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2687,7 +2687,7 @@ mod tests {
     fn test_reactivate_identity_clears_flag() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2724,7 +2724,7 @@ mod tests {
     fn test_deactivate_reactivate_full_lifecycle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2767,7 +2767,7 @@ mod tests {
     fn test_deactivate_identity_with_no_vcs_returns_zero() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2788,7 +2788,7 @@ mod tests {
     fn test_protocol_stats_no_increment_on_dedup_vc() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2814,7 +2814,7 @@ mod tests {
     fn test_vc_limit_reached_at_max() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2845,7 +2845,7 @@ mod tests {
     fn test_revoked_vcs_do_not_count_toward_limit() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2886,7 +2886,7 @@ mod tests {
     fn test_anchor_did_accepts_exactly_65_byte_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -2906,7 +2906,7 @@ mod tests {
     fn test_anchor_did_rejects_256_byte_cid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let subject = Address::generate(&env);
@@ -2924,7 +2924,7 @@ mod tests {
     fn test_anchor_vc_typed_with_arbitrary_credential_types() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2969,7 +2969,7 @@ mod tests {
     fn test_anchor_vc_typed_vc_limit_with_credential_types() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3023,7 +3023,7 @@ mod tests {
         // label, and both must round-trip through the shared type.
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3049,7 +3049,7 @@ mod tests {
     fn test_batch_verify_vc_mixed_credentials() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3106,7 +3106,7 @@ mod tests {
     fn test_batch_verify_vc_empty_input() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);

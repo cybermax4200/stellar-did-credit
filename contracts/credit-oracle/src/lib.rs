@@ -84,7 +84,7 @@ pub enum DataKey {
     ProtocolMetrics,
     /// Append-only index of every address ever registered as a trusted
     /// feeder. Entries are never removed on deregistration (that would
-    /// require an O(n) rewrite on every `deregister_feeder` call) — a
+    /// require an O(n) rewrite on every `deregister_feeder` call) â€” a
     /// deregistered feeder's entry is left in place and its `TrustedFeeder`
     /// flag is set to `false` instead. Use `list_feeders` (which filters
     /// this index against `TrustedFeeder`) to get the currently-active set.
@@ -107,6 +107,8 @@ pub enum DataKey {
     DecayBpsPerDay,
     /// Issue #530: lower bound (bps) the recency multiplier may decay to.
     MinRecencyBps,
+    /// Issue #1167: minimum score for subjects with repayment history during decay.
+    DecayFloorScore,
     /// Issue #933: governance contract that currently holds the admin role.
     /// Written by `accept_admin` when the accepting address is a contract and
     /// removed when an account address accepts. Read via `get_governance`.
@@ -126,10 +128,13 @@ pub const DEFAULT_DECAY_BPS_PER_DAY: u32 = 5;
 /// Default recency floor from docs/vc-weighting-design.md: 5_000 bps (50%).
 pub const DEFAULT_MIN_RECENCY_BPS: u32 = 5_000;
 
+/// Default score floor preserves the existing minimum score of 300.
+pub const DEFAULT_DECAY_FLOOR_SCORE: u32 = MIN_SCORE;
+
 /// Recency decay configuration for the VC component of the score (issue #530).
 ///
 /// Returned by `get_recency_decay` and written by `set_recency_decay`. When
-/// `enabled` is `false` the other two fields are ignored and `compute_score`
+/// `enabled` is `false` the recency fields are ignored and `compute_score`
 /// behaves exactly as it did before recency decay existed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -140,6 +145,8 @@ pub struct RecencyDecayConfig {
     pub decay_bps_per_day: u32,
     /// Floor (bps) below which the multiplier never falls, e.g. 5_000 = 50%.
     pub min_recency_bps: u32,
+    /// Minimum score to preserve for subjects with repayment history.
+    pub decay_floor_score: u32,
 }
 
 /// Recency multiplier in basis points for a credential anchored at `anchored_at`.
@@ -191,8 +198,8 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
 /// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
 ///
 /// Every intermediate step uses saturating arithmetic (or `checked_div` where
-/// the divisor may be zero) so that malformed feeder inputs — `u32::MAX`
-/// counterparty counts, `i128::MAX` volumes, skewed weights — can never panic
+/// the divisor may be zero) so that malformed feeder inputs â€” `u32::MAX`
+/// counterparty counts, `i128::MAX` volumes, skewed weights â€” can never panic
 /// under the workspace's `overflow-checks = true` release profile. The inputs
 /// are otherwise clamped (`vc_points`/`volume_score`/`counterparty_bonus`) so
 /// the composite stays far inside the `u128` range even in the worst case.
@@ -207,6 +214,7 @@ pub fn compute_score_pure(
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
+    decay_floor_score: u32,
 ) -> u32 {
     // Clamped to 100 before widening, so the later multiply cannot overflow.
     let vc_score = vc_points.min(100) as u128;
@@ -242,7 +250,11 @@ pub fn compute_score_pure(
 
     let score =
         (MIN_SCORE as u128).saturating_add(composite.saturating_mul(550).saturating_div(100));
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let mut score = score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
+    if total_count > 0 {
+        score = score.max(decay_floor_score.min(MAX_SCORE));
+    }
+    score
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -433,13 +445,13 @@ const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
 /// Longest supported compute-score cooldown (approximately five days).
 pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
-/// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
+/// Persistent-entry TTL threshold (â‰ˆ 7 days at 5 s/ledger).
 const PERS_TTL_THRESHOLD: u32 = 120_960;
-/// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
+/// Persistent-entry TTL extension (â‰ˆ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
 /// Instance-storage TTL bump threshold (ledgers).
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
-/// Instance-storage TTL bump amount (≈ 29 days at 5 s/ledger).
+/// Instance-storage TTL bump amount (â‰ˆ 29 days at 5 s/ledger).
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 /// Maximum number of entries allowed in a single batch operation.
 pub const MAX_BATCH_SIZE: u32 = 50;
@@ -529,6 +541,11 @@ fn load_recency_config(env: &Env) -> RecencyDecayConfig {
             .instance()
             .get(&DataKey::MinRecencyBps)
             .unwrap_or(DEFAULT_MIN_RECENCY_BPS),
+        decay_floor_score: env
+            .storage()
+            .instance()
+            .get(&DataKey::DecayFloorScore)
+            .unwrap_or(DEFAULT_DECAY_FLOOR_SCORE),
     }
 }
 
@@ -632,7 +649,7 @@ impl CreditOracle {
             &DataKey::ComputeCooldownLedgers,
             &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
         );
-        // New deployments start at storage layout V2 — no migration needed.
+        // New deployments start at storage layout V2 â€” no migration needed.
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
@@ -685,7 +702,7 @@ impl CreditOracle {
     /// Register a trusted feeder address.
     ///
     /// `FeedersIndex` is append-only: the address is pushed only when it is
-    /// not already in the index, so a deregister → re-register cycle never
+    /// not already in the index, so a deregister â†’ re-register cycle never
     /// duplicates the entry. The flag key is then set to `true`, which both
     /// activates a fresh registration and clears a deregistration tombstone.
     ///
@@ -714,7 +731,7 @@ impl CreditOracle {
 
         // Append-only dedup: check index membership rather than flag-key
         // presence. A tombstoned (deregistered) feeder still has its flag key,
-        // and a long-dormant flag can outlive — or predecease — its index
+        // and a long-dormant flag can outlive â€” or predecease â€” its index
         // entry as the two keys' TTLs are bumped independently, so `has()` on
         // the flag is not a reliable "already indexed" test.
         let mut already_indexed = false;
@@ -779,7 +796,7 @@ impl CreditOracle {
     /// Register a trusted lender address.
     ///
     /// `LendersIndex` is append-only: the address is pushed only when it is
-    /// not already in the index, so a deregister → re-register cycle never
+    /// not already in the index, so a deregister â†’ re-register cycle never
     /// duplicates the entry. The flag key is then set to `true`, which both
     /// activates a fresh registration and clears a deregistration tombstone.
     ///
@@ -806,7 +823,7 @@ impl CreditOracle {
             .get(&index_key)
             .unwrap_or(Vec::new(&env));
 
-        // Append-only dedup — see `register_feeder` for why index membership,
+        // Append-only dedup â€” see `register_feeder` for why index membership,
         // not flag-key presence, is the reliable "already indexed" test.
         let mut already_indexed = false;
         for addr in lenders.iter() {
@@ -1138,8 +1155,8 @@ impl CreditOracle {
     ///
     /// When `compute_score` processes a VC, its type weight (in basis points)
     /// determines how many score points that VC contributes:
-    ///   `points = 20 × weight / 100`
-    /// Default weight for unregistered types (or VCs with no type) is 100 (1×).
+    ///   `points = 20 Ã— weight / 100`
+    /// Default weight for unregistered types (or VCs with no type) is 100 (1Ã—).
     ///
     /// Auth: admin only.
     pub fn set_vc_type_weight(
@@ -1188,20 +1205,20 @@ impl CreditOracle {
     /// restores the previous behavior on the next `compute_score`.
     ///
     /// Suggested values from docs/vc-weighting-design.md: `decay_bps_per_day =
-    /// 5` (0.05%/day) and `min_recency_bps = 5_000` (50% floor).
+    /// 5` (0.05%/day), `min_recency_bps = 5_000` (50% floor), and a
+    /// `decay_floor_score` of 300 (the base score).
     ///
     /// Auth: admin only.
     ///
     /// Errors with `InvalidRecencyConfig` when `min_recency_bps` exceeds
-    /// `BPS_DENOMINATOR`, which would otherwise define a floor above full
-    /// weight. `decay_bps_per_day` needs no bound: the floor already caps how
-    /// far any rate can push the multiplier down.
+    /// `BPS_DENOMINATOR` or `decay_floor_score` exceeds `MAX_SCORE`.
     pub fn set_recency_decay(
         env: Env,
         admin: Address,
         enabled: bool,
         decay_bps_per_day: u32,
         min_recency_bps: u32,
+        decay_floor_score: u32,
     ) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
@@ -1212,7 +1229,7 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        if min_recency_bps > BPS_DENOMINATOR {
+        if min_recency_bps > BPS_DENOMINATOR || decay_floor_score > MAX_SCORE {
             return Err(CreditOracleError::InvalidRecencyConfig);
         }
 
@@ -1225,10 +1242,18 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::MinRecencyBps, &min_recency_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::DecayFloorScore, &decay_floor_score);
 
         env.events().publish(
             (symbol_short!("RecDecay"),),
-            (enabled, decay_bps_per_day, min_recency_bps),
+            (
+                enabled,
+                decay_bps_per_day,
+                min_recency_bps,
+                decay_floor_score,
+            ),
         );
         Ok(())
     }
@@ -1351,6 +1376,12 @@ impl CreditOracle {
         // is never computed, so the per-VC arithmetic below is identical to the
         // pre-#530 code path.
         let recency_config = load_recency_config(&env);
+        let decay_floor_score =
+            if recency_config.enabled && env.storage().instance().has(&DataKey::IdentityOracleId) {
+                recency_config.decay_floor_score
+            } else {
+                MIN_SCORE
+            };
         let recency = if recency_config.enabled {
             Some(recency_config)
         } else {
@@ -1471,6 +1502,7 @@ impl CreditOracle {
             weights.vc_weight,
             weights.tx_weight,
             weights.repayment_weight,
+            decay_floor_score,
         );
 
         // Compute the repayment rate in basis points. The counters are u32, so
@@ -1537,7 +1569,7 @@ impl CreditOracle {
         Ok(score)
     }
 
-    /// Check cooldown — reject if the last computation was within the cooldown window.
+    /// Check cooldown â€” reject if the last computation was within the cooldown window.
     fn check_compute_cooldown(env: &Env, subject: &Address) -> Result<(), CreditOracleError> {
         let cooldown: u32 = env
             .storage()
@@ -1966,7 +1998,7 @@ impl CreditOracle {
 
     /// Resolve a pending dispute as admin.
     ///
-    /// Pass `accepted = true` to mark the dispute `Resolved` — signalling to
+    /// Pass `accepted = true` to mark the dispute `Resolved` â€” signalling to
     /// the off-chain feeder that the flagged input should be re-fetched and
     /// corrected.  Pass `accepted = false` to mark it `Rejected` (the input
     /// is deemed correct).  After resolution the subject may file a new
@@ -2096,29 +2128,70 @@ mod tests {
 
     #[test]
     fn test_scoring_spec_example_1_new_user_scores_300() {
-        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(score, 300);
     }
 
     #[test]
+    fn test_compute_score_pure_applies_decay_floor_only_with_repayment_history() {
+        let score_with_history = compute_score_pure(0, 0, 0, 0, 1, 0, 40, 30, 30, 600);
+        assert_eq!(score_with_history, 600);
+
+        let score_without_history = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, 600);
+        assert_eq!(score_without_history, MIN_SCORE);
+    }
+
+    #[test]
     fn test_scoring_spec_example_2_moderate_scores_569() {
-        let score = compute_score_pure(60, 3_000_000_000, 0, 8, 10, 3_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            60,
+            3_000_000_000,
+            0,
+            8,
+            10,
+            3_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 569);
     }
 
     #[test]
     fn test_scoring_spec_example_3_strong_scores_817() {
-        let score = compute_score_pure(100, 8_000_000_000, 0, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            8_000_000_000,
+            0,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 817);
     }
 
     #[test]
     fn test_scoring_spec_perfect_scores_850() {
-        let score =
-            compute_score_pure(100, 10_000_000_000, 100, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            10_000_000_000,
+            100,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 850);
     }
@@ -2127,8 +2200,8 @@ mod tests {
     fn test_compute_score_pure_u32_max_counterparties_is_clamped_to_bonus_cap() {
         // counterparty_bonus = min(avg_counterparties / 5, 20); at 100 the cap is
         // already reached, so `u32::MAX` must yield exactly the same score.
-        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30);
-        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(at_cap, at_max);
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2137,14 +2210,15 @@ mod tests {
     #[test]
     fn test_compute_score_pure_u32_max_volume_30d_is_handled_without_overflow() {
         // volume_score = min(volume_30d / 1e8, 80). `u32::MAX` raw units is 42
-        // units — below the 80-unit cap — so it must match the equivalent
+        // units â€” below the 80-unit cap â€” so it must match the equivalent
         // explicit unit count, while `i128::MAX` saturates the cap at 80.
-        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_units = compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_units =
+            compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_max, at_units);
 
-        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_cap, at_i128_max);
 
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2165,6 +2239,7 @@ mod tests {
             u32::MAX,
             u32::MAX,
             u32::MAX,
+            MIN_SCORE,
         );
 
         assert!(
@@ -2178,7 +2253,18 @@ mod tests {
     fn test_compute_score_pure_negative_and_zero_inputs_do_not_panic() {
         // i128::MIN volumes and a zero repayment divisor (no repayment history)
         // are the other malformed-edge shapes the scoring path must survive.
-        let score = compute_score_pure(0, i128::MIN, 0, u32::MAX, 0, i128::MIN, 40, 30, 30);
+        let score = compute_score_pure(
+            0,
+            i128::MIN,
+            0,
+            u32::MAX,
+            0,
+            i128::MIN,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert!(
             (MIN_SCORE..=MAX_SCORE).contains(&score),
@@ -2212,6 +2298,7 @@ mod tests {
                 40,
                 30,
                 30,
+                MIN_SCORE,
             )
         };
 
@@ -2234,7 +2321,7 @@ mod tests {
     fn test_default_weights_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2248,7 +2335,7 @@ mod tests {
     fn test_only_admin_can_register_feeder() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2264,7 +2351,7 @@ mod tests {
     fn test_register_lender_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2286,7 +2373,7 @@ mod tests {
     fn test_tx_stats_stored_and_retrieved() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2319,7 +2406,7 @@ mod tests {
     fn test_repayment_rate_calculated_correctly() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2350,7 +2437,7 @@ mod tests {
     fn test_compute_score_repayment_rate_does_not_overflow() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2389,7 +2476,7 @@ mod tests {
     fn test_base_score_is_300() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2404,7 +2491,7 @@ mod tests {
     fn test_compute_score_emits_score_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2425,7 +2512,7 @@ mod tests {
         // Verify the event was emitted by this contract
         assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
 
-        // Verify the topic is Symbol("Score") — decode Val back to Symbol for comparison
+        // Verify the topic is Symbol("Score") â€” decode Val back to Symbol for comparison
         assert_eq!(topics.len(), 1, "expected 1 topic element");
         let topic_val = topics.get(0).unwrap();
         let topic_sym: Symbol = topic_val
@@ -2433,7 +2520,7 @@ mod tests {
             .expect("topic should be a Symbol");
         assert_eq!(topic_sym, symbol_short!("Score"), "expected Score topic");
 
-        // Verify the data payload is (subject, score) — decode Val back to typed tuple
+        // Verify the data payload is (subject, score) â€” decode Val back to typed tuple
         let (event_subject, event_score): (Address, u32) = data
             .try_into_val(&env)
             .expect("data should be (Address, u32)");
@@ -2445,7 +2532,7 @@ mod tests {
     fn test_counterparty_bonus_adds_points() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2502,7 +2589,7 @@ mod tests {
     fn test_score_increases_with_repayments() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2523,7 +2610,7 @@ mod tests {
     fn test_repayment_amount_affects_score() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2551,7 +2638,7 @@ mod tests {
     fn test_score_bounded_300_850() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2588,12 +2675,12 @@ mod tests {
     fn test_weights_must_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights (sum != 100) — should return error via try_
+        // Invalid weights (sum != 100) â€” should return error via try_
         let result = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
@@ -2601,7 +2688,7 @@ mod tests {
         });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        // Component below MIN_COMPONENT_WEIGHT (10) â€” should return error
         let res_vc_low = client.try_propose_weights(&ScoringWeights {
             vc_weight: 9,
             tx_weight: 45,
@@ -2626,7 +2713,7 @@ mod tests {
             Err(Ok(CreditOracleError::InvalidWeights))
         );
 
-        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) â€” should succeed
         let res_valid_min = client.try_propose_weights(&ScoringWeights {
             vc_weight: 50,
             tx_weight: 10,
@@ -2639,7 +2726,7 @@ mod tests {
     fn test_propose_weights_unchanged_until_applied() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2662,7 +2749,7 @@ mod tests {
     fn test_get_pending_weights_returns_correct_record() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2691,7 +2778,7 @@ mod tests {
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2709,7 +2796,7 @@ mod tests {
     fn test_apply_weights_with_no_pending_weights_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2722,7 +2809,7 @@ mod tests {
     fn test_apply_weights_after_timelock_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2752,7 +2839,7 @@ mod tests {
     fn test_deregistered_feeder_cannot_update_tx_stats() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2787,7 +2874,7 @@ mod tests {
     fn test_batch_update_tx_stats_success_multiple_subjects() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2842,7 +2929,7 @@ mod tests {
     fn test_batch_update_tx_stats_empty_batch_validation() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2868,7 +2955,7 @@ mod tests {
     fn test_batch_update_tx_stats_partial_duplicates() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2935,7 +3022,7 @@ mod tests {
     fn test_batch_update_tx_stats_exceeds_max_batch_size() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2964,7 +3051,7 @@ mod tests {
     fn test_batch_update_tx_stats_feeder_not_registered() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2989,7 +3076,7 @@ mod tests {
     #[test]
     fn test_batch_update_tx_stats_requires_auth_before_size_check() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let feeder = Address::generate(&env);
@@ -3015,7 +3102,7 @@ mod tests {
     fn test_compute_score_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3035,7 +3122,7 @@ mod tests {
     fn test_deregistered_lender_cannot_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3054,7 +3141,7 @@ mod tests {
     fn test_record_repayment_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3075,7 +3162,7 @@ mod tests {
     fn test_list_feeders_returns_only_currently_registered() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3093,13 +3180,13 @@ mod tests {
 
         client.deregister_feeder(&admin, &feeder1);
 
-        // Only the still-registered feeder is listed …
+        // Only the still-registered feeder is listed â€¦
         assert_eq!(
             client.list_feeders(),
             Vec::from_array(&env, [feeder2.clone()])
         );
 
-        // … while FeedersIndex stays append-only (no removal on deregister).
+        // â€¦ while FeedersIndex stays append-only (no removal on deregister).
         let index_len: u32 = env.as_contract(&contract_id, || {
             let index: Vec<Address> = env
                 .storage()
@@ -3115,7 +3202,7 @@ mod tests {
     fn test_list_lenders_returns_only_currently_registered() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3133,13 +3220,13 @@ mod tests {
 
         client.deregister_lender(&admin, &lender1);
 
-        // Only the still-registered lender is listed …
+        // Only the still-registered lender is listed â€¦
         assert_eq!(
             client.list_lenders(),
             Vec::from_array(&env, [lender2.clone()])
         );
 
-        // … while LendersIndex stays append-only (no removal on deregister).
+        // â€¦ while LendersIndex stays append-only (no removal on deregister).
         let index_len: u32 = env.as_contract(&contract_id, || {
             let index: Vec<Address> = env
                 .storage()
@@ -3155,7 +3242,7 @@ mod tests {
     fn test_list_feeders_empty_index_returns_empty_vec() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3169,7 +3256,7 @@ mod tests {
     fn test_list_lenders_empty_index_returns_empty_vec() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3183,7 +3270,7 @@ mod tests {
     fn test_reregistering_deregistered_feeder_does_not_duplicate_index() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3195,7 +3282,7 @@ mod tests {
         client.register_feeder(&admin, &feeder);
 
         // list_feeders must show the feeder exactly once even though it went
-        // through a register → deregister → register cycle, and the append-only
+        // through a register â†’ deregister â†’ register cycle, and the append-only
         // FeedersIndex must hold it exactly once.
         assert_eq!(
             client.list_feeders(),
@@ -3216,7 +3303,7 @@ mod tests {
     fn test_deregister_feeder_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3262,7 +3349,7 @@ mod tests {
     fn test_deregister_lender_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3308,7 +3395,7 @@ mod tests {
     fn test_upgrade_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3324,7 +3411,7 @@ mod tests {
     fn test_counterparty_bonus_zero_when_tx_weight_is_zero() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3340,8 +3427,8 @@ mod tests {
         assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
         // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
-        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
-        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40, MIN_SCORE);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40, MIN_SCORE);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
@@ -3354,7 +3441,7 @@ mod tests {
     fn test_counterparty_bonus_applied_when_tx_weight_is_high() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3413,7 +3500,7 @@ mod tests {
     fn test_get_identity_oracle_returns_none_when_not_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3427,10 +3514,10 @@ mod tests {
     fn test_set_and_get_identity_oracle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
 
         let admin = Address::generate(&env);
 
@@ -3449,10 +3536,10 @@ mod tests {
     fn test_set_identity_oracle_emits_descriptive_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
@@ -3491,7 +3578,7 @@ mod tests {
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -3517,7 +3604,7 @@ mod tests {
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -3534,7 +3621,7 @@ mod tests {
     fn test_get_governance_returns_none_when_not_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // Before initialize and after it, no governance contract is recorded.
@@ -3547,7 +3634,7 @@ mod tests {
     fn test_get_governance_set_when_contract_accepts_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // Any registered contract stands in for the governance contract: only
@@ -3571,7 +3658,7 @@ mod tests {
     fn test_get_governance_not_set_when_account_accepts_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // `Address::generate` yields contract-form (C...) addresses in the test
@@ -3595,7 +3682,7 @@ mod tests {
     fn test_get_governance_cleared_when_admin_returns_to_account() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let governance = env.register(CreditOracle, ());
@@ -3621,7 +3708,7 @@ mod tests {
     fn test_compute_score_skips_write_when_inputs_unchanged() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3637,7 +3724,7 @@ mod tests {
             .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
-        // Second computation with identical inputs — write is skipped
+        // Second computation with identical inputs â€” write is skipped
         client.compute_score(&subject);
         let record2 = client.get_score(&subject).unwrap();
 
@@ -3668,7 +3755,7 @@ mod tests {
     fn test_score_history_rolls_over_and_preserves_order() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
@@ -3713,7 +3800,7 @@ mod tests {
     #[test]
     fn test_protocol_stats_default_zero() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let stats = client.get_protocol_stats();
@@ -3725,7 +3812,7 @@ mod tests {
     fn test_protocol_stats_increments_on_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3747,7 +3834,7 @@ mod tests {
     fn test_protocol_stats_increments_subjects_scored() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3769,7 +3856,7 @@ mod tests {
     fn test_protocol_stats_no_double_count_recompute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3777,7 +3864,7 @@ mod tests {
 
         let subject = Address::generate(&env);
 
-        // First computation — subjects_scored should increment
+        // First computation â€” subjects_scored should increment
         client.compute_score(&subject);
         let stats1 = client.get_protocol_stats();
         assert_eq!(stats1.total_subjects_scored, 1);
@@ -3786,7 +3873,7 @@ mod tests {
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
 
-        // Second computation with identical inputs — should NOT double count
+        // Second computation with identical inputs â€” should NOT double count
         client.compute_score(&subject);
         let stats2 = client.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
@@ -3795,7 +3882,7 @@ mod tests {
     #[test]
     fn test_protocol_metrics_default_zero() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let metrics = client.get_protocol_metrics();
@@ -3808,7 +3895,7 @@ mod tests {
     fn test_protocol_metrics_increments_on_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3832,7 +3919,7 @@ mod tests {
     fn test_protocol_metrics_accumulates_volume_and_borrowers_idempotently() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3916,13 +4003,13 @@ mod tests {
         assert_eq!(m2_final.total_repayments_count, 2);
     }
 
-    // ── Dispute mechanism tests ───────────────────────────────────────────
+    // â”€â”€ Dispute mechanism tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_flag_score_input_stores_pending_dispute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3944,7 +4031,7 @@ mod tests {
     fn flag_score_input_invalid_key() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3961,7 +4048,7 @@ mod tests {
     fn test_flag_score_input_rejects_duplicate_pending() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3981,7 +4068,7 @@ mod tests {
     fn test_resolve_dispute_accepted() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4002,7 +4089,7 @@ mod tests {
     fn test_resolve_dispute_rejected() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4023,7 +4110,7 @@ mod tests {
     fn test_resolve_nonexistent_dispute_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4039,7 +4126,7 @@ mod tests {
     fn test_resolve_already_resolved_dispute_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4060,7 +4147,7 @@ mod tests {
     fn test_new_dispute_allowed_after_resolution() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4083,7 +4170,7 @@ mod tests {
     fn test_list_disputes_returns_all_filed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4102,7 +4189,7 @@ mod tests {
     fn test_list_disputes_empty_for_new_subject() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4117,7 +4204,7 @@ mod tests {
     fn test_get_dispute_returns_none_when_no_dispute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4132,7 +4219,7 @@ mod tests {
     fn test_flag_score_input_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4161,7 +4248,7 @@ mod tests {
     fn test_vc_type_weight_scoring() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4197,7 +4284,7 @@ mod tests {
         client.anchor_vc(&feeder, &user, &vc4, &Some(unreg));
 
         let score = client.compute_score(&user);
-        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30);
+        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(score, expected);
 
         let record = client.get_score(&user).unwrap();
@@ -4208,10 +4295,10 @@ mod tests {
     fn test_set_vc_count_emits_deprecation_event_when_oracle_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
 
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
@@ -4256,7 +4343,7 @@ mod tests {
     fn test_set_vc_count_does_not_emit_deprecation_event_without_oracle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4345,7 +4432,7 @@ mod tests {
     fn test_get_recency_decay_defaults_to_disabled() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4355,13 +4442,14 @@ mod tests {
         assert!(!cfg.enabled, "decay must be opt-in");
         assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
         assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
+        assert_eq!(cfg.decay_floor_score, DEFAULT_DECAY_FLOOR_SCORE);
     }
 
     #[test]
     fn test_compute_cooldown_getter_and_setter() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -4374,7 +4462,7 @@ mod tests {
     fn test_compute_cooldown_setter_rejects_invalid_values() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -4392,32 +4480,33 @@ mod tests {
     fn test_set_recency_decay_stores_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        client.set_recency_decay(&admin, &true, &10, &2_500);
+        client.set_recency_decay(&admin, &true, &10, &2_500, &600);
 
         let cfg = client.get_recency_decay();
         assert!(cfg.enabled);
         assert_eq!(cfg.decay_bps_per_day, 10);
         assert_eq!(cfg.min_recency_bps, 2_500);
+        assert_eq!(cfg.decay_floor_score, 600);
     }
 
     #[test]
     fn test_set_recency_decay_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000);
+        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000, &600);
         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
@@ -4425,13 +4514,16 @@ mod tests {
     fn test_set_recency_decay_rejects_floor_above_full_weight() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001);
+        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001, &600);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
+
+        let result = client.try_set_recency_decay(&admin, &true, &5, &5_000, &(MAX_SCORE + 1));
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
 
         // The rejected call must not have mutated stored config.
@@ -4444,7 +4536,7 @@ mod tests {
         // leave the score untouched (backward compatibility).
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4460,7 +4552,7 @@ mod tests {
 
         let before = client.compute_score(&user);
 
-        client.set_recency_decay(&admin, &true, &5, &5_000);
+        client.set_recency_decay(&admin, &true, &5, &5_000, &DEFAULT_DECAY_FLOOR_SCORE);
         // Age the ledger by 5 years and recompute.
         env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
         env.ledger()
@@ -4516,6 +4608,7 @@ mod tests {
                     40,
                     30,
                     30,
+                    MIN_SCORE,
                 )
             };
 

@@ -19,7 +19,7 @@ pub const PROOF_SIZE: u32 = 384;
 /// Number of public inputs for the score-range circuit.
 pub const NUM_PUBLIC_INPUTS: u32 = 6;
 
-/// Circuit version constant — must match the `domain_separator` in the
+/// Circuit version constant â€” must match the `domain_separator` in the
 /// circuit artifact. Bumped on any breaking circuit change.
 pub const CIRCUIT_VERSION: u32 = 1;
 
@@ -367,7 +367,7 @@ impl ScoreRangeVerifier {
     /// Verify a Groth16 proof that the committed score exceeds `threshold`.
     ///
     /// Returns `true` iff the proof is valid for the supplied public inputs.
-    /// Does not mutate state — lenders may simulate read-only.
+    /// Does not mutate state â€” lenders may simulate read-only.
     pub fn verify_score_range(
         env: Env,
         proof: Bytes,
@@ -597,7 +597,7 @@ mod tests {
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -648,10 +648,9 @@ mod tests {
     #[test]
     fn test_initialize_stores_config() {
         let (env, admin, _) = setup();
-        let client =
-            ScoreRangeVerifierClient::new(&env, &env.register_contract(None, ScoreRangeVerifier));
+        let client = ScoreRangeVerifierClient::new(&env, &env.register(ScoreRangeVerifier, ()));
         // Re-register to get a fresh client bound to the same contract.
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
         client.initialize(&admin, &vk_hash, &CIRCUIT_VERSION);
@@ -665,7 +664,7 @@ mod tests {
     fn test_initialize_rejects_double_init() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -678,7 +677,7 @@ mod tests {
     #[test]
     fn test_verify_score_range_rejects_wrong_size_proof() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -692,7 +691,7 @@ mod tests {
     #[test]
     fn test_verify_score_range_tampered_proof_raises_host_error() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -709,7 +708,7 @@ mod tests {
     #[test]
     fn test_verify_score_range_rejects_malformed_points() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -727,7 +726,7 @@ mod tests {
     #[test]
     fn test_verify_and_consume_tampered_proof_raises_host_error() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -752,7 +751,7 @@ mod tests {
     fn test_verify_and_consume_requires_auth() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -774,7 +773,7 @@ mod tests {
     #[test]
     fn test_verify_and_consume_rejects_wrong_size_proof() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -795,7 +794,7 @@ mod tests {
 
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -835,7 +834,7 @@ mod tests {
         }
 
         // The ConsumedProof entry must still exist after advancing past
-        // PERS_TTL_EXTEND — this is the actual replay-protection guarantee.
+        // PERS_TTL_EXTEND â€” this is the actual replay-protection guarantee.
         env.as_contract(&contract_id, || {
             assert!(env
                 .storage()
@@ -847,7 +846,7 @@ mod tests {
     fn test_verify_score_range_requires_initialization() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
 
         let inputs = make_public_inputs(&env);

@@ -66,8 +66,8 @@ seconds) recorded by identity-oracle when the VC was anchored.
 
 Configuration lives on credit-oracle:
 
-- `set_recency_decay(admin, enabled, decay_bps_per_day, min_recency_bps)` — admin only
-- `get_recency_decay()` — returns `RecencyDecayConfig { enabled, decay_bps_per_day, min_recency_bps }`
+- `set_recency_decay(admin, enabled, decay_bps_per_day, min_recency_bps, decay_floor_score)` — admin only
+- `get_recency_decay()` — returns `RecencyDecayConfig { enabled, decay_bps_per_day, min_recency_bps, decay_floor_score }`
 
 Defaults, applied when the admin has never configured decay:
 
@@ -76,14 +76,20 @@ Defaults, applied when the admin has never configured decay:
 | `enabled` | `false` | Opt-in — deployments score identically until switched on |
 | `decay_bps_per_day` | 5 (0.05% per day) | |
 | `min_recency_bps` | 5000 (50% floor) | Values above 10_000 are rejected with `InvalidRecencyConfig` |
+| `decay_floor_score` | 300 | For subjects with repayment history, clamps the final score to at least this value (maximum 850) |
 
 **Requires a configured identity-oracle.** `anchored_at` is only available from
 `get_vc_details`, so decay applies on the cross-contract path only. With no
 identity-oracle link, the local `VcList` / `VcCount` fallbacks are unchanged.
 
+When decay is enabled with an identity-oracle configured, subjects with
+repayment history are prevented from falling below
+`max(300, decay_floor_score)` as their VC contribution decays. Subjects with no
+recorded repayments retain the 300 minimum.
+
 Decay is uniform across credential types; per-type decay rates remain out of
-scope. No storage migration is required — the three new instance keys are
-optional and read back as "disabled" on contracts deployed before this change.
+scope. No storage migration is required — the four instance keys are optional
+and read back using their defaults on contracts deployed before this change.
 
 ## Data flow
 
@@ -131,6 +137,8 @@ One tier-2 KYC VC → `vc_score = 60`, matching three generic VCs — reflecting
 | Recency decay never configured | Disabled — per-VC points identical to pre-#530 |
 | Recency decay disabled again | Next `compute_score` drops the multiplier entirely |
 | Recency enabled, no identity-oracle | No decay — `anchored_at` is unavailable |
+| Recency enabled with identity-oracle, repayment history present | Final score is clamped to at least `max(300, decay_floor_score)` |
+| Recency enabled with identity-oracle, no repayment history | Final score can still fall to 300 |
 | Existing `anchor_vc` records | Treated as `generic` type, issuer tier 100 bps |
 | No identity-oracle link on credit-oracle | Legacy `vc_count × 20` via cached feeder count |
 | Issuer tier unset | Defaults to 100 bps (same as legacy per-VC value) |

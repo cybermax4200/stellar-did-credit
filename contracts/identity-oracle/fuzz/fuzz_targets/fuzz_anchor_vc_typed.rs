@@ -22,8 +22,8 @@ const MAX_SYMBOL_LENGTH: usize = 32;
 
 fuzz_target!(|data: &[u8]| {
     // Input layout (minimum 33 bytes):
-    //   [0..32]   [u8; 32] — vc_hash
-    //   [32..]    &str — credential_type (truncated to MAX_SYMBOL_LENGTH)
+    //   [0..32]   [u8; 32] â€” vc_hash
+    //   [32..]    &str â€” credential_type (truncated to MAX_SYMBOL_LENGTH)
     if data.len() < 33 {
         return;
     }
@@ -47,7 +47,7 @@ fuzz_target!(|data: &[u8]| {
     }
 
     let env = Env::default();
-    let contract_id = env.register_contract(None, IdentityOracle);
+    let contract_id = env.register(IdentityOracle, ());
     let client = IdentityOracleClient::new(&env, &contract_id);
     
     let admin = Address::generate(&env);

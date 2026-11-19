@@ -532,7 +532,7 @@ mod tests {
     fn test_set_batch_limit_and_enforce() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -559,7 +559,7 @@ mod tests {
     fn test_set_batch_limit_rejects_invalid() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -576,7 +576,7 @@ mod tests {
     fn set_identity_oracle_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -606,7 +606,7 @@ mod tests {
     fn test_revoke_and_check() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -621,7 +621,7 @@ mod tests {
     #[test]
     fn test_unknown_hash_not_revoked() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let vc_hash = BytesN::from_array(&env, &[2u8; 32]);
@@ -632,7 +632,7 @@ mod tests {
     fn test_only_registered_issuer_can_revoke() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer_a = Address::generate(&env);
@@ -651,7 +651,7 @@ mod tests {
     fn test_batch_revoke_five_hashes() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -673,7 +673,7 @@ mod tests {
     fn batch_revoke_events() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -725,7 +725,7 @@ mod tests {
     fn test_batch_revoke_exceeds_limit() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -745,7 +745,7 @@ mod tests {
     fn test_batch_revoke_size_boundaries() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
         let issuer = Address::generate(&env);
 
@@ -773,7 +773,7 @@ mod tests {
     fn test_batch_revoke_rejects_empty_batch() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
         let issuer = Address::generate(&env);
         let vc_hashes = Vec::new(&env);
@@ -788,7 +788,7 @@ mod tests {
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -807,7 +807,7 @@ mod tests {
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -824,7 +824,7 @@ mod tests {
     fn test_pause_and_unpause() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         assert!(!client.is_paused());
@@ -849,7 +849,7 @@ mod tests {
     fn test_pause_requires_admin_auth() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -868,7 +868,7 @@ mod tests {
         ) {
             let env = Env::default();
             env.mock_all_auths();
-            let contract_id = env.register_contract(None, RevocationRegistry);
+            let contract_id = env.register(RevocationRegistry, ());
             let client = RevocationRegistryClient::new(&env, &contract_id);
 
             let issuer = Address::generate(&env);
@@ -894,7 +894,7 @@ mod tests {
         ) {
             let env = Env::default();
             env.mock_all_auths();
-            let contract_id = env.register_contract(None, RevocationRegistry);
+            let contract_id = env.register(RevocationRegistry, ());
             let client = RevocationRegistryClient::new(&env, &contract_id);
 
             let issuer = Address::generate(&env);
@@ -915,7 +915,7 @@ mod tests {
     fn test_maintain_storage_succeeds_for_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -929,7 +929,7 @@ mod tests {
     fn test_maintain_storage_fails_for_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -944,7 +944,7 @@ mod tests {
     fn test_get_revocation_count_and_list_revoked_single_and_batch() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -1000,7 +1000,7 @@ mod tests {
     fn test_list_revoked_pagination_edge_cases() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
         let issuer = Address::generate(&env);
 
@@ -1027,7 +1027,7 @@ mod tests {
     fn test_list_revoked_for_issuer() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -1061,7 +1061,7 @@ mod tests {
     fn test_indexed_revocations_scale_and_paginate() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
         let issuer = Address::generate(&env);
         let subject = Address::generate(&env);
@@ -1098,7 +1098,7 @@ mod tests {
     fn test_get_revocation_count_and_list_revoked_idempotent() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -1125,7 +1125,7 @@ mod tests {
     fn test_initialize_already_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -1139,7 +1139,7 @@ mod tests {
     fn test_guard_absent_without_identity_oracle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
@@ -1163,7 +1163,7 @@ mod tests {
     #[test]
     fn test_enter_guard_detects_locked_state() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
 
         env.as_contract(&contract_id, || {
             env.storage()
@@ -1178,7 +1178,7 @@ mod tests {
     #[test]
     fn test_exit_guard_releases_lock() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
 
         env.as_contract(&contract_id, || {
             env.storage()
@@ -1199,7 +1199,7 @@ mod tests {
     fn test_sequential_revokes_succeed() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, RevocationRegistry);
+        let contract_id = env.register(RevocationRegistry, ());
         let client = RevocationRegistryClient::new(&env, &contract_id);
 
         let issuer = Address::generate(&env);
