@@ -69,10 +69,7 @@ pub fn enforce_u32_less_than<F: PrimeField>(
 }
 
 /// Enforce that `value >= bound` for a 32-bit value.
-pub fn enforce_u32_gte<F: PrimeField>(
-    value: &UInt32<F>,
-    bound: u32,
-) -> Result<(), SynthesisError> {
+pub fn enforce_u32_gte<F: PrimeField>(value: &UInt32<F>, bound: u32) -> Result<(), SynthesisError> {
     let bound_fp = FpVar::<F>::constant(F::from(bound as u64));
     let value_fp = uint32_to_fp(value);
     let diff = value_fp - bound_fp;
@@ -84,10 +81,7 @@ pub fn enforce_u32_gte<F: PrimeField>(
 }
 
 /// Enforce that `value > bound` for a 32-bit value.
-pub fn enforce_u32_gt<F: PrimeField>(
-    value: &UInt32<F>,
-    bound: u32,
-) -> Result<(), SynthesisError> {
+pub fn enforce_u32_gt<F: PrimeField>(value: &UInt32<F>, bound: u32) -> Result<(), SynthesisError> {
     // value > bound  <=>  value >= bound + 1
     enforce_u32_gte(value, bound.saturating_add(1))
 }

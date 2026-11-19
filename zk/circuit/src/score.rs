@@ -51,7 +51,10 @@ mod tests {
 
     #[test]
     fn exceptional_score_equals_850() {
-        assert_eq!(compute_score_pure(100, i128::MAX, 100, 100, 100, i128::MAX, 40, 30, 30), 850);
+        assert_eq!(
+            compute_score_pure(100, i128::MAX, 100, 100, 100, i128::MAX, 40, 30, 30),
+            850
+        );
     }
 
     #[test]
@@ -59,7 +62,10 @@ mod tests {
         // All-zero inputs -> 300
         assert_eq!(compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40), 300);
         // Max inputs -> 850
-        assert_eq!(compute_score_pure(100, i128::MAX, 100, 100, 100, i128::MAX, 40, 30, 30), 850);
+        assert_eq!(
+            compute_score_pure(100, i128::MAX, 100, 100, 100, i128::MAX, 40, 30, 30),
+            850
+        );
     }
 
     #[test]

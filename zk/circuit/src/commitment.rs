@@ -59,11 +59,7 @@ impl PedersenCommitment {
     ///   5: last_updated
     ///   6: computed_at_ledger
     ///   7: stale (0 or 1)
-    pub fn commit(
-        &self,
-        fields: &[Fr; COMMIT_FIELDS],
-        blinding: Fr,
-    ) -> Fr {
+    pub fn commit(&self, fields: &[Fr; COMMIT_FIELDS], blinding: Fr) -> Fr {
         let mut acc = Fr::from(0u32);
         for (i, field) in fields.iter().enumerate() {
             acc += self.coefficients[i] * field;

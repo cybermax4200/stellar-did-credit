@@ -127,31 +127,21 @@ impl ScoreCircuit {
 }
 
 impl ConstraintSynthesizer<Fr> for ScoreCircuit {
-    fn generate_constraints(
-        self,
-        cs: ConstraintSystemRef<Fr>,
-    ) -> Result<(), SynthesisError> {
+    fn generate_constraints(self, cs: ConstraintSystemRef<Fr>) -> Result<(), SynthesisError> {
         let w = self.witness.as_ref();
 
         // ---- Public inputs ----
-        let threshold = FpVar::new_input(cs.clone(), || {
-            Ok(Fr::from(self.public_inputs.threshold))
-        })?;
-        let _subject = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.subject)
-        })?;
-        let _credit_oracle_id = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.credit_oracle_id)
-        })?;
-        let commitment = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.score_commitment)
-        })?;
+        let threshold =
+            FpVar::new_input(cs.clone(), || Ok(Fr::from(self.public_inputs.threshold)))?;
+        let _subject = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.subject))?;
+        let _credit_oracle_id =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.credit_oracle_id))?;
+        let commitment = FpVar::new_input(cs.clone(), || Ok(self.public_inputs.score_commitment))?;
         let _snapshot_ledger = FpVar::new_input(cs.clone(), || {
             Ok(Fr::from(self.public_inputs.snapshot_ledger))
         })?;
-        let _domain_separator = FpVar::new_input(cs.clone(), || {
-            Ok(self.public_inputs.domain_separator)
-        })?;
+        let _domain_separator =
+            FpVar::new_input(cs.clone(), || Ok(self.public_inputs.domain_separator))?;
 
         // ---- Private witness ----
         let score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.score).unwrap_or(0)))?;
@@ -162,76 +152,56 @@ impl ConstraintSynthesizer<Fr> for ScoreCircuit {
         let avg_counterparties = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.avg_counterparties).unwrap_or(0))
         })?;
-        let repayment_rate = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repayment_rate).unwrap_or(0))
-        })?;
-        let last_updated = UInt64::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.last_updated).unwrap_or(0))
-        })?;
+        let repayment_rate =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repayment_rate).unwrap_or(0)))?;
+        let last_updated =
+            UInt64::new_witness(cs.clone(), || Ok(w.map(|w| w.last_updated).unwrap_or(0)))?;
         let computed_at_ledger = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.computed_at_ledger).unwrap_or(0))
         })?;
         let stale = Boolean::new_witness(cs.clone(), || Ok(w.map(|w| w.stale).unwrap_or(false)))?;
 
         // Raw scoring inputs
-        let vc_points = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_points).unwrap_or(0))
-        })?;
-        let on_time_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.on_time_count).unwrap_or(0))
-        })?;
-        let total_count = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.total_count).unwrap_or(0))
-        })?;
+        let vc_points =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_points).unwrap_or(0)))?;
+        let on_time_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.on_time_count).unwrap_or(0)))?;
+        let total_count =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.total_count).unwrap_or(0)))?;
         let total_repaid = UInt64::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.total_repaid.max(0) as u64).unwrap_or(0))
         })?;
-        let vc_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_weight).unwrap_or(0))
-        })?;
-        let tx_weight = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_weight).unwrap_or(0))
-        })?;
+        let vc_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_weight).unwrap_or(0)))?;
+        let tx_weight =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_weight).unwrap_or(0)))?;
         let repayment_weight = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_weight).unwrap_or(0))
         })?;
 
         // Intermediate values
-        let vc_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.vc_score).unwrap_or(0))
-        })?;
-        let volume_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.volume_score).unwrap_or(0))
-        })?;
+        let vc_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.vc_score).unwrap_or(0)))?;
+        let volume_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.volume_score).unwrap_or(0)))?;
         let counterparty_bonus = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.counterparty_bonus).unwrap_or(0))
         })?;
-        let tx_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.tx_score).unwrap_or(0))
-        })?;
+        let tx_score = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.tx_score).unwrap_or(0)))?;
         let repayment_rate_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_rate_score).unwrap_or(0))
         })?;
         let repayment_volume_score = UInt32::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.repayment_volume_score).unwrap_or(0))
         })?;
-        let repay_score = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.repay_score).unwrap_or(0))
-        })?;
-        let composite = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.composite).unwrap_or(0))
-        })?;
+        let repay_score =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.repay_score).unwrap_or(0)))?;
+        let composite =
+            UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.composite).unwrap_or(0)))?;
 
         // Integer-division quotients
-        let q_volume = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_volume).unwrap_or(0))
-        })?;
-        let q_cp = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_cp).unwrap_or(0))
-        })?;
-        let q_rv = UInt32::new_witness(cs.clone(), || {
-            Ok(w.map(|w| w.q_rv).unwrap_or(0))
-        })?;
+        let q_volume = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_volume).unwrap_or(0)))?;
+        let q_cp = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_cp).unwrap_or(0)))?;
+        let q_rv = UInt32::new_witness(cs.clone(), || Ok(w.map(|w| w.q_rv).unwrap_or(0)))?;
 
         let blinding = FpVar::new_witness(cs.clone(), || {
             Ok(w.map(|w| w.blinding).unwrap_or(Fr::from(0u32)))
@@ -464,13 +434,7 @@ mod tests {
     use super::*;
     use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
 
-    #[test]
-    fn circuit_satisfied_for_valid_witness() {
-        let cs = ConstraintSystem::<Fr>::new_ref();
-        cs.set_mode(SynthesisMode::Prove {
-            construct_matrices: true,
-        });
-
+    fn valid_circuit() -> ScoreCircuit {
         let w = ScoreWitness {
             score: 668,
             vc_count: 10,
@@ -517,7 +481,7 @@ mod tests {
         ];
         let commitment = scheme.commit(&fields, w.blinding);
 
-        let circuit = ScoreCircuit::new(
+        ScoreCircuit::new(
             Some(w),
             ScorePublicInputs {
                 threshold: 600,
@@ -527,8 +491,48 @@ mod tests {
                 snapshot_ledger: 12345,
                 domain_separator: Fr::from(3u32),
             },
-        );
+        )
+    }
+
+    #[test]
+    fn circuit_satisfied_for_valid_witness() {
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        cs.set_mode(SynthesisMode::Prove {
+            construct_matrices: true,
+        });
+        let circuit = valid_circuit();
         circuit.generate_constraints(cs.clone()).unwrap();
         assert!(cs.is_satisfied().unwrap());
+    }
+
+    /// Run explicitly in CI to report proving time and enforce the R1CS budget.
+    #[test]
+    #[ignore = "run explicitly for constraint and proving benchmarks"]
+    fn benchmark_score_circuit() {
+        use ark_bls12_381::Bls12_381;
+        use ark_groth16::Groth16;
+        use ark_snark::SNARK;
+        use ark_std::rand::{rngs::StdRng, SeedableRng};
+        use std::time::Instant;
+
+        // Baseline: 8,041 constraints; budget allows approximately 5.7% growth.
+        const MAX_CONSTRAINTS: usize = 8_500;
+        let cs = ConstraintSystem::<Fr>::new_ref();
+        valid_circuit().generate_constraints(cs.clone()).unwrap();
+        assert!(cs.is_satisfied().unwrap(), "benchmark witness is invalid");
+        let count = cs.num_constraints();
+        println!("Score circuit constraints: {count} (budget: < {MAX_CONSTRAINTS})");
+        assert!(count < MAX_CONSTRAINTS, "score circuit constraint budget exceeded: {count} >= {MAX_CONSTRAINTS}");
+
+        // Setup is excluded from the measured proving time; this deterministic
+        // key is for benchmarking only and must never be used in production.
+        let mut rng = StdRng::from_seed([0u8; 32]);
+        let setup_start = Instant::now();
+        let (pk, _) = Groth16::<Bls12_381>::circuit_specific_setup(valid_circuit(), &mut rng).unwrap();
+        println!("Score circuit setup: {:?}", setup_start.elapsed());
+        let circuit = valid_circuit();
+        let start = Instant::now();
+        Groth16::<Bls12_381>::prove(&pk, circuit, &mut rng).unwrap();
+        println!("Score circuit proof generation: {:?}", start.elapsed());
     }
 }
