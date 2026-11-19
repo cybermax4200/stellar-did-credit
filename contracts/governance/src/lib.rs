@@ -157,11 +157,24 @@ fn set_voter_weight(env: &Env, voter: Address, weight: i128, registration: bool)
         env.storage().persistent().remove(&key);
     } else {
         env.storage().persistent().set(&key, &weight);
-        env.storage().persistent().extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
     }
-    let total: i128 = env.storage().instance().get(&DataKey::TotalRegisteredWeight).unwrap_or(0);
-    env.storage().instance().set(&DataKey::TotalRegisteredWeight, &(total - old_weight + weight));
-    let topic = if registration { symbol_short!("VoterReg") } else { symbol_short!("VoterUpd") };
+    let total: i128 = env
+        .storage()
+        .instance()
+        .get(&DataKey::TotalRegisteredWeight)
+        .unwrap_or(0);
+    env.storage().instance().set(
+        &DataKey::TotalRegisteredWeight,
+        &(total - old_weight + weight),
+    );
+    let topic = if registration {
+        symbol_short!("VoterReg")
+    } else {
+        symbol_short!("VoterUpd")
+    };
     env.events().publish((topic, voter), weight);
 }
 
@@ -687,7 +700,10 @@ impl Governance {
         admin: Address,
         entries: Vec<VoterWeightEntry>,
     ) -> Result<(), GovernanceError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .ok_or(GovernanceError::NotAuthorized)?;
         if admin != stored_admin {
             return Err(GovernanceError::NotAuthorized);
@@ -714,7 +730,10 @@ impl Governance {
         admin: Address,
         entries: Vec<VoterWeightEntry>,
     ) -> Result<(), GovernanceError> {
-        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin)
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
             .ok_or(GovernanceError::NotAuthorized)?;
         if admin != stored_admin {
             return Err(GovernanceError::NotAuthorized);
@@ -1074,10 +1093,19 @@ mod tests {
 
         let mut entries = Vec::new(&env);
         for _ in 0..25 {
-            entries.push_back(VoterWeightEntry { voter: Address::generate(&env), weight: 10 });
+            entries.push_back(VoterWeightEntry {
+                voter: Address::generate(&env),
+                weight: 10,
+            });
         }
-        assert_eq!(client.try_batch_register_voters(&other, &entries), Err(Ok(GovernanceError::NotAuthorized)));
-        assert_eq!(client.try_batch_update_voter_weights(&other, &entries), Err(Ok(GovernanceError::NotAuthorized)));
+        assert_eq!(
+            client.try_batch_register_voters(&other, &entries),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_batch_update_voter_weights(&other, &entries),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
         client.batch_register_voters(&admin, &entries);
         for entry in entries.iter() {
             assert_eq!(client.get_voter_weight(&entry.voter), Some(10));
@@ -1086,31 +1114,64 @@ mod tests {
 
         let voter = entries.get(0).unwrap().voter;
         let mut updates = Vec::new(&env);
-        updates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 0 });
-        updates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 30 });
+        updates.push_back(VoterWeightEntry {
+            voter: voter.clone(),
+            weight: 0,
+        });
+        updates.push_back(VoterWeightEntry {
+            voter: voter.clone(),
+            weight: 30,
+        });
         client.batch_update_voter_weights(&admin, &updates);
         assert_eq!(client.get_voter_weight(&voter), Some(30));
         assert_eq!(client.get_total_registered_weight(), 270);
         let mut duplicates = Vec::new(&env);
-        duplicates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 20 });
-        duplicates.push_back(VoterWeightEntry { voter: voter.clone(), weight: 30 });
+        duplicates.push_back(VoterWeightEntry {
+            voter: voter.clone(),
+            weight: 20,
+        });
+        duplicates.push_back(VoterWeightEntry {
+            voter: voter.clone(),
+            weight: 30,
+        });
         client.batch_register_voters(&admin, &duplicates);
         assert_eq!(client.get_total_registered_weight(), 270);
 
         let mut invalid = Vec::new(&env);
-        invalid.push_back(VoterWeightEntry { voter: voter.clone(), weight: 50 });
-        invalid.push_back(VoterWeightEntry { voter: other.clone(), weight: -1 });
-        assert_eq!(client.try_batch_register_voters(&admin, &invalid), Err(Ok(GovernanceError::InvalidVoteWeight)));
-        assert_eq!(client.try_batch_update_voter_weights(&admin, &invalid), Err(Ok(GovernanceError::InvalidVoteWeight)));
+        invalid.push_back(VoterWeightEntry {
+            voter: voter.clone(),
+            weight: 50,
+        });
+        invalid.push_back(VoterWeightEntry {
+            voter: other.clone(),
+            weight: -1,
+        });
+        assert_eq!(
+            client.try_batch_register_voters(&admin, &invalid),
+            Err(Ok(GovernanceError::InvalidVoteWeight))
+        );
+        assert_eq!(
+            client.try_batch_update_voter_weights(&admin, &invalid),
+            Err(Ok(GovernanceError::InvalidVoteWeight))
+        );
         assert_eq!(client.get_voter_weight(&voter), Some(30));
         assert_eq!(client.get_total_registered_weight(), 270);
 
         let mut oversized = Vec::new(&env);
         for _ in 0..51 {
-            oversized.push_back(VoterWeightEntry { voter: other.clone(), weight: 1 });
+            oversized.push_back(VoterWeightEntry {
+                voter: other.clone(),
+                weight: 1,
+            });
         }
-        assert_eq!(client.try_batch_register_voters(&admin, &oversized), Err(Ok(GovernanceError::VoterBatchTooLarge)));
-        assert_eq!(client.try_batch_update_voter_weights(&admin, &oversized), Err(Ok(GovernanceError::VoterBatchTooLarge)));
+        assert_eq!(
+            client.try_batch_register_voters(&admin, &oversized),
+            Err(Ok(GovernanceError::VoterBatchTooLarge))
+        );
+        assert_eq!(
+            client.try_batch_update_voter_weights(&admin, &oversized),
+            Err(Ok(GovernanceError::VoterBatchTooLarge))
+        );
         assert_eq!(client.get_voter_weight(&other), None);
     }
 

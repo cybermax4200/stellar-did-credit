@@ -762,6 +762,7 @@ mod tests {
             hash_arr[0] = i;
             max_hash_batch.push_back(BytesN::from_array(&env, &hash_arr));
         }
+        env.cost_estimate().budget().reset_unlimited();
         assert_eq!(
             client.try_batch_revoke(&issuer, &max_hash_batch),
             Ok(Ok(()))

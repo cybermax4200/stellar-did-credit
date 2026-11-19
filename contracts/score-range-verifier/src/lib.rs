@@ -481,41 +481,81 @@ mod tests {
     use ark_ff::{BigInteger, PrimeField};
     use ark_serialize::CanonicalSerialize;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
-    use zk_circuit::{commitment::PedersenCommitment, generate_proof, generate_test_keys, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::{Bytes, Env};
+    use zk_circuit::{
+        commitment::PedersenCommitment, generate_proof, generate_test_keys, ScorePublicInputs,
+        ScoreWitness, CIRCUIT_DOMAIN,
+    };
 
     #[test]
     fn test_circuit_proof_with_development_key() {
         let (env, _, contract_id) = setup();
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let witness = ScoreWitness {
-            score: 668, vc_count: 10, tx_volume_30d: 50_000_000_000,
-            avg_counterparties: 10, repayment_rate: 5000, last_updated: 1_700_000_000,
-            computed_at_ledger: 1234567, stale: false, vc_points: 50, on_time_count: 50,
-            total_count: 100, total_repaid: 20_000_000_000, vc_weight: 40, tx_weight: 30,
-            repayment_weight: 30, vc_score: 50, volume_score: 80, counterparty_bonus: 2,
-            tx_score: 82, repayment_rate_score: 50, repayment_volume_score: 100,
-            repay_score: 75, composite: 67, q_volume: 500, q_cp: 2, q_rv: 200,
-            total_count_is_zero: false, total_count_inv: 0, blinding: ArkFr::from(42u32),
+            score: 668,
+            vc_count: 10,
+            tx_volume_30d: 50_000_000_000,
+            avg_counterparties: 10,
+            repayment_rate: 5000,
+            last_updated: 1_700_000_000,
+            computed_at_ledger: 1234567,
+            stale: false,
+            vc_points: 50,
+            on_time_count: 50,
+            total_count: 100,
+            total_repaid: 20_000_000_000,
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+            vc_score: 50,
+            volume_score: 80,
+            counterparty_bonus: 2,
+            tx_score: 82,
+            repayment_rate_score: 50,
+            repayment_volume_score: 100,
+            repay_score: 75,
+            composite: 67,
+            q_volume: 500,
+            q_cp: 2,
+            q_rv: 200,
+            total_count_is_zero: false,
+            total_count_inv: 0,
+            blinding: ArkFr::from(42u32),
         };
-        let fields = [witness.score as u64, witness.vc_count as u64, witness.tx_volume_30d as u64,
-            witness.avg_counterparties as u64, witness.repayment_rate as u64, witness.last_updated,
-            witness.computed_at_ledger as u64, witness.stale as u64].map(ArkFr::from);
+        let fields = [
+            witness.score as u64,
+            witness.vc_count as u64,
+            witness.tx_volume_30d as u64,
+            witness.avg_counterparties as u64,
+            witness.repayment_rate as u64,
+            witness.last_updated,
+            witness.computed_at_ledger as u64,
+            witness.stale as u64,
+        ]
+        .map(ArkFr::from);
         let commitment = PedersenCommitment::new(CIRCUIT_DOMAIN).commit(&fields, witness.blinding);
         let mut commitment_bytes = [0u8; 32];
         let encoded = commitment.into_bigint().to_bytes_be();
         commitment_bytes[32 - encoded.len()..].copy_from_slice(&encoded);
         let inputs = ScoreRangePublicInputs {
-            threshold: 600, subject: Address::generate(&env), credit_oracle_id: Address::generate(&env),
-            score_commitment: BytesN::from_array(&env, &commitment_bytes), snapshot_ledger: 12345,
+            threshold: 600,
+            subject: Address::generate(&env),
+            credit_oracle_id: Address::generate(&env),
+            score_commitment: BytesN::from_array(&env, &commitment_bytes),
+            snapshot_ledger: 12345,
             domain_separator: BytesN::from_array(&env, &[0u8; 32]),
         };
         let public = ScorePublicInputs {
             threshold: inputs.threshold,
-            subject: ArkFr::from_be_bytes_mod_order(&address_to_field(&env, &inputs.subject).to_array()),
-            credit_oracle_id: ArkFr::from_be_bytes_mod_order(&address_to_field(&env, &inputs.credit_oracle_id).to_array()),
-            score_commitment: commitment, snapshot_ledger: inputs.snapshot_ledger,
+            subject: ArkFr::from_be_bytes_mod_order(
+                &address_to_field(&env, &inputs.subject).to_array(),
+            ),
+            credit_oracle_id: ArkFr::from_be_bytes_mod_order(
+                &address_to_field(&env, &inputs.credit_oracle_id).to_array(),
+            ),
+            score_commitment: commitment,
+            snapshot_ledger: inputs.snapshot_ledger,
             domain_separator: ArkFr::from(0u32),
         };
         let mut rng = StdRng::from_seed([0u8; 32]);
@@ -537,7 +577,10 @@ mod tests {
         for (index, point) in vk.gamma_abc_g1.iter().enumerate() {
             serialized.clear();
             point.serialize_uncompressed(&mut serialized).unwrap();
-            assert_eq!(serialized.as_slice(), &embedded.gamma_abc.get(index as u32).unwrap().to_array());
+            assert_eq!(
+                serialized.as_slice(),
+                &embedded.gamma_abc.get(index as u32).unwrap().to_array()
+            );
         }
         let proof = generate_proof(witness, public, &pk, &mut rng).unwrap();
         let mut bytes = ark_std::vec::Vec::new();

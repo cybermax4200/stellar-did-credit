@@ -240,8 +240,8 @@ pub fn compute_score_pure(
         .saturating_add(repay_score.saturating_mul(repayment_weight as u128))
         .saturating_div(100);
 
-    let score = (MIN_SCORE as u128)
-        .saturating_add(composite.saturating_mul(550).saturating_div(100));
+    let score =
+        (MIN_SCORE as u128).saturating_add(composite.saturating_mul(550).saturating_div(100));
     score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
 }
 
