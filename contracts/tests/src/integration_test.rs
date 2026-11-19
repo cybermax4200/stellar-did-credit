@@ -3252,4 +3252,59 @@ mod tests {
         let too_large_res = credit.try_batch_update_tx_stats(&feeder, &large_batch);
         assert_eq!(too_large_res, Err(Ok(CreditOracleError::BatchTooLarge)));
     }
+
+    #[test]
+    fn test_batch_verify_vc_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+        let issuer = soroban_sdk::Address::generate(&env);
+        let subject = soroban_sdk::Address::generate(&env);
+
+        identity.initialize(&admin);
+        identity.register_issuer(&issuer);
+        identity.set_revocation_registry(&revocation_id);
+
+        revocation.initialize(&admin);
+        revocation.set_identity_oracle(&identity_id);
+
+        let hash_valid1 = BytesN::from_array(&env, &[1u8; 32]);
+        let hash_valid2 = BytesN::from_array(&env, &[2u8; 32]);
+        let hash_revoked = BytesN::from_array(&env, &[3u8; 32]);
+        let hash_unknown = BytesN::from_array(&env, &[4u8; 32]);
+
+        // Anchor 3 credentials
+        identity.anchor_vc(&issuer, &subject, &hash_valid1);
+        identity.anchor_vc(&issuer, &subject, &hash_valid2);
+        identity.anchor_vc(&issuer, &subject, &hash_revoked);
+
+        // Revoke one via revocation registry
+        revocation.revoke(&issuer, &subject, &hash_revoked);
+
+        // 1. Batch verify with mixed credentials
+        let mut hashes = soroban_sdk::Vec::new(&env);
+        hashes.push_back(hash_valid1.clone());
+        hashes.push_back(hash_revoked.clone());
+        hashes.push_back(hash_unknown.clone());
+        hashes.push_back(hash_valid2.clone());
+
+        let results = identity.batch_verify_vc(&subject, &hashes);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+        assert_eq!(results.get(2).unwrap(), false);
+        assert_eq!(results.get(3).unwrap(), true);
+
+        // 2. Empty input returns empty output
+        let empty_hashes = soroban_sdk::Vec::new(&env);
+        let empty_results = identity.batch_verify_vc(&subject, &empty_hashes);
+        assert_eq!(empty_results.len(), 0);
+    }
 }
