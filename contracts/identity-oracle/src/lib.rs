@@ -1151,6 +1151,39 @@ impl IdentityOracle {
         false
     }
 
+    /// Verify multiple verifiable credentials for a subject in a single atomic invocation.
+    ///
+    /// Parameters:
+    /// - `env`: Soroban contract environment used to read persistent storage.
+    /// - `subject`: Address whose anchored VC records are searched.
+    /// - `vc_hashes`: Vector of SHA-256 hashes of off-chain VC JSONs to verify.
+    ///
+    /// Returns a vector of booleans of equal length to `vc_hashes`, where each
+    /// element is `true` if the corresponding VC is anchored and active (not revoked),
+    /// and `false` otherwise (unanchored or revoked). An empty input vector returns
+    /// an empty vector. This function is read-only and does not require authentication.
+    pub fn batch_verify_vc(env: Env, subject: Address, vc_hashes: Vec<BytesN<32>>) -> Vec<bool> {
+        let key = DataKey::VCAnchors(subject);
+        let anchors: Vec<IdentityVCRecord> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(&env));
+
+        let mut results = Vec::new(&env);
+        for vc_hash in vc_hashes.iter() {
+            let mut is_valid = false;
+            for record in anchors.iter() {
+                if record.vc_hash == vc_hash && !is_record_revoked(&env, &record) {
+                    is_valid = true;
+                    break;
+                }
+            }
+            results.push_back(is_valid);
+        }
+        results
+    }
+
     /// Propose a new contract admin (step 1 of two-step admin transfer).
     ///
     /// Stores `new_admin` under `DataKey::PendingAdmin` in instance storage.
@@ -2848,5 +2881,66 @@ mod tests {
 
         let stored_type: CredentialType = client.get_vc_credential_type(&subject, &typed_hash);
         assert_eq!(stored_type, Symbol::new(&env, "kyc"));
+    }
+
+    #[test]
+    fn test_batch_verify_vc_mixed_credentials() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let vc_valid1 = BytesN::from_array(&env, &[10u8; 32]);
+        let vc_valid2 = BytesN::from_array(&env, &[20u8; 32]);
+        let vc_revoked = BytesN::from_array(&env, &[30u8; 32]);
+        let vc_unknown = BytesN::from_array(&env, &[40u8; 32]);
+
+        client.anchor_vc(&issuer, &subject, &vc_valid1);
+        client.anchor_vc(&issuer, &subject, &vc_valid2);
+        client.anchor_vc(&issuer, &subject, &vc_revoked);
+
+        // Revoke vc_revoked
+        client.mark_vc_revoked(&issuer, &subject, &vc_revoked);
+
+        let mut hashes = Vec::new(&env);
+        hashes.push_back(vc_valid1.clone());
+        hashes.push_back(vc_unknown.clone());
+        hashes.push_back(vc_valid2.clone());
+        hashes.push_back(vc_revoked.clone());
+
+        let results = client.batch_verify_vc(&subject, &hashes);
+        assert_eq!(results.len(), 4);
+        assert_eq!(results.get(0).unwrap(), true);
+        assert_eq!(results.get(1).unwrap(), false);
+        assert_eq!(results.get(2).unwrap(), true);
+        assert_eq!(results.get(3).unwrap(), false);
+
+        // Verify matches individual verify_vc
+        assert_eq!(results.get(0).unwrap(), client.verify_vc(&subject, &vc_valid1));
+        assert_eq!(results.get(1).unwrap(), client.verify_vc(&subject, &vc_unknown));
+        assert_eq!(results.get(2).unwrap(), client.verify_vc(&subject, &vc_valid2));
+        assert_eq!(results.get(3).unwrap(), client.verify_vc(&subject, &vc_revoked));
+    }
+
+    #[test]
+    fn test_batch_verify_vc_empty_input() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, IdentityOracle);
+        let client = IdentityOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let subject = Address::generate(&env);
+
+        let empty_hashes: Vec<BytesN<32>> = Vec::new(&env);
+        let results = client.batch_verify_vc(&subject, &empty_hashes);
+        assert_eq!(results.len(), 0);
     }
 }
