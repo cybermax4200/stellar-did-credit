@@ -10,7 +10,7 @@ const browser = process.env.CHROME_BIN || (process.platform === 'darwin'
 const bytes = new Uint8Array(32);
 const args = [50, 50_000_000_000, 10, 50, 100, 20_000_000_000, 40, 30, 30,
   10, 1_700_000_000n, 1234567, false, 42, 600, bytes, bytes, 12345, bytes];
-const expected = Buffer.from(require(path.resolve('pkg/zk_wasm_cjs.cjs')).generate_score_proof(...args)).toString('hex');
+const expected = Buffer.from(require(path.resolve('pkg/zk_wasm.js')).generate_score_proof(...args)).toString('hex');
 const html = `<!doctype html><script type="module">
 import init, { generate_score_proof } from '/zk_wasm.js';
 try {
