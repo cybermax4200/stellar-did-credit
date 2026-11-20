@@ -203,9 +203,6 @@ pub const MAX_CID_LENGTH: u32 = 128;
 /// Maximum number of trusted issuers returned by a single paginated query.
 pub const MAX_ISSUER_PAGE_LIMIT: u32 = 50;
 
-/// Maximum number of revoked credential hashes returned in one page.
-pub const MAX_REVOKED_PAGE_LIMIT: u32 = 50;
-
 fn generic_credential_type(_env: &Env) -> CredentialType {
     symbol_short!("generic")
 }
@@ -1085,60 +1082,28 @@ impl IdentityOracle {
         active
     }
 
-    /// Returns a page of revoked VC hashes in anchor insertion order.
+    /// Returns the VC hashes of revoked VC anchor records for `subject`.
     ///
-    /// `start_index` is a zero-based offset into the revoked records, excluding
-    /// active credentials. `limit` is capped at 50; zero limits and offsets at
-    /// or beyond the revoked count return an empty vector. Local revocations
-    /// and revocations reported by the linked registry are both included.
-    pub fn list_revoked_for_subject(
-        env: Env,
-        subject: Address,
-        start_index: u32,
-        limit: u32,
-    ) -> Vec<BytesN<32>> {
-        let mut page = Vec::new(&env);
-        let limit = limit.min(MAX_REVOKED_PAGE_LIMIT);
-        if limit == 0 {
-            return page;
-        }
+    /// A record counts as revoked if it was locally marked via
+    /// `mark_vc_revoked` (which the revocation registry calls from
+    /// `revoke(issuer, subject, vc_hash)`) or if the linked revocation
+    /// registry reports its hash as revoked. Complements `get_vc_details`,
+    /// which returns only the active records.
+    pub fn list_revoked_for_subject(env: Env, subject: Address) -> Vec<BytesN<32>> {
+        let key = DataKey::VCAnchors(subject);
         let anchors: Vec<IdentityVCRecord> = env
             .storage()
             .persistent()
-            .get(&DataKey::VCAnchors(subject))
+            .get(&key)
             .unwrap_or(Vec::new(&env));
-        if start_index >= anchors.len() {
-            return page;
-        }
-        let mut revoked_index = 0;
-        for record in anchors.iter() {
-            if is_record_revoked(&env, &record) {
-                if revoked_index >= start_index {
-                    page.push_back(record.vc_hash);
-                    if page.len() == limit {
-                        break;
-                    }
-                }
-                revoked_index += 1;
-            }
-        }
-        page
-    }
 
-    /// Returns the total number of locally or registry-revoked VCs for `subject`.
-    pub fn get_revoked_count_for_subject(env: Env, subject: Address) -> u32 {
-        let anchors: Vec<IdentityVCRecord> = env
-            .storage()
-            .persistent()
-            .get(&DataKey::VCAnchors(subject))
-            .unwrap_or(Vec::new(&env));
-        let mut count = 0;
+        let mut revoked = Vec::new(&env);
         for record in anchors.iter() {
             if is_record_revoked(&env, &record) {
-                count += 1;
+                revoked.push_back(record.vc_hash);
             }
         }
-        count
+        revoked
     }
 
     /// Returns the credential type label for an anchored VC, defaulting to `generic`.
@@ -2244,72 +2209,13 @@ mod tests {
         client.anchor_vc(&issuer, &subject, &hash2);
         client.anchor_vc(&issuer, &subject, &hash3);
 
-        assert_eq!(client.list_revoked_for_subject(&subject, &0, &50).len(), 0);
+        assert_eq!(client.list_revoked_for_subject(&subject).len(), 0);
 
         client.mark_vc_revoked(&issuer, &subject, &hash2);
 
-        let revoked = client.list_revoked_for_subject(&subject, &0, &50);
+        let revoked = client.list_revoked_for_subject(&subject);
         assert_eq!(revoked.len(), 1);
         assert_eq!(revoked.get(0).unwrap(), hash2);
-    }
-
-    #[test]
-    fn test_revoked_pagination_bounds_and_count() {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.budget().reset_unlimited();
-        let contract_id = env.register_contract(None, IdentityOracle);
-        let client = IdentityOracleClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let issuer = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-        client.register_issuer(&issuer);
-        assert_eq!(client.get_revoked_count_for_subject(&subject), 0);
-        assert!(client
-            .list_revoked_for_subject(&subject, &0, &50)
-            .is_empty());
-
-        let mut expected = Vec::new(&env);
-        for i in 0..65u8 {
-            let hash = BytesN::from_array(&env, &[i; 32]);
-            client.anchor_vc(&issuer, &subject, &hash);
-            // Interleave active records so offsets must count revoked VCs only.
-            if i % 13 != 0 {
-                client.mark_vc_revoked(&issuer, &subject, &hash);
-                expected.push_back(hash);
-            }
-        }
-        assert_eq!(expected.len(), 60);
-        assert_eq!(client.get_revoked_count_for_subject(&subject), 60);
-        let first = client.list_revoked_for_subject(&subject, &0, &u32::MAX);
-        assert_eq!(first, expected.slice(0..50));
-        assert_eq!(
-            client.list_revoked_for_subject(&subject, &50, &50),
-            expected.slice(50..60)
-        );
-        assert_eq!(
-            client.list_revoked_for_subject(&subject, &1, &2),
-            expected.slice(1..3)
-        );
-        assert_eq!(
-            client.list_revoked_for_subject(&subject, &59, &u32::MAX),
-            expected.slice(59..60)
-        );
-        for start in [60, 61, 65, u32::MAX] {
-            assert!(client
-                .list_revoked_for_subject(&subject, &start, &50)
-                .is_empty());
-        }
-        assert!(client.list_revoked_for_subject(&subject, &0, &0).is_empty());
-        // Repeated revocation must not add a second entry or change the count.
-        client.mark_vc_revoked(&issuer, &subject, &expected.get(0).unwrap());
-        assert_eq!(client.get_revoked_count_for_subject(&subject), 60);
-        let other = Address::generate(&env);
-        assert_eq!(client.get_revoked_count_for_subject(&other), 0);
-        assert!(client
-            .list_revoked_for_subject(&other, &u32::MAX, &50)
-            .is_empty());
     }
 
     #[test]
