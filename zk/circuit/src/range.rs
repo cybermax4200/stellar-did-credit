@@ -103,6 +103,23 @@ pub fn enforce_u32_gt_fp<F: PrimeField>(
     Ok(())
 }
 
+/// Enforce that `value < bound` for a 32-bit value where `bound` is a
+/// field-element gadget (e.g. a value selected from public input).
+///
+/// `value < bound` iff `bound - value - 1` is in `[0, 2^32)`.
+pub fn enforce_u32_lt_fp<F: PrimeField>(
+    value: &UInt32<F>,
+    bound: &FpVar<F>,
+) -> Result<(), SynthesisError> {
+    let value_fp = uint32_to_fp(value);
+    let diff = bound - value_fp - FpVar::<F>::constant(F::one());
+    let diff_bits = diff.to_bits_le()?;
+    for b in diff_bits.iter().skip(32) {
+        b.enforce_equal(&Boolean::constant(false))?;
+    }
+    Ok(())
+}
+
 /// Enforce that `value` is in `[0, 2^bits)` via bit decomposition.
 pub fn enforce_u32_range<F: PrimeField>(
     value: &UInt32<F>,

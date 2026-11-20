@@ -183,7 +183,14 @@ importers:
         specifier: 5.8.3
         version: 5.8.3
 
-  packages/zk-wasm: {}
+  packages/zk-wasm:
+    devDependencies:
+      '@types/node':
+        specifier: ^26.0.0
+        version: 26.1.1
+      typescript:
+        specifier: ^5.0.0
+        version: 5.8.3
 
 packages:
 

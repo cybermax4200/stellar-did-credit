@@ -12,6 +12,8 @@ coverage/
 **/pkg/
 packages/zk-wasm/pkg-baseline/
 packages/zk-wasm/pkg-web/
+**/pkg-web/
+packages/zk-wasm/examples/zk-worker-demo/main.js
 .env
 .env.*
 !.env.example

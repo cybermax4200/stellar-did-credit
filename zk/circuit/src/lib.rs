@@ -5,9 +5,10 @@
 //! This crate implements the Phase 4 ZK proof layer circuit:
 //!
 //! 1. Encodes the `compute_score_pure` formula as R1CS constraints.
-//! 2. Implements the `ScoreRecord` Pedersen vector commitment (binding all
+//! 2. Implements the `ScoreRecord` Poseidon commitment (binding all
 //!    private inputs, including `avg_counterparties` — see ADR-001).
-//! 3. Asserts `score > threshold` as a range proof within the circuit.
+//! 3. Asserts `score > threshold` as a range proof within the circuit, or
+//!    membership in a score tier band (`ScoreTierCircuit`).
 //! 4. Exposes `generate_proof` and `verify_proof`.
 //! 5. Provides a depth-20 Poseidon Merkle membership gadget (Research Q1).
 //!
@@ -21,7 +22,11 @@ pub mod score;
 pub mod score_circuit;
 
 pub use score::{compute_score_pure, MAX_SCORE, MIN_SCORE};
-pub use score_circuit::{ScoreCircuit, ScorePublicInputs, ScoreWitness, CIRCUIT_DOMAIN};
+pub use score_circuit::{
+    tier_for_score, tier_upper_bound, ScoreCircuit, ScoreInputs, ScorePublicInputs,
+    ScoreTierCircuit, ScoreWitness, TierPublicInputs, WitnessError, CIRCUIT_DOMAIN,
+    TIER_CIRCUIT_DOMAIN, TIER_COUNT, TIER_THRESHOLDS,
+};
 
 pub use merkle::{MerkleMembershipCircuit, MerklePublicInputs, MerkleWitness, MERKLE_DEPTH};
 
@@ -106,10 +111,98 @@ pub fn generate_test_keys<R: RngCore + CryptoRng>(
     Groth16::<Bls12_381>::circuit_specific_setup(circuit, rng)
 }
 
+fn circuit_is_satisfied<C: ark_relations::r1cs::ConstraintSynthesizer<Fr>>(circuit: C) -> bool {
+    use ark_relations::r1cs::{ConstraintSystem, SynthesisMode};
+    let cs = ConstraintSystem::<Fr>::new_ref();
+    cs.set_mode(SynthesisMode::Prove {
+        construct_matrices: true,
+    });
+    circuit.generate_constraints(cs.clone()).is_ok() && cs.is_satisfied().unwrap_or(false)
+}
+
+/// `true` iff `witness` satisfies the `score > threshold` statement for
+/// `public_inputs`. Groth16 proving does **not** check satisfiability (an
+/// unsatisfied witness yields a well-formed proof that simply fails to verify),
+/// so provers should call this first to fail fast with a real error.
+pub fn threshold_statement_holds(
+    witness: &ScoreWitness,
+    public_inputs: &ScorePublicInputs,
+) -> bool {
+    circuit_is_satisfied(ScoreCircuit::new(
+        Some(witness.clone()),
+        public_inputs.clone(),
+    ))
+}
+
+/// `true` iff `witness` satisfies the tier-band statement for `public_inputs`
+/// (see [`threshold_statement_holds`]).
+pub fn tier_statement_holds(witness: &ScoreWitness, public_inputs: &TierPublicInputs) -> bool {
+    circuit_is_satisfied(ScoreTierCircuit::new(
+        Some(witness.clone()),
+        public_inputs.clone(),
+    ))
+}
+
+/// Generate a Groth16 proof that the committed score lies in tier
+/// `public_inputs.tier_level` (issue #1184). Same statement shape as
+/// [`generate_proof`], different circuit and therefore a different VK.
+pub fn generate_tier_proof<R: RngCore + CryptoRng>(
+    witness: ScoreWitness,
+    public_inputs: TierPublicInputs,
+    pk: &ProvingKey<Bls12_381>,
+    rng: &mut R,
+) -> Result<ScoreProof, SynthesisError> {
+    let circuit = ScoreTierCircuit::new(Some(witness), public_inputs);
+    Groth16::<Bls12_381>::prove(pk, circuit, rng)
+}
+
+/// Verify a tier-band proof. `true` iff the proof is valid for the supplied
+/// public inputs (including the claimed `tier_level`).
+pub fn verify_tier_proof(
+    proof: &ScoreProof,
+    public_inputs: &TierPublicInputs,
+    vk: &VerifyingKey<Bls12_381>,
+) -> Result<bool, SynthesisError> {
+    // Same public-input order as the threshold circuit, with `tier_level` in
+    // the first slot.
+    let public_inputs_vec = vec![
+        Fr::from(public_inputs.tier_level),
+        public_inputs.subject,
+        public_inputs.credit_oracle_id,
+        public_inputs.score_commitment,
+        Fr::from(public_inputs.snapshot_ledger),
+        public_inputs.domain_separator,
+        Fr::from(public_inputs.current_timestamp),
+        Fr::from(public_inputs.max_validity_window),
+    ];
+    Groth16::<Bls12_381>::verify(vk, &public_inputs_vec, proof)
+}
+
+/// Generate a fresh proving/verification key pair for the tier-band circuit.
+///
+/// **Note:** development/testing only; see [`generate_test_keys`].
+pub fn generate_tier_test_keys<R: RngCore + CryptoRng>(
+    rng: &mut R,
+) -> Result<(ProvingKey<Bls12_381>, VerifyingKey<Bls12_381>), SynthesisError> {
+    let circuit = ScoreTierCircuit::new(
+        None,
+        TierPublicInputs {
+            tier_level: 1,
+            subject: Fr::from(0u32),
+            credit_oracle_id: Fr::from(0u32),
+            score_commitment: Fr::from(0u32),
+            snapshot_ledger: 0,
+            domain_separator: Fr::from(0u32),
+            current_timestamp: 0,
+            max_validity_window: 0,
+        },
+    );
+    Groth16::<Bls12_381>::circuit_specific_setup(circuit, rng)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::commitment::PedersenCommitment;
     use ark_std::rand::rngs::StdRng;
     use ark_std::rand::SeedableRng;
 
@@ -149,18 +242,7 @@ mod tests {
     }
 
     fn make_public_inputs(w: &ScoreWitness, threshold: u32) -> ScorePublicInputs {
-        let scheme = PedersenCommitment::new(CIRCUIT_DOMAIN);
-        let fields = [
-            Fr::from(w.score),
-            Fr::from(w.vc_count),
-            Fr::from(w.tx_volume_30d.max(0) as u64),
-            Fr::from(w.avg_counterparties),
-            Fr::from(w.repayment_rate),
-            Fr::from(w.last_updated),
-            Fr::from(w.computed_at_ledger),
-            Fr::from(w.stale as u32),
-        ];
-        let commitment = scheme.commit(&fields, w.blinding);
+        let commitment = w.commitment();
         ScorePublicInputs {
             threshold,
             subject: Fr::from(1u32),          // dummy for test
@@ -208,7 +290,11 @@ mod tests {
         proof.a.serialize_uncompressed(&mut bytes).unwrap();
         proof.b.serialize_uncompressed(&mut bytes).unwrap();
         proof.c.serialize_uncompressed(&mut bytes).unwrap();
-        let expected = [0x77, 0xff, 0xa1, 0x11, 0x06, 0x6e, 0x81, 0x99, 0x39, 0x0c, 0x42, 0xc3, 0xdd, 0xfc, 0x58, 0xd8, 0x4e, 0x85, 0xaa, 0x86, 0xf2, 0x4d, 0xf6, 0xb5, 0xdf, 0xed, 0x18, 0xb0, 0x7b, 0xa5, 0x5e, 0xd5];
+        let expected = [
+            0xbd, 0x98, 0x3a, 0xc3, 0x6d, 0x25, 0x1c, 0xff, 0xca, 0xbd, 0x2a, 0x1b, 0x16, 0x04,
+            0x24, 0xb4, 0x9e, 0xfd, 0xae, 0x48, 0x92, 0xa4, 0x45, 0x39, 0xa2, 0x21, 0x19, 0x7b,
+            0x2b, 0x74, 0xc9, 0x8b,
+        ];
         assert_eq!(&Sha256::digest(&bytes)[..], &expected);
     }
 

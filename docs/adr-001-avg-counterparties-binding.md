@@ -55,3 +55,8 @@ C = score·G0 + vc_count·G1 + tx_volume_30d·G2 + avg_counterparties·G3
    migration and deprecation path; deferred to a later phase.
 2. **Separate `TxStats` commitment** — adds a second commitment to manage and
    verify; rejected for Phase 4 v1.
+
+> **Update (circuit v2, issue #1185):** the commitment described above is now a
+> Poseidon hash instead of a Pedersen-style linear combination. The decision
+> recorded here, that `avg_counterparties` is part of the committed preimage,
+> is unchanged. See `docs/zk-spec.md` §4a.
