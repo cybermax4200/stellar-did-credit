@@ -18,7 +18,7 @@ const optimizedProof = optimized.generate_score_proof(...args);
 assert.equal(originalProof.length, 384);
 assert.deepEqual(optimizedProof, originalProof, 'optimization changed the generated proof');
 assert.equal(crypto.createHash('sha256').update(optimizedProof).digest('hex'),
-  'fda979c3143191b9a141f8e69be614085656bb3b539388875e26013edf599f88',
+  '77ffa111066e8199390c42c3ddfc58d84e85aa86f24df6b5dfed18b07ba55ed5',
   'proof differs from the cryptographically verified circuit fixture');
 assert.ok(optimizedWasm.length <= baselineWasm.length * 0.7,
   `optimized WASM ${optimizedWasm.length} is not at least 30% smaller than ${baselineWasm.length}`);

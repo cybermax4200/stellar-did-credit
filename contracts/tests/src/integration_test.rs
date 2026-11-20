@@ -1305,7 +1305,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         let voter = soroban_sdk::Address::generate(&env);
         gov.register_voter(&admin, &voter, &200);
