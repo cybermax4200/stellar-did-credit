@@ -1848,8 +1848,7 @@ mod tests {
         };
         let proposer = Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers.
-        let proposal_id =
-            gov_client.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &200);

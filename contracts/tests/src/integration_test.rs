@@ -605,7 +605,7 @@ mod tests {
 
         // The subject forwarded to revoke() enables the per-subject revoked list
         assert_eq!(
-            identity.list_revoked_for_subject(&subject, &0, &50),
+            identity.list_revoked_for_subject(&subject),
             soroban_sdk::vec![&env, vc_hash.clone()]
         );
     }
@@ -1304,8 +1304,8 @@ mod tests {
             tx_weight: 20,
             repayment_weight: 30,
         };
-        let proposer = Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &String::from_str(&env, "QmEmergencyVetoTest"));
+        let proposer = soroban_sdk::Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov.register_voter(&admin, &voter, &200);

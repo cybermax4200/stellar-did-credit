@@ -157,7 +157,7 @@
                   "u32": 50
                 },
                 {
-                  "string": "QmEmergencyVetoTest"
+                  "string": "ipfs://QmDefaultMetadataCID123456789"
                 }
               ]
             }
@@ -466,7 +466,7 @@
                         "symbol": "metadata_cid"
                       },
                       "val": {
-                        "string": "QmEmergencyVetoTest"
+                        "string": "ipfs://QmDefaultMetadataCID123456789"
                       }
                     },
                     {

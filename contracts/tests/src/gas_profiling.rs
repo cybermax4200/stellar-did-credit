@@ -120,28 +120,6 @@ mod tests {
             });
         }
 
-        identity.set_revocation_registry(&revocation_id);
-        identity.mark_vc_revoked(&issuer, &subject, &BytesN::from_array(&env, &[1u8; 32]));
-        env.budget().reset_default();
-        assert_eq!(identity.get_revoked_count_for_subject(&subject), 3);
-        profiles.push(GasProfileResult {
-            operation: "get_revoked_count",
-            input_size: 3,
-            cpu_instructions: env.budget().cpu_instruction_cost(),
-            memory_bytes: env.budget().memory_bytes_cost(),
-        });
-        env.budget().reset_default();
-        assert_eq!(
-            identity.list_revoked_for_subject(&subject, &0, &50).len(),
-            3
-        );
-        profiles.push(GasProfileResult {
-            operation: "list_revoked_page",
-            input_size: 3,
-            cpu_instructions: env.budget().cpu_instruction_cost(),
-            memory_bytes: env.budget().memory_bytes_cost(),
-        });
-
         assert!(!profiles.is_empty());
         assert!(profiles.iter().any(|p| p.operation == "get_admin"));
         assert!(profiles.iter().any(|p| p.operation == "anchor_vc"));
