@@ -5,11 +5,15 @@
 //! committed range without revealing the exact score. Uses Stellar's
 //! BLS12-381 pairing host functions (CAP-0059) via `env.crypto().bls12_381()`
 //! (soroban-sdk 22 API).
+#[cfg(test)]
+extern crate std;
+
+use ark_serialize::CanonicalDeserialize;
 use soroban_sdk::crypto::bls12_381::{Fr, G1Affine, G2Affine};
 use soroban_sdk::xdr::ToXdr;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, symbol_short, vec, Address, Bytes, BytesN,
-    Env, Vec,
+    Env, Symbol, Vec,
 };
 
 /// Fixed-size Groth16 proof encoding (BLS12-381), uncompressed points:
@@ -17,9 +21,9 @@ use soroban_sdk::{
 pub const PROOF_SIZE: u32 = 384;
 
 /// Number of public inputs for the score-range circuit.
-pub const NUM_PUBLIC_INPUTS: u32 = 6;
+pub const NUM_PUBLIC_INPUTS: u32 = 8;
 
-/// Circuit version constant — must match the `domain_separator` in the
+/// Circuit version constant â€” must match the `domain_separator` in the
 /// circuit artifact. Bumped on any breaking circuit change.
 pub const CIRCUIT_VERSION: u32 = 1;
 
@@ -39,6 +43,10 @@ pub struct ScoreRangePublicInputs {
     pub snapshot_ledger: u32,
     /// Protocol version binding.
     pub domain_separator: BytesN<32>,
+    /// Current timestamp in seconds (verifier time).
+    pub current_timestamp: u64,
+    /// Maximum validity window in seconds.
+    pub max_validity_window: u64,
 }
 
 /// Groth16 verification key for BLS12-381.
@@ -72,6 +80,8 @@ pub enum VerifierError {
     InvalidProofSize = 4,
     CircuitVersionMismatch = 5,
     ProofAlreadyConsumed = 6,
+    /// Malformed, off-curve, non-subgroup, or infinite proof points.
+    InvalidProof = 7,
 }
 
 const INSTANCE_BUMP_THRESHOLD: u32 = 5000;
@@ -152,75 +162,94 @@ fn embedded_verification_key(env: &Env) -> VerificationKey {
     ];
 
     let gamma_abc_0 = [
-        0x06, 0xE9, 0x40, 0x60, 0xEA, 0x72, 0xA3, 0xB9, 0xFC, 0xCA, 0x0D, 0x40, 0xD6, 0x07, 0xE8,
-        0x88, 0x36, 0x66, 0x2E, 0x6C, 0x23, 0x98, 0x83, 0x24, 0x34, 0x41, 0xD0, 0x37, 0x0F, 0x78,
-        0x3B, 0xBB, 0xDB, 0x25, 0x88, 0xA2, 0x55, 0xEE, 0x11, 0x8E, 0x72, 0x47, 0x2B, 0xD6, 0xD0,
-        0x30, 0x47, 0xFE, 0x06, 0xEE, 0x12, 0x71, 0xA0, 0x68, 0xB4, 0x07, 0x48, 0xF6, 0xEC, 0x21,
-        0xB6, 0x4E, 0x61, 0x3F, 0x3B, 0xC4, 0x1A, 0x76, 0x7A, 0x3C, 0xCE, 0x02, 0xAE, 0x6D, 0x75,
-        0xDE, 0x47, 0x1B, 0x10, 0xCC, 0x09, 0x1E, 0xFE, 0x32, 0xB8, 0x32, 0x3C, 0x54, 0x40, 0x47,
-        0x8B, 0xBB, 0xB1, 0x76, 0x23, 0xE1,
+        0x01, 0xE9, 0xB2, 0xE5, 0x9F, 0xD1, 0x38, 0xA4, 0x9E, 0xFB, 0x3F, 0xBB, 0x49, 0x3B, 0x28,
+        0x7C, 0x04, 0x4E, 0x2A, 0xC0, 0xA1, 0xFC, 0x0B, 0x8E, 0x5A, 0x72, 0x6A, 0xB5, 0x44, 0x55,
+        0x04, 0x71, 0xEE, 0xC9, 0x81, 0x52, 0x89, 0xE7, 0x7C, 0x39, 0x86, 0xA1, 0x3D, 0x6A, 0xC5,
+        0xE5, 0x80, 0xC8, 0x11, 0x6F, 0x29, 0xFF, 0x6E, 0x55, 0x44, 0xA1, 0x1A, 0xBE, 0x93, 0xE0,
+        0xD6, 0x9F, 0x56, 0x8C, 0xF5, 0x28, 0xA1, 0xF5, 0xD8, 0xDB, 0x93, 0x78, 0xD2, 0x00, 0x9F,
+        0x91, 0x38, 0x9C, 0x7B, 0x91, 0x99, 0x63, 0xDD, 0xE9, 0x18, 0xA2, 0x13, 0xE6, 0xC4, 0x5F,
+        0xF1, 0x09, 0x11, 0x71, 0x4B, 0xEC,
     ];
 
     let gamma_abc_1 = [
-        0x07, 0xB4, 0xBC, 0xFC, 0xC3, 0xE8, 0xF8, 0x97, 0xE6, 0xAB, 0x3D, 0xED, 0x1E, 0xA2, 0x04,
-        0x4C, 0x24, 0xBF, 0x3B, 0x7C, 0x39, 0xA1, 0x0D, 0xAC, 0x2E, 0xE5, 0xD2, 0xAC, 0xA4, 0x28,
-        0x27, 0xC5, 0x92, 0xF6, 0x51, 0x6B, 0xD1, 0x80, 0x49, 0xEB, 0x54, 0xC1, 0xF3, 0xAF, 0xE6,
-        0x14, 0xCB, 0x40, 0x0C, 0xEC, 0xCE, 0x5D, 0xA8, 0x8D, 0x8D, 0x83, 0x59, 0xE1, 0x42, 0x74,
-        0x3E, 0x10, 0x26, 0x75, 0x67, 0xC8, 0xA4, 0x7E, 0x1A, 0x93, 0x93, 0x64, 0x46, 0xCE, 0x02,
-        0xC5, 0x67, 0xCA, 0x0F, 0xDA, 0xDF, 0x7A, 0x59, 0x84, 0x42, 0xFA, 0xCE, 0x16, 0xB8, 0xBE,
-        0x2E, 0xE0, 0x43, 0xDA, 0x32, 0xC9,
+        0x03, 0x15, 0x69, 0x72, 0xAA, 0x68, 0x00, 0x1C, 0xD4, 0x63, 0xBE, 0x4F, 0xD9, 0x0F, 0x12,
+        0xD3, 0x9B, 0x21, 0x67, 0x85, 0x49, 0x89, 0xA3, 0x8F, 0xB0, 0x36, 0x77, 0x07, 0x48, 0x16,
+        0x07, 0xA9, 0x6C, 0x13, 0x2D, 0x89, 0xDE, 0xAD, 0x81, 0x64, 0x22, 0x0C, 0x3E, 0x7B, 0x39,
+        0x3F, 0xDE, 0x37, 0x06, 0xEF, 0x02, 0xF3, 0x0C, 0x69, 0x21, 0x97, 0x37, 0x43, 0xE6, 0xAC,
+        0xA5, 0xA4, 0xF6, 0x9F, 0x70, 0xCE, 0x3D, 0x87, 0x28, 0x66, 0x81, 0x95, 0xD9, 0x29, 0x5A,
+        0xCB, 0x18, 0xA2, 0x39, 0x48, 0x00, 0x81, 0x86, 0xFA, 0x21, 0xA8, 0xA2, 0x7D, 0xDB, 0x72,
+        0x3B, 0x1A, 0x26, 0x0B, 0xA1, 0x77,
     ];
 
     let gamma_abc_2 = [
-        0x09, 0x0D, 0xAB, 0x3F, 0xBA, 0xCF, 0xF9, 0x26, 0x87, 0x3E, 0x5C, 0x4C, 0x28, 0x3F, 0xA9,
-        0x3F, 0xC4, 0x6D, 0x82, 0x60, 0xC6, 0x8B, 0x6A, 0xFB, 0xFB, 0x75, 0x60, 0xB2, 0xCE, 0x11,
-        0x65, 0x65, 0xFB, 0x51, 0x1A, 0x63, 0x4A, 0x31, 0xFD, 0x44, 0x3C, 0x54, 0xDF, 0x1D, 0x84,
-        0xCE, 0xF0, 0x9F, 0x17, 0x99, 0x4A, 0xA9, 0x20, 0xED, 0xBA, 0xF4, 0x81, 0x4D, 0xD0, 0xEB,
-        0xAC, 0x95, 0x76, 0x64, 0x18, 0xE5, 0x8F, 0xF1, 0x99, 0xE6, 0x1E, 0xBF, 0xBC, 0xF7, 0xDA,
-        0x1A, 0x90, 0x30, 0xD0, 0x57, 0x1E, 0x69, 0x89, 0xA7, 0x5F, 0x6D, 0x99, 0xC2, 0x46, 0x0A,
-        0x96, 0x8D, 0x9F, 0xC1, 0xF5, 0x6A,
+        0x0E, 0x80, 0x45, 0xB4, 0xD2, 0x1D, 0x81, 0x28, 0x49, 0xBB, 0x9F, 0x06, 0x7C, 0xD9, 0x19,
+        0x22, 0xB0, 0x61, 0x85, 0x51, 0x9E, 0x38, 0x94, 0x84, 0x9A, 0x99, 0xFD, 0x13, 0x27, 0xBD,
+        0x79, 0x65, 0x1E, 0xA1, 0x4D, 0x3B, 0xCA, 0x6C, 0x12, 0x97, 0xEB, 0x5C, 0x83, 0x01, 0x76,
+        0x28, 0xAB, 0x5E, 0x17, 0x84, 0x14, 0x97, 0xE5, 0xE0, 0x5E, 0x89, 0x7B, 0x31, 0x15, 0x2F,
+        0x7E, 0x35, 0x1C, 0xCE, 0x65, 0xD5, 0xDD, 0xA2, 0xA6, 0xE9, 0xE1, 0xD9, 0xD6, 0x0C, 0xBD,
+        0x82, 0x90, 0x8A, 0x03, 0xA2, 0x6F, 0x7D, 0xA3, 0x51, 0xCA, 0x06, 0x78, 0xF9, 0x21, 0x3A,
+        0xD5, 0x13, 0x9E, 0x82, 0x5B, 0x26,
     ];
 
     let gamma_abc_3 = [
-        0x02, 0xDA, 0x87, 0xF6, 0x1F, 0xC4, 0x12, 0xF1, 0xA7, 0x89, 0x84, 0xE3, 0x52, 0xAA, 0xD5,
-        0x8F, 0x3E, 0x2A, 0x07, 0x71, 0x16, 0x39, 0x07, 0xDD, 0x7C, 0xCB, 0xA5, 0x8C, 0xB6, 0x7B,
-        0x61, 0xEE, 0xB2, 0x10, 0xBC, 0xE8, 0x8A, 0x09, 0x3D, 0xD4, 0xA4, 0x59, 0x1A, 0x12, 0xD0,
-        0x00, 0x79, 0x08, 0x06, 0x8D, 0xF0, 0xE7, 0x38, 0x93, 0x1A, 0xD8, 0xB2, 0x1C, 0x93, 0xED,
-        0x9D, 0xA4, 0x44, 0x28, 0x8C, 0x38, 0x11, 0x8C, 0xA4, 0xF7, 0x6F, 0x90, 0xFA, 0x98, 0xDA,
-        0x01, 0xE9, 0x73, 0xC4, 0x73, 0x07, 0x45, 0x9B, 0xA1, 0x31, 0x50, 0xC8, 0x5A, 0xA5, 0x8A,
-        0x2F, 0x65, 0x17, 0x2C, 0x07, 0xD3,
+        0x00, 0x0F, 0x71, 0xCC, 0xE1, 0x4A, 0xF4, 0xB6, 0xDC, 0x57, 0x9E, 0xCA, 0xD3, 0x36, 0xEF,
+        0xC8, 0x1A, 0xC3, 0x19, 0x0A, 0xEE, 0x64, 0x1C, 0x62, 0xE8, 0xB4, 0xEE, 0x88, 0x5D, 0xA7,
+        0x29, 0x61, 0x7E, 0x1C, 0x25, 0xC5, 0xD6, 0xB8, 0x0F, 0x94, 0xFF, 0x7C, 0x3B, 0x8F, 0x76,
+        0xA2, 0x53, 0xFE, 0x11, 0x1E, 0x38, 0x17, 0x99, 0xE2, 0x4C, 0x1E, 0x07, 0x18, 0x37, 0xE9,
+        0x8C, 0x85, 0x34, 0x57, 0x22, 0x0C, 0x9C, 0x34, 0xB2, 0x11, 0x01, 0xAF, 0x17, 0x41, 0xE6,
+        0x59, 0x7A, 0xBB, 0x07, 0xE0, 0xF9, 0xD5, 0xC1, 0xBA, 0x9C, 0x5D, 0x3D, 0xE7, 0x45, 0xC4,
+        0xA9, 0xB8, 0x0D, 0x03, 0x28, 0x17,
     ];
 
     let gamma_abc_4 = [
-        0x15, 0x08, 0x7C, 0xEF, 0x4C, 0x19, 0x7A, 0x70, 0x65, 0xE4, 0xDD, 0x5F, 0xC5, 0x4B, 0xA3,
-        0x9E, 0xA1, 0x1C, 0x23, 0x53, 0xB7, 0xE8, 0xB9, 0xE7, 0xA8, 0xCA, 0x6A, 0xE7, 0x45, 0x2E,
-        0x6A, 0x7A, 0x5E, 0x07, 0x83, 0x16, 0xDE, 0x36, 0x1F, 0xCB, 0xC7, 0x8F, 0xBF, 0x92, 0xA7,
-        0x8C, 0x1F, 0x9F, 0x18, 0xF6, 0xD1, 0x94, 0x96, 0x5D, 0x4F, 0x6D, 0x57, 0x15, 0x50, 0x9E,
-        0x19, 0x7D, 0x89, 0x96, 0xF0, 0x9B, 0x77, 0x1B, 0x1C, 0x25, 0xB5, 0x21, 0x9D, 0x53, 0xF9,
-        0x2B, 0xE5, 0xCF, 0xC8, 0xC5, 0x7C, 0xA9, 0xDD, 0x9C, 0xA3, 0x8D, 0xF9, 0x8B, 0xE3, 0x76,
-        0xCB, 0x89, 0x06, 0x74, 0x8D, 0x7D,
+        0x14, 0x7C, 0x87, 0x63, 0x50, 0xBA, 0x98, 0x86, 0x73, 0xF6, 0x4F, 0x2C, 0x55, 0x27, 0x5F,
+        0x59, 0x06, 0xAF, 0xBE, 0xB9, 0xE3, 0x01, 0x25, 0x76, 0x22, 0xA7, 0x25, 0x3E, 0xF3, 0x54,
+        0x9D, 0x37, 0x09, 0xA7, 0x27, 0x49, 0x54, 0xDF, 0x05, 0x78, 0xB6, 0x6B, 0xFB, 0xB9, 0x1C,
+        0xBC, 0x45, 0x6B, 0x0F, 0x5D, 0x62, 0x00, 0xF0, 0xD9, 0x6A, 0xB9, 0x88, 0xAE, 0x47, 0x52,
+        0x0D, 0x24, 0x32, 0x61, 0x9D, 0xA4, 0x8D, 0x51, 0x89, 0xBD, 0xA0, 0xEC, 0x86, 0x89, 0x3D,
+        0xB9, 0xA1, 0xEC, 0x88, 0x38, 0x2E, 0xDE, 0xD8, 0x2C, 0xAA, 0x5B, 0x11, 0x8F, 0xF9, 0xAD,
+        0xA0, 0xE5, 0xB3, 0x3E, 0x87, 0x34,
     ];
 
     let gamma_abc_5 = [
-        0x15, 0x72, 0x09, 0xBB, 0x02, 0x8C, 0x1E, 0x3B, 0x42, 0xB7, 0x7F, 0x68, 0xBD, 0x99, 0x26,
-        0xC1, 0x5E, 0x6A, 0xD6, 0xA4, 0x1F, 0x79, 0x9D, 0x7C, 0x50, 0x9D, 0x02, 0xF1, 0x73, 0xC0,
-        0x9F, 0x70, 0x0C, 0x02, 0x2E, 0xE7, 0xBB, 0xBE, 0xA0, 0xE5, 0x07, 0x82, 0xB4, 0xF8, 0x93,
-        0x19, 0x2C, 0xFC, 0x19, 0x92, 0x14, 0x98, 0xDF, 0xF3, 0xF5, 0x8B, 0x9D, 0xAF, 0xF2, 0xD1,
-        0xC2, 0xF0, 0x5A, 0xD6, 0xB5, 0xE4, 0x37, 0xC7, 0x87, 0xBF, 0x4F, 0xF2, 0x66, 0x87, 0x05,
-        0xA1, 0x3A, 0xE6, 0x52, 0x9A, 0xFB, 0xB4, 0xF7, 0xE1, 0x5F, 0x42, 0x98, 0xBE, 0x65, 0xAA,
-        0x6C, 0x48, 0xD8, 0xAC, 0x05, 0x8C,
+        0x0E, 0x1C, 0x68, 0xA7, 0x51, 0x55, 0x8F, 0xD0, 0x8C, 0x7F, 0x9A, 0x90, 0x81, 0x26, 0xF4,
+        0xB2, 0xC6, 0xB3, 0x0E, 0x4A, 0x0A, 0x7C, 0x23, 0x27, 0xC8, 0xC3, 0x23, 0x85, 0xF3, 0x36,
+        0xD4, 0x80, 0x9F, 0x37, 0x11, 0x11, 0x88, 0xAC, 0xBA, 0x17, 0x42, 0x9B, 0x4D, 0x87, 0x0C,
+        0x38, 0x64, 0x4A, 0x01, 0x40, 0x25, 0x1B, 0xA0, 0x55, 0x5E, 0x6D, 0xD2, 0x29, 0x10, 0x82,
+        0x0A, 0xEE, 0xBC, 0x47, 0xAA, 0x42, 0xEB, 0x98, 0x47, 0x95, 0x13, 0x1D, 0x6B, 0x5A, 0x85,
+        0x5C, 0xC2, 0xB2, 0x3B, 0x56, 0xF2, 0xA8, 0xDE, 0xCC, 0xF3, 0x05, 0xF8, 0xD3, 0xAA, 0x2B,
+        0x05, 0x15, 0x02, 0x0B, 0x34, 0xB6,
     ];
 
     let gamma_abc_6 = [
-        0x13, 0x82, 0x8C, 0x86, 0x20, 0xA2, 0x9F, 0xD5, 0xC6, 0x81, 0x28, 0x6B, 0x46, 0x13, 0xA6,
-        0xDA, 0x65, 0x05, 0x0E, 0xB8, 0x5B, 0x1E, 0x2B, 0xB1, 0x76, 0xA8, 0xF4, 0x10, 0x60, 0x34,
-        0xD9, 0xBD, 0xAB, 0xAC, 0x62, 0x5D, 0xAB, 0xB9, 0xCB, 0x19, 0xCF, 0xF0, 0x81, 0xC7, 0xB7,
-        0x13, 0xA1, 0x61, 0x14, 0x0B, 0xE6, 0xC2, 0x75, 0x82, 0x7A, 0x6C, 0x80, 0x10, 0x1E, 0xBF,
-        0x48, 0x68, 0x52, 0xBE, 0xA2, 0x02, 0x7F, 0xA6, 0x10, 0x1F, 0xC4, 0x07, 0x46, 0x0C, 0xA1,
-        0xA7, 0xDD, 0x59, 0xEC, 0xA9, 0x04, 0x9B, 0xD1, 0x2B, 0xD3, 0xDE, 0x89, 0x72, 0xE5, 0xDA,
-        0x5B, 0xEE, 0x36, 0x72, 0xD9, 0xF9,
+        0x05, 0x62, 0xEE, 0x34, 0xE6, 0xDE, 0xAA, 0x15, 0xDC, 0x9C, 0x6A, 0xCF, 0x9E, 0x61, 0xFC,
+        0x13, 0x21, 0x64, 0x39, 0x4E, 0x3D, 0x99, 0x0D, 0xC4, 0xE7, 0x7B, 0xCB, 0xFD, 0xA9, 0xB5,
+        0xE9, 0xB3, 0x3B, 0xD9, 0xEC, 0x88, 0x80, 0xDC, 0x99, 0x69, 0x45, 0xC9, 0x12, 0x0E, 0x56,
+        0x7B, 0x97, 0xC5, 0x13, 0x03, 0x0F, 0xA7, 0x44, 0x7E, 0x62, 0xAF, 0x70, 0xF2, 0x4A, 0xE6,
+        0x75, 0xFA, 0x1C, 0x5B, 0x11, 0xEC, 0xFD, 0xE9, 0xC6, 0x6D, 0xA7, 0x05, 0x4D, 0x65, 0x5B,
+        0x01, 0xC3, 0xE2, 0xED, 0x0A, 0xF0, 0x58, 0x29, 0x39, 0xD9, 0x85, 0x72, 0xA3, 0xD3, 0x7C,
+        0xF0, 0x08, 0xE1, 0xC4, 0x00, 0xEA,
     ];
 
+    let gamma_abc_7 = [
+        0x16, 0x73, 0x77, 0x43, 0x31, 0x96, 0xF2, 0x6D, 0xB9, 0x74, 0x84, 0xD0, 0xC3, 0x22, 0x81,
+        0x3D, 0xA3, 0x0A, 0xC9, 0x63, 0x69, 0xF8, 0x0B, 0xFC, 0x51, 0xF1, 0x9B, 0x64, 0xB6, 0x1B,
+        0xB1, 0xF7, 0xA0, 0xE1, 0x5B, 0xE9, 0xD1, 0x48, 0x40, 0x53, 0xA6, 0x5C, 0x76, 0x63, 0xC5,
+        0x16, 0xB0, 0x67, 0x10, 0x0A, 0x13, 0xD4, 0x3C, 0x24, 0x46, 0x5A, 0xA1, 0x26, 0x53, 0x6E,
+        0x63, 0xB0, 0x12, 0xC6, 0x20, 0x91, 0xA6, 0x57, 0x3E, 0x8A, 0xF9, 0x86, 0xFD, 0xAF, 0x3D,
+        0xD6, 0xB5, 0xDC, 0x6D, 0x2F, 0x1A, 0x99, 0x28, 0xA0, 0x2E, 0x4B, 0x7C, 0xEE, 0x38, 0x04,
+        0x8F, 0x0E, 0xEB, 0xFA, 0x59, 0x00,
+    ];
+
+    let gamma_abc_8 = [
+        0x17, 0x6C, 0xC2, 0x2C, 0x9E, 0x9A, 0x5F, 0x79, 0xBD, 0x67, 0x89, 0x8E, 0xF2, 0x91, 0xB6,
+        0x29, 0xD7, 0xF5, 0x09, 0xDB, 0x13, 0x46, 0x18, 0x00, 0xE7, 0x8C, 0x67, 0x9A, 0x59, 0x0D,
+        0xF4, 0xA5, 0x5A, 0x48, 0x6C, 0xD6, 0x2A, 0x81, 0x2E, 0xB3, 0xFD, 0xFA, 0x28, 0x77, 0xEE,
+        0xFB, 0xDC, 0xA2, 0x0B, 0xF9, 0xBD, 0xBD, 0xB2, 0xF2, 0xA2, 0x17, 0xD4, 0x63, 0xDA, 0x0D,
+        0x6F, 0x4B, 0x19, 0x63, 0x63, 0xA4, 0x9C, 0x65, 0x1F, 0xB9, 0x44, 0x81, 0xC3, 0xF5, 0xF2,
+        0x72, 0x37, 0x96, 0xEA, 0xEE, 0x94, 0x21, 0xD4, 0xB4, 0xC3, 0xFB, 0x81, 0x07, 0x42, 0x6E,
+        0xE2, 0x06, 0xFE, 0x47, 0xC5, 0x74,
+    ];
     let alpha = BytesN::from_array(env, &alpha_bytes);
     let beta = BytesN::from_array(env, &beta_bytes);
     let gamma = BytesN::from_array(env, &gamma_bytes);
@@ -234,6 +263,8 @@ fn embedded_verification_key(env: &Env) -> VerificationKey {
     gamma_abc.push_back(BytesN::from_array(env, &gamma_abc_4));
     gamma_abc.push_back(BytesN::from_array(env, &gamma_abc_5));
     gamma_abc.push_back(BytesN::from_array(env, &gamma_abc_6));
+    gamma_abc.push_back(BytesN::from_array(env, &gamma_abc_7));
+    gamma_abc.push_back(BytesN::from_array(env, &gamma_abc_8));
 
     VerificationKey {
         alpha,
@@ -248,6 +279,13 @@ fn embedded_verification_key(env: &Env) -> VerificationKey {
 fn u32_to_field(env: &Env, value: u32) -> BytesN<32> {
     let mut buf = [0u8; 32];
     buf[28..].copy_from_slice(&value.to_be_bytes());
+    BytesN::from_array(env, &buf)
+}
+
+/// Encode a u64 as a 32-byte big-endian field element.
+fn u64_to_field(env: &Env, value: u64) -> BytesN<32> {
+    let mut buf = [0u8; 32];
+    buf[24..].copy_from_slice(&value.to_be_bytes());
     BytesN::from_array(env, &buf)
 }
 
@@ -267,6 +305,8 @@ fn public_inputs_to_fields(env: &Env, inputs: &ScoreRangePublicInputs) -> Vec<By
     fields.push_back(inputs.score_commitment.clone());
     fields.push_back(u32_to_field(env, inputs.snapshot_ledger));
     fields.push_back(inputs.domain_separator.clone());
+    fields.push_back(u64_to_field(env, inputs.current_timestamp));
+    fields.push_back(u64_to_field(env, inputs.max_validity_window));
     fields
 }
 
@@ -288,24 +328,60 @@ fn compute_public_inputs_combined(
     combined
 }
 
-/// Run the Groth16 pairing check for a proof against the embedded VK.
-///
-/// Note: soroban-sdk 22's BLS12-381 host functions strictly validate that
-/// every point is on the curve and in the correct subgroup. A proof whose
-/// points fail that validation raises a host error (the invocation fails)
-/// rather than returning `false`; only well-formed points that do not satisfy
-/// the pairing equation produce a `false` result.
-fn groth16_verify(env: &Env, proof: &Bytes, public_inputs: &ScoreRangePublicInputs) -> bool {
-    if proof.len() != PROOF_SIZE {
+/// Decode coordinates and check the curve equation before invoking host crypto.
+/// Host subgroup queries can trap on malformed encodings and off-curve points.
+fn valid_g1_encoding(bytes: &BytesN<96>) -> bool {
+    let bytes = bytes.to_array();
+    // Uncompressed finite points have no compression, infinity, or sort flags.
+    if bytes[0] & 0xe0 != 0 {
         return false;
+    }
+    ark_bls12_381::G1Affine::deserialize_uncompressed_unchecked(&bytes[..])
+        .is_ok_and(|point| !point.infinity && point.is_on_curve())
+}
+
+fn valid_g2_encoding(bytes: &BytesN<192>) -> bool {
+    let bytes = bytes.to_array();
+    if bytes[0] & 0xe0 != 0 {
+        return false;
+    }
+    ark_bls12_381::G2Affine::deserialize_uncompressed_unchecked(&bytes[..])
+        .is_ok_and(|point| !point.infinity && point.is_on_curve())
+}
+
+/// Run the Groth16 pairing check, rejecting unsafe points before arithmetic.
+fn groth16_verify(
+    env: &Env,
+    proof: &Bytes,
+    public_inputs: &ScoreRangePublicInputs,
+) -> Result<bool, VerifierError> {
+    if proof.len() != PROOF_SIZE {
+        return Err(VerifierError::InvalidProof);
+    }
+    let a_bytes: BytesN<96> = proof
+        .slice(0..96)
+        .try_into()
+        .map_err(|_| VerifierError::InvalidProof)?;
+    let b_bytes: BytesN<192> = proof
+        .slice(96..288)
+        .try_into()
+        .map_err(|_| VerifierError::InvalidProof)?;
+    let c_bytes: BytesN<96> = proof
+        .slice(288..384)
+        .try_into()
+        .map_err(|_| VerifierError::InvalidProof)?;
+    if !valid_g1_encoding(&a_bytes) || !valid_g2_encoding(&b_bytes) || !valid_g1_encoding(&c_bytes)
+    {
+        return Err(VerifierError::InvalidProof);
+    }
+    let a = G1Affine::from_bytes(a_bytes);
+    let b = G2Affine::from_bytes(b_bytes);
+    let c = G1Affine::from_bytes(c_bytes);
+    if !a.is_in_subgroup() || !b.is_in_subgroup() || !c.is_in_subgroup() {
+        return Err(VerifierError::InvalidProof);
     }
 
     let vk = embedded_verification_key(env);
-
-    // Parse proof: A (G1, 96) || B (G2, 192) || C (G1, 96).
-    let a: G1Affine = G1Affine::from_bytes(proof.slice(0..96).try_into().unwrap());
-    let b: G2Affine = G2Affine::from_bytes(proof.slice(96..288).try_into().unwrap());
-    let c: G1Affine = G1Affine::from_bytes(proof.slice(288..384).try_into().unwrap());
 
     let bls = env.crypto().bls12_381();
 
@@ -332,7 +408,18 @@ fn groth16_verify(env: &Env, proof: &Bytes, public_inputs: &ScoreRangePublicInpu
         G2Affine::from_bytes(vk.gamma.clone()),
         G2Affine::from_bytes(vk.delta.clone()),
     ];
-    bls.pairing_check(vp1, vp2)
+    Ok(bls.pairing_check(vp1, vp2))
+}
+
+fn publish_proof_verified(env: &Env, verifier: Address, inputs: &ScoreRangePublicInputs) {
+    env.events().publish(
+        (
+            Symbol::new(env, "ProofVerified"),
+            verifier,
+            inputs.threshold,
+        ),
+        (inputs.score_commitment.clone(), inputs.snapshot_ledger),
+    );
 }
 
 #[contract]
@@ -367,7 +454,7 @@ impl ScoreRangeVerifier {
     /// Verify a Groth16 proof that the committed score exceeds `threshold`.
     ///
     /// Returns `true` iff the proof is valid for the supplied public inputs.
-    /// Does not mutate state — lenders may simulate read-only.
+    /// Does not mutate state â€” lenders may simulate read-only.
     pub fn verify_score_range(
         env: Env,
         proof: Bytes,
@@ -393,7 +480,40 @@ impl ScoreRangeVerifier {
             return false;
         }
 
-        groth16_verify(&env, &proof, &public_inputs)
+        groth16_verify(&env, &proof, &public_inputs).unwrap_or(false)
+    }
+
+    /// Verify a proof and publish `ProofVerified` on success.
+    ///
+    /// Requires the verifier's authorization. Event topics contain the name,
+    /// verifier and threshold; data contains the commitment and snapshot ledger
+    /// (the proof's epoch). Malformed proofs return `InvalidProof`.
+    pub fn verify_proof(
+        env: Env,
+        verifier: Address,
+        proof: Bytes,
+        public_inputs: ScoreRangePublicInputs,
+    ) -> Result<bool, VerifierError> {
+        verifier.require_auth();
+        if proof.len() != PROOF_SIZE {
+            return Err(VerifierError::InvalidProof);
+        }
+        if !env.storage().instance().has(&DataKey::Admin) {
+            return Err(VerifierError::NotInitialized);
+        }
+        let version: u32 = env
+            .storage()
+            .instance()
+            .get(&DataKey::CircuitVersion)
+            .unwrap_or(0);
+        if version != CIRCUIT_VERSION {
+            return Err(VerifierError::CircuitVersionMismatch);
+        }
+        let valid = groth16_verify(&env, &proof, &public_inputs)?;
+        if valid {
+            publish_proof_verified(&env, verifier, &public_inputs);
+        }
+        Ok(valid)
     }
 
     /// Stateful verify with replay protection.
@@ -444,7 +564,7 @@ impl ScoreRangeVerifier {
         }
 
         // Verify the proof.
-        let valid = groth16_verify(&env, &proof, &public_inputs);
+        let valid = groth16_verify(&env, &proof, &public_inputs)?;
         if !valid {
             return Ok(false);
         }
@@ -455,6 +575,7 @@ impl ScoreRangeVerifier {
             .persistent()
             .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
+        publish_proof_verified(&env, consumer, &public_inputs);
         Ok(true)
     }
 
@@ -481,8 +602,9 @@ mod tests {
     use ark_ff::{BigInteger, PrimeField};
     use ark_serialize::CanonicalSerialize;
     use ark_std::rand::{rngs::StdRng, SeedableRng};
-    use soroban_sdk::testutils::Address as _;
+    use soroban_sdk::testutils::{Address as _, Events as _};
     use soroban_sdk::{Bytes, Env};
+    use soroban_sdk::{IntoVal, TryFromVal};
     use zk_circuit::{
         commitment::PedersenCommitment, generate_proof, generate_test_keys, ScorePublicInputs,
         ScoreWitness, CIRCUIT_DOMAIN,
@@ -501,6 +623,7 @@ mod tests {
             last_updated: 1_700_000_000,
             computed_at_ledger: 1234567,
             stale: false,
+            score_timestamp: 1_700_000_000,
             vc_points: 50,
             on_time_count: 50,
             total_count: 100,
@@ -545,6 +668,8 @@ mod tests {
             score_commitment: BytesN::from_array(&env, &commitment_bytes),
             snapshot_ledger: 12345,
             domain_separator: BytesN::from_array(&env, &[0u8; 32]),
+            current_timestamp: 1_700_000_100,
+            max_validity_window: 3600,
         };
         let public = ScorePublicInputs {
             threshold: inputs.threshold,
@@ -557,6 +682,8 @@ mod tests {
             score_commitment: commitment,
             snapshot_ledger: inputs.snapshot_ledger,
             domain_separator: ArkFr::from(0u32),
+            current_timestamp: inputs.current_timestamp,
+            max_validity_window: inputs.max_validity_window,
         };
         let mut rng = StdRng::from_seed([0u8; 32]);
         let (pk, vk) = generate_test_keys(&mut rng).unwrap();
@@ -592,12 +719,278 @@ mod tests {
         let mut wrong = inputs.clone();
         wrong.threshold = 601;
         assert!(!client.verify_score_range(&proof, &wrong));
+        let verifier = Address::generate(&env);
+        let event = (
+            contract_id.clone(),
+            (
+                Symbol::new(&env, "ProofVerified"),
+                verifier.clone(),
+                inputs.threshold,
+            )
+                .into_val(&env),
+            (inputs.score_commitment.clone(), inputs.snapshot_ledger).into_val(&env),
+        );
+        assert!(client.verify_proof(&verifier, &proof, &inputs));
+        std::println!(
+            "verify_proof: CPU {}, memory {}",
+            env.cost_estimate().budget().cpu_instruction_cost(),
+            env.cost_estimate().budget().memory_bytes_cost()
+        );
+        let events = env.events().all();
+        assert_eq!(events.slice(events.len() - 1..), vec![&env, event.clone()]);
+        assert_eq!(proof_event_count(&env), 1);
+        assert!(!client.verify_proof(&verifier, &proof, &wrong));
+        assert_eq!(proof_event_count(&env), 0);
+        let nonce = BytesN::from_array(&env, &[0x99; 32]);
+        assert!(!client.verify_and_consume(&verifier, &proof, &wrong, &nonce));
+        assert_eq!(proof_event_count(&env), 0);
+        assert!(client.verify_and_consume(&verifier, &proof, &inputs, &nonce));
+        std::println!(
+            "verify_and_consume: CPU {}, memory {}",
+            env.cost_estimate().budget().cpu_instruction_cost(),
+            env.cost_estimate().budget().memory_bytes_cost()
+        );
+        let events = env.events().all();
+        assert_eq!(events.slice(events.len() - 1..), vec![&env, event]);
+        assert_eq!(proof_event_count(&env), 1);
+        assert_eq!(
+            client.try_verify_and_consume(&verifier, &proof, &inputs, &nonce),
+            Err(Ok(VerifierError::ProofAlreadyConsumed))
+        );
+        assert_eq!(proof_event_count(&env), 0);
+    }
+
+    fn proof_event_count(env: &Env) -> usize {
+        let name = Symbol::new(env, "ProofVerified");
+        env.events()
+            .all()
+            .iter()
+            .filter(|(_, topics, _)| {
+                topics
+                    .first()
+                    .and_then(|topic| Symbol::try_from_val(env, &topic).ok())
+                    == Some(name.clone())
+            })
+            .count()
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_invalid_inputs_without_events() {
+        let (env, admin, id) = setup();
+        let client = ScoreRangeVerifierClient::new(&env, &id);
+        let inputs = make_public_inputs(&env);
+        for bytes in [
+            ark_std::vec![],
+            ark_std::vec![0; 383],
+            ark_std::vec![0x42; 384],
+            ark_std::vec![0; 385],
+        ] {
+            let proof = Bytes::from_slice(&env, &bytes);
+            assert_eq!(
+                client.try_verify_proof(&admin, &proof, &inputs),
+                Err(Ok(VerifierError::InvalidProof))
+            );
+            assert!(!client.verify_score_range(&proof, &inputs));
+        }
+        assert_eq!(
+            client.try_verify_proof(&admin, &make_proof(&env), &inputs),
+            Err(Ok(VerifierError::InvalidProof))
+        );
+        assert_eq!(proof_event_count(&env), 0);
+        env.mock_auths(&[]);
+        assert!(client
+            .try_verify_proof(&admin, &make_proof(&env), &inputs)
+            .is_err());
+        assert_eq!(proof_event_count(&env), 0);
+    }
+
+    #[test]
+    fn test_verify_proof_initialization_and_version_guards() {
+        let (env, admin, id) = setup();
+        let inputs = make_public_inputs(&env);
+        let proof = make_proof(&env);
+        let fresh = env.register_contract(None, ScoreRangeVerifier);
+        let client = ScoreRangeVerifierClient::new(&env, &fresh);
+        assert_eq!(
+            client.try_verify_proof(&admin, &proof, &inputs),
+            Err(Ok(VerifierError::NotInitialized))
+        );
+        env.as_contract(&id, || {
+            env.storage()
+                .instance()
+                .set(&DataKey::CircuitVersion, &2u32)
+        });
+        let client = ScoreRangeVerifierClient::new(&env, &id);
+        assert_eq!(
+            client.try_verify_proof(&admin, &proof, &inputs),
+            Err(Ok(VerifierError::CircuitVersionMismatch))
+        );
+        assert_eq!(proof_event_count(&env), 0);
+    }
+
+    #[test]
+    fn test_non_subgroup_points_are_rejected_in_every_position() {
+        use ark_bls12_381::{Fq, Fq2, G1Affine as ArkG1, G2Affine as ArkG2};
+        let (env, verifier, id) = setup();
+        let client = ScoreRangeVerifierClient::new(&env, &id);
+        let inputs = make_public_inputs(&env);
+        let key = embedded_verification_key(&env);
+        let mut baseline = ark_std::vec::Vec::new();
+        baseline.extend_from_slice(&key.alpha.to_array());
+        baseline.extend_from_slice(&key.beta.to_array());
+        baseline.extend_from_slice(&key.alpha.to_array());
+        let g1 = (0..100u64)
+            .find_map(|x| {
+                ArkG1::get_point_from_x_unchecked(Fq::from(x), false)
+                    .filter(|p| !p.is_in_correct_subgroup_assuming_on_curve())
+            })
+            .unwrap();
+        let g2 = (0..100u64)
+            .find_map(|x| {
+                ArkG2::get_point_from_x_unchecked(Fq2::new(Fq::from(x), Fq::from(1u64)), false)
+                    .filter(|p| !p.is_in_correct_subgroup_assuming_on_curve())
+            })
+            .unwrap();
+        assert!(g1.is_on_curve());
+        assert!(g2.is_on_curve());
+        let mut g1_bytes = ark_std::vec::Vec::new();
+        let mut g2_bytes = ark_std::vec::Vec::new();
+        g1.serialize_uncompressed(&mut g1_bytes).unwrap();
+        g2.serialize_uncompressed(&mut g2_bytes).unwrap();
+        for (start, bytes) in [(0, &g1_bytes), (96, &g2_bytes), (288, &g1_bytes)] {
+            let mut data = baseline.clone();
+            data[start..start + bytes.len()].copy_from_slice(bytes);
+            let proof = Bytes::from_slice(&env, &data);
+            assert_eq!(
+                client.try_verify_proof(&verifier, &proof, &inputs),
+                Err(Ok(VerifierError::InvalidProof))
+            );
+            assert_eq!(
+                client.try_verify_and_consume(
+                    &verifier,
+                    &proof,
+                    &inputs,
+                    &BytesN::from_array(&env, &[0; 32])
+                ),
+                Err(Ok(VerifierError::InvalidProof))
+            );
+            assert!(!client.verify_score_range(&proof, &inputs));
+        }
+        // Infinity and illegal flags are rejected at A, B and C independently.
+        for (start, len) in [(0, 96), (96, 192), (288, 96)] {
+            for flag in [0x40, 0x80, 0x20, 0xe0] {
+                let mut data = baseline.clone();
+                data[start..start + len].fill(0);
+                data[start] = flag;
+                assert_eq!(
+                    client.try_verify_proof(&verifier, &Bytes::from_slice(&env, &data), &inputs),
+                    Err(Ok(VerifierError::InvalidProof))
+                );
+            }
+        }
+        assert_eq!(proof_event_count(&env), 0);
+    }
+
+    #[test]
+    fn fuzz_verify_proof_bytes() {
+        use proptest::{collection, prelude::*, test_runner::TestRunner};
+        let template_env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
+            capture_snapshot_at_drop: false,
+            ..Default::default()
+        });
+        let key = embedded_verification_key(&template_env);
+        let mut template = ark_std::vec::Vec::new();
+        template.extend_from_slice(&key.alpha.to_array());
+        template.extend_from_slice(&key.beta.to_array());
+        template.extend_from_slice(&key.alpha.to_array());
+        let strategy = prop_oneof![
+            collection::vec(any::<u8>(), 0..768),
+            collection::vec(any::<u8>(), 384),
+            // Valid prefixes force validation to reach B and C as well as A.
+            (0..3usize, collection::vec(any::<u8>(), 192)).prop_map(move |(position, random)| {
+                let mut bytes = template.clone();
+                let (start, len) = [(0, 96), (96, 192), (288, 96)][position];
+                bytes[start..start + len].copy_from_slice(&random[..len]);
+                bytes
+            }),
+        ];
+        TestRunner::default()
+            .run(&strategy, |data| {
+                let env = Env::new_with_config(soroban_sdk::testutils::EnvTestConfig {
+                    capture_snapshot_at_drop: false,
+                    ..Default::default()
+                });
+                env.mock_all_auths();
+                let id = env.register_contract(None, ScoreRangeVerifier);
+                let client = ScoreRangeVerifierClient::new(&env, &id);
+                let verifier = Address::generate(&env);
+                client.initialize(
+                    &verifier,
+                    &BytesN::from_array(&env, &[0; 32]),
+                    &CIRCUIT_VERSION,
+                );
+                let proof = Bytes::from_slice(&env, &data);
+                let inputs = make_public_inputs(&env);
+                prop_assert_eq!(
+                    client.try_verify_proof(&verifier, &proof, &inputs),
+                    Err(Ok(VerifierError::InvalidProof))
+                );
+                prop_assert_eq!(proof_event_count(&env), 0);
+                Ok(())
+            })
+            .unwrap();
+    }
+
+    #[test]
+    fn test_verify_proof_rejects_off_curve_and_noncanonical_coordinates() {
+        use ark_bls12_381::Fq;
+        let (env, verifier, id) = setup();
+        let client = ScoreRangeVerifierClient::new(&env, &id);
+        let inputs = make_public_inputs(&env);
+        let key = embedded_verification_key(&env);
+        let mut baseline = ark_std::vec::Vec::new();
+        baseline.extend_from_slice(&key.alpha.to_array());
+        baseline.extend_from_slice(&key.beta.to_array());
+        baseline.extend_from_slice(&key.alpha.to_array());
+        let modulus = Fq::MODULUS.to_bytes_be();
+        assert_eq!(modulus.len(), 48);
+        for (start, len) in [(0, 96), (96, 192), (288, 96)] {
+            // All-zero finite coordinates fail the curve equation.
+            let mut off_curve = baseline.clone();
+            off_curve[start..start + len].fill(0);
+            let mut corruptions = ark_std::vec![off_curve];
+            // Exercise every Fp coordinate, including both Fp2 components in B.
+            // A coordinate equal to the modulus is noncanonical without flags.
+            for offset in (start..start + len).step_by(48) {
+                let mut noncanonical = baseline.clone();
+                noncanonical[offset..offset + 48].copy_from_slice(&modulus);
+                corruptions.push(noncanonical);
+            }
+            for data in corruptions {
+                let proof = Bytes::from_slice(&env, &data);
+                assert_eq!(
+                    client.try_verify_proof(&verifier, &proof, &inputs),
+                    Err(Ok(VerifierError::InvalidProof))
+                );
+                assert_eq!(
+                    client.try_verify_and_consume(
+                        &verifier,
+                        &proof,
+                        &inputs,
+                        &BytesN::from_array(&env, &[0; 32])
+                    ),
+                    Err(Ok(VerifierError::InvalidProof))
+                );
+                assert!(!client.verify_score_range(&proof, &inputs));
+            }
+        }
+        assert_eq!(proof_event_count(&env), 0);
     }
 
     fn setup() -> (Env, Address, Address) {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -622,12 +1015,7 @@ mod tests {
 
     fn make_proof(env: &Env) -> Bytes {
         // 384-byte proof: A (96) || B (192) || C (96).
-        // Filled with the point-at-infinity encodings (0x40 first byte, zeros
-        // after). These do NOT pass the soroban-sdk 22 host's strict on-curve
-        // validation, so a verification of this proof raises a host
-        // `Error(Crypto, InvalidInput)` rather than returning `false`. It
-        // mirrors a maliciously-crafted proof and is used to exercise the
-        // host-validation path.
+        // Infinity is a valid curve point but is not accepted in a proof.
         let mut proof = Bytes::from_array(env, &infinity_g1_bytes());
         proof.append(&Bytes::from_array(env, &infinity_g2_bytes()));
         proof.append(&Bytes::from_array(env, &infinity_g1_bytes()));
@@ -642,16 +1030,17 @@ mod tests {
             score_commitment: BytesN::from_array(env, &[0x11; 32]),
             snapshot_ledger: 12345,
             domain_separator: BytesN::from_array(env, &[0x22; 32]),
+            current_timestamp: 1_700_000_100,
+            max_validity_window: 3600,
         }
     }
 
     #[test]
     fn test_initialize_stores_config() {
         let (env, admin, _) = setup();
-        let client =
-            ScoreRangeVerifierClient::new(&env, &env.register_contract(None, ScoreRangeVerifier));
+        let client = ScoreRangeVerifierClient::new(&env, &env.register(ScoreRangeVerifier, ()));
         // Re-register to get a fresh client bound to the same contract.
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
         client.initialize(&admin, &vk_hash, &CIRCUIT_VERSION);
@@ -665,7 +1054,7 @@ mod tests {
     fn test_initialize_rejects_double_init() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -678,7 +1067,7 @@ mod tests {
     #[test]
     fn test_verify_score_range_rejects_wrong_size_proof() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -690,9 +1079,9 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_score_range_tampered_proof_raises_host_error() {
+    fn test_verify_score_range_rejects_infinity() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -700,8 +1089,7 @@ mod tests {
 
         let inputs = make_public_inputs(&env);
         let proof = make_proof(&env);
-        // The proof's points are point-at-infinity, which are valid on-curve points
-        // but do not satisfy the pairing check, so verification returns `false`.
+        // The read-only compatibility query maps invalid points to false.
         let res = client.try_verify_score_range(&proof, &inputs);
         assert_eq!(res, Ok(Ok(false)));
     }
@@ -709,25 +1097,23 @@ mod tests {
     #[test]
     fn test_verify_score_range_rejects_malformed_points() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
         client.initialize(&admin, &vk_hash, &CIRCUIT_VERSION);
 
         let inputs = make_public_inputs(&env);
-        // Completely random bytes are almost never valid curve points. The
-        // soroban-sdk 22 host strictly validates all points (on-curve and in
-        // subgroup), so the invocation fails instead of returning `false`.
+        // Malformed points are rejected before invoking host arithmetic.
         let proof = Bytes::from_array(&env, &[0x42u8; 384]);
         let res = client.try_verify_score_range(&proof, &inputs);
-        assert!(res.is_err());
+        assert_eq!(res, Ok(Ok(false)));
     }
 
     #[test]
-    fn test_verify_and_consume_tampered_proof_raises_host_error() {
+    fn test_verify_and_consume_rejects_infinity() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -738,21 +1124,19 @@ mod tests {
         let proof = make_proof(&env);
         let nonce = BytesN::from_array(&env, &[0x33; 32]);
 
-        // The tampered proof fails the pairing check, returning `false`.
-        // Because the failed verification is never recorded as consumed, a second
-        // identical call fails the same way (not `ProofAlreadyConsumed`).
+        // Failed verification never records the proof as consumed.
         let res = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert_eq!(res, Ok(Ok(false)));
+        assert_eq!(res, Err(Ok(VerifierError::InvalidProof)));
 
         let res2 = client.try_verify_and_consume(&consumer, &proof, &inputs, &nonce);
-        assert_eq!(res2, Ok(Ok(false)));
+        assert_eq!(res2, Err(Ok(VerifierError::InvalidProof)));
     }
 
     #[test]
     fn test_verify_and_consume_requires_auth() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -774,7 +1158,7 @@ mod tests {
     #[test]
     fn test_verify_and_consume_rejects_wrong_size_proof() {
         let (env, _, _) = setup();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -795,7 +1179,7 @@ mod tests {
 
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let vk_hash = BytesN::from_array(&env, &[0xAB; 32]);
@@ -835,7 +1219,7 @@ mod tests {
         }
 
         // The ConsumedProof entry must still exist after advancing past
-        // PERS_TTL_EXTEND — this is the actual replay-protection guarantee.
+        // PERS_TTL_EXTEND â€” this is the actual replay-protection guarantee.
         env.as_contract(&contract_id, || {
             assert!(env
                 .storage()
@@ -847,7 +1231,7 @@ mod tests {
     fn test_verify_score_range_requires_initialization() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, ScoreRangeVerifier);
+        let contract_id = env.register(ScoreRangeVerifier, ());
         let client = ScoreRangeVerifierClient::new(&env, &contract_id);
 
         let inputs = make_public_inputs(&env);

@@ -5,7 +5,8 @@
 //! update the credit-oracle's scoring weights through a community vote.
 use credit_oracle_types::{CreditOracleClient, CreditOracleError, ScoringWeights};
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, symbol_short, Address, Env, String,
+    Symbol, Vec,
 };
 
 /// Error types for the governance contract.
@@ -54,7 +55,12 @@ pub enum GovernanceError {
     TimelockAlreadyPending = 20,
     /// A voter batch exceeds the maximum number of entries.
     VoterBatchTooLarge = 21,
+    /// Proposal metadata CID is empty or exceeds the maximum length (128 bytes).
+    InvalidMetadataCid = 22,
 }
+
+/// Maximum allowed length in bytes for a proposal metadata CID/URI.
+pub const MAX_METADATA_CID_LEN: u32 = 128;
 
 /// Maximum number of entries accepted by either voter batch operation.
 pub const MAX_VOTER_BATCH: u32 = 50;
@@ -72,6 +78,8 @@ pub struct VoterWeightEntry {
 pub enum DataKey {
     /// Contract administrator address.
     Admin,
+    /// Optional emergency guardian authorized to veto proposals.
+    Guardian,
     /// Address of the credit-oracle contract this governance controls.
     CreditOracle,
     /// Monotonically increasing counter used to assign proposal IDs.
@@ -85,6 +93,8 @@ pub enum DataKey {
     Proposal(u64),
     /// Original proposer address for a given proposal ID.
     Proposer(u64),
+    /// Human-readable reason recorded when the guardian vetoes a proposal.
+    VetoReason(u64),
     /// Registered voting weight for an address.
     VoterWeight(Address),
     /// Amount of weight already used by voter in a specific proposal.
@@ -100,7 +110,7 @@ pub enum DataKey {
 /// governance contract.
 ///
 /// Threshold (5,000 ledgers) and extend amount (500,000 ledgers)
-/// match `identity-oracle`'s `INSTANCE_BUMP_*` constants — borrowed
+/// match `identity-oracle`'s `INSTANCE_BUMP_*` constants â€” borrowed
 /// pattern from the security TTL-survival fix (PR #456) so storage
 /// survives the same default Soroban instance TTL even when no
 /// proposals are being created/voted on.
@@ -143,6 +153,8 @@ pub struct GovernanceProposal {
     /// at proposal-creation time so later `set_quorum` calls never change
     /// the rules for a proposal already up for a vote.
     pub quorum_required: i128,
+    /// IPFS CID or URI explaining the rationale / discussion behind the proposal.
+    pub metadata_cid: String,
 }
 
 /// On-chain governance contract.
@@ -186,7 +198,7 @@ impl Governance {
     /// for proposals. `quorum_required` must be greater than zero.
     ///
     /// Emits an `Initialized` event with the admin and the credit-oracle
-    /// target address — indexers use this to detect deployments before the
+    /// target address â€” indexers use this to detect deployments before the
     /// first admin action. The event is documented in
     /// `docs/event-indexing.md`.
     ///
@@ -196,7 +208,7 @@ impl Governance {
     /// is a follow-up to issue #39), so only `credit_oracle` is emitted in the
     /// event payload today. Once governance learns about identity-oracle (via
     /// a dedicated setter, mirroring `set_quorum`), the payload should be
-    /// extended to include it — see `docs/event-indexing.md` for the
+    /// extended to include it â€” see `docs/event-indexing.md` for the
     /// documented schema.
     ///
     /// Auth: `admin` must sign the transaction.
@@ -239,7 +251,7 @@ impl Governance {
 
     /// Updates the contract-wide default quorum applied to proposals created
     /// from this point on. Admin only. Does not affect proposals that
-    /// already exist — each snapshots its own `quorum_required` at creation.
+    /// already exist â€” each snapshots its own `quorum_required` at creation.
     pub fn set_quorum(
         env: Env,
         admin: Address,
@@ -299,6 +311,36 @@ impl Governance {
         Ok(())
     }
 
+    /// Designate the emergency guardian address.
+    ///
+    /// The guardian is the only address allowed to call [`Governance::emergency_veto`]
+    /// to cancel a proposal that has passed voting but is still inside its
+    /// execution-delay timelock. Replaces any previously configured guardian.
+    ///
+    /// Auth: `admin` must equal the stored admin and sign the transaction.
+    pub fn set_guardian(
+        env: Env,
+        admin: Address,
+        guardian: Address,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::Guardian, &guardian);
+        Ok(())
+    }
+
+    /// Return the currently configured emergency guardian, if any.
+    pub fn get_guardian(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::Guardian)
+    }
+
     /// Return the percentage-based quorum configuration, if enabled.
     pub fn get_quorum_percent(env: Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::QuorumPercent)
@@ -335,6 +377,7 @@ impl Governance {
         weights: ScoringWeights,
         voting_period_ledgers: u32,
         execution_delay_ledgers: u32,
+        metadata_cid: String,
     ) -> Result<u64, GovernanceError> {
         proposer.require_auth();
         if !weights.is_valid() {
@@ -342,6 +385,9 @@ impl Governance {
         }
         if voting_period_ledgers == 0 {
             return Err(GovernanceError::InvalidVotingPeriod);
+        }
+        if metadata_cid.is_empty() || metadata_cid.len() > MAX_METADATA_CID_LEN {
+            return Err(GovernanceError::InvalidMetadataCid);
         }
 
         let id: u64 = env
@@ -384,6 +430,7 @@ impl Governance {
             executed: false,
             cancelled: false,
             quorum_required,
+            metadata_cid: metadata_cid.clone(),
         };
 
         env.storage()
@@ -397,7 +444,7 @@ impl Governance {
             .set(&DataKey::NextProposalId, &(id + 1));
 
         env.events()
-            .publish((symbol_short!("PropCreat"), id), (proposer, expiry_ledger));
+            .publish((symbol_short!("PropCreat"), id), (proposer, expiry_ledger, metadata_cid));
 
         Ok(id)
     }
@@ -534,6 +581,18 @@ impl Governance {
             .get(&proposal_key)
             .ok_or(GovernanceError::ProposalNotFound)?;
 
+        // Terminal states are checked before the timing gates so a cancelled
+        // (including guardian-vetoed) proposal is reported as
+        // `ProposalAlreadyCancelled` immediately, regardless of whether the
+        // voting period or execution timelock has elapsed.
+        if proposal.executed {
+            return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
         if env.ledger().sequence() <= proposal.expiry_ledger {
             return Err(GovernanceError::ProposalNotExpired);
         }
@@ -544,14 +603,6 @@ impl Governance {
             .saturating_add(proposal.execution_delay_ledgers);
         if env.ledger().sequence() <= executable_at {
             return Err(GovernanceError::TimelockNotExpired);
-        }
-
-        if proposal.executed {
-            return Err(GovernanceError::ProposalAlreadyExecuted);
-        }
-
-        if proposal.cancelled {
-            return Err(GovernanceError::ProposalAlreadyCancelled);
         }
 
         if proposal.votes_for <= proposal.votes_against {
@@ -1012,12 +1063,12 @@ impl Governance {
     ///
     /// Only the original proposer or the contract admin may cancel a proposal.
     /// A proposal that has already been executed or cancelled cannot be cancelled again.
-    /// Cancellation is immediate and permanent — a cancelled proposal can never be
+    /// Cancellation is immediate and permanent â€” a cancelled proposal can never be
     /// executed, regardless of how many votes it accumulated.
     ///
     /// Votes already cast are preserved in storage but have no effect on a cancelled
     /// proposal. The votes are not refunded because registered voting weight is not
-    /// consumed globally — each voter retains their full weight for other proposals.
+    /// consumed globally â€” each voter retains their full weight for other proposals.
     ///
     /// Emits a `PropCanc` event with `(proposal_id)` as topics and
     /// `(canceller)` as data so off-chain indexers can track cancellations.
@@ -1070,6 +1121,84 @@ impl Governance {
 
         Ok(())
     }
+
+    /// Emergency veto of a proposal by the designated guardian.
+    ///
+    /// Cancels the proposal permanently, even after voting has concluded and
+    /// while the proposal is inside its execution-delay timelock. This is the
+    /// safety valve for a malicious proposal that passed because of compromised
+    /// voting keys: the guardian can block it before `execute` queues the new
+    /// weights in the credit-oracle.
+    ///
+    /// The veto reason is recorded under `DataKey::VetoReason(proposal_id)` and
+    /// emitted in the `ProposalVetoed` event.
+    ///
+    /// Errors:
+    /// - `NotAuthorized` if no guardian is configured or `guardian` is not it.
+    /// - `ProposalNotFound` if the proposal does not exist.
+    /// - `ProposalAlreadyExecuted` if the proposal has already been executed.
+    /// - `ProposalAlreadyCancelled` if it was already cancelled or vetoed.
+    ///
+    /// Auth: `guardian` must sign the transaction.
+    pub fn emergency_veto(
+        env: Env,
+        guardian: Address,
+        proposal_id: u64,
+        reason: String,
+    ) -> Result<(), GovernanceError> {
+        guardian.require_auth();
+
+        let stored_guardian: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Guardian)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if guardian != stored_guardian {
+            return Err(GovernanceError::NotAuthorized);
+        }
+
+        let proposal_key = DataKey::Proposal(proposal_id);
+        let mut proposal: GovernanceProposal = env
+            .storage()
+            .persistent()
+            .get(&proposal_key)
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        if proposal.executed {
+            return Err(GovernanceError::ProposalAlreadyExecuted);
+        }
+        if proposal.cancelled {
+            return Err(GovernanceError::ProposalAlreadyCancelled);
+        }
+
+        proposal.cancelled = true;
+        env.storage().persistent().set(&proposal_key, &proposal);
+
+        // Stored separately so the GovernanceProposal layout stays stable for
+        // proposals written before this feature was deployed.
+        env.storage()
+            .persistent()
+            .set(&DataKey::VetoReason(proposal_id), &reason);
+        env.storage().persistent().extend_ttl(
+            &DataKey::VetoReason(proposal_id),
+            PERS_TTL_THRESHOLD,
+            PERS_TTL_EXTEND,
+        );
+
+        env.events().publish(
+            (Symbol::new(&env, "ProposalVetoed"), proposal_id),
+            (guardian, reason),
+        );
+
+        Ok(())
+    }
+
+    /// Return the recorded veto reason for a proposal, if it was vetoed.
+    pub fn get_veto_reason(env: Env, proposal_id: u64) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::VetoReason(proposal_id))
+    }
 }
 
 #[cfg(test)]
@@ -1081,13 +1210,17 @@ mod tests {
         Env, TryIntoVal,
     };
 
+    fn test_cid(env: &Env) -> String {
+        String::from_str(env, "ipfs://QmDefaultMetadataCID123456789")
+    }
+
     #[test]
     fn test_voter_batches() {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let other = Address::generate(&env);
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let client = GovernanceClient::new(&env, &gov_id);
         client.initialize(&admin, &Address::generate(&env), &1);
 
@@ -1181,11 +1314,11 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
         credit_oracle_client.initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &1000);
 
@@ -1203,7 +1336,7 @@ mod tests {
         };
 
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id, 1);
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
@@ -1286,10 +1419,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1342,11 +1475,11 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
         credit_oracle_client.initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1359,7 +1492,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.quorum_required, 500);
@@ -1413,10 +1546,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1426,7 +1559,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
 
@@ -1446,10 +1579,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1459,7 +1592,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &1);
 
@@ -1481,10 +1614,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1494,7 +1627,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // The proposer cancels their own proposal.
         gov_client.cancel_proposal(&proposer, &proposal_id);
@@ -1543,10 +1676,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1556,7 +1689,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Vote before cancellation succeeds.
         let voter1 = Address::generate(&env);
@@ -1598,10 +1731,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1611,7 +1744,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Admin (not the proposer) cancels the proposal.
         gov_client.cancel_proposal(&admin, &proposal_id);
@@ -1626,16 +1759,70 @@ mod tests {
         assert_eq!(res, Err(Ok(GovernanceError::ProposalAlreadyCancelled)));
     }
 
-    /// Verifies the full execution timelock flow:
-    /// vote passes → advance past voting → execution rejected (timelock) →
-    /// advance past delay → execution succeeds.
-    ///
-    /// Per the double-timelock model in docs/governance.md §2.2, `execute()`
-    /// only queues weights (via `propose_weights`), so the active weights must
-    /// remain unchanged and a `PendingWeights` record must be visible until
-    /// `apply_weights()` runs after the credit-oracle's 17,280-ledger timelock.
     #[test]
-    fn test_execution_timelock_delays_after_voting_ends() {
+    fn test_set_guardian_requires_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let guardian = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        assert_eq!(client.get_guardian(), None);
+
+        let non_admin = Address::generate(&env);
+        assert_eq!(
+            client.try_set_guardian(&non_admin, &guardian),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+
+        client.set_guardian(&admin, &guardian);
+        assert_eq!(client.get_guardian(), Some(guardian));
+    }
+
+    #[test]
+    fn test_emergency_veto_requires_guardian() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        let proposer = Address::generate(&env);
+        let weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposal_id = client.create_proposal(&proposer, &weights, &100, &0, &test_cid(&env));
+
+        let guardian = Address::generate(&env);
+        let attacker = Address::generate(&env);
+        let reason = String::from_str(&env, "attempted veto");
+
+        // No guardian configured yet.
+        assert_eq!(
+            client.try_emergency_veto(&attacker, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+
+        client.set_guardian(&admin, &guardian);
+
+        // The admin is not automatically the guardian.
+        assert_eq!(
+            client.try_emergency_veto(&admin, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_emergency_veto(&attacker, &proposal_id, &reason),
+            Err(Ok(GovernanceError::NotAuthorized))
+        );
+    }
+
+    #[test]
+    fn test_emergency_veto_during_timelock_blocks_execution() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -1651,6 +1838,151 @@ mod tests {
         credit_oracle_client.propose_new_admin(&gov_id);
         gov_client.accept_oracle_admin();
 
+        let guardian = Address::generate(&env);
+        gov_client.set_guardian(&admin, &guardian);
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        // voting_period = 100 ledgers, execution_delay = 50 ledgers.
+        let proposal_id =
+            gov_client.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
+
+        let voter = Address::generate(&env);
+        gov_client.register_voter(&admin, &voter, &200);
+        gov_client.vote(&voter, &proposal_id, &true, &200);
+
+        // Voting has concluded but the execution timelock is still running.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::TimelockNotExpired))
+        );
+
+        let reason = String::from_str(&env, "compromised proposer key");
+        gov_client.emergency_veto(&guardian, &proposal_id, &reason);
+
+        // Drain events before any further client call clears the buffer.
+        let events = env.events().all();
+        let mut veto_event_count = 0u32;
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id != gov_id || topics.len() != 2 {
+                continue;
+            }
+            let topic: Symbol = topics
+                .get(0)
+                .unwrap()
+                .try_into_val(&env)
+                .expect("topic should be a Symbol");
+            if topic != Symbol::new(&env, "ProposalVetoed") {
+                continue;
+            }
+            let event_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+            assert_eq!(event_id, proposal_id);
+            let (event_guardian, event_reason): (Address, String) =
+                data.try_into_val(&env).unwrap();
+            assert_eq!(event_guardian, guardian);
+            assert_eq!(event_reason, reason);
+            veto_event_count += 1;
+        }
+        assert_eq!(veto_event_count, 1, "expected one ProposalVetoed event");
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "veto must mark the proposal cancelled");
+        assert!(
+            !proposal.executed,
+            "veto must not mark the proposal executed"
+        );
+        assert_eq!(gov_client.get_veto_reason(&proposal_id), Some(reason));
+
+        // Effective immediately, while still inside the timelock.
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // ...and permanently, after the timelock would have expired.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+        assert_eq!(
+            gov_client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // A proposal can only be vetoed once.
+        let again = String::from_str(&env, "second veto");
+        assert_eq!(
+            gov_client.try_emergency_veto(&guardian, &proposal_id, &again),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+    }
+
+    #[test]
+    fn test_emergency_veto_rejects_executed_proposal() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let gov_id = env.register_contract(None, Governance);
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &Address::generate(&env), &1);
+
+        let guardian = Address::generate(&env);
+        client.set_guardian(&admin, &guardian);
+
+        let proposer = Address::generate(&env);
+        let weights = ScoringWeights {
+            vc_weight: 40,
+            tx_weight: 30,
+            repayment_weight: 30,
+        };
+        let proposal_id = client.create_proposal(&proposer, &weights, &100, &0, &test_cid(&env));
+
+        // Simulate the proposal having already been executed.
+        env.as_contract(&gov_id, || {
+            let key = DataKey::Proposal(proposal_id);
+            let mut proposal: GovernanceProposal = env.storage().persistent().get(&key).unwrap();
+            proposal.executed = true;
+            env.storage().persistent().set(&key, &proposal);
+        });
+
+        let reason = String::from_str(&env, "too late");
+        assert_eq!(
+            client.try_emergency_veto(&guardian, &proposal_id, &reason),
+            Err(Ok(GovernanceError::ProposalAlreadyExecuted))
+        );
+    }
+
+    /// Verifies the full execution timelock flow:
+    /// vote passes â†’ advance past voting â†’ execution rejected (timelock) â†’
+    /// advance past delay â†’ execution succeeds.
+    ///
+    /// Per the double-timelock model in docs/governance.md Â§2.2, `execute()`
+    /// only queues weights (via `propose_weights`), so the active weights must
+    /// remain unchanged and a `PendingWeights` record must be visible until
+    /// `apply_weights()` runs after the credit-oracle's 17,280-ledger timelock.
+    #[test]
+    fn test_execution_timelock_delays_after_voting_ends() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+
+        let gov_id = env.register(Governance, ());
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        credit_oracle_client.propose_new_admin(&gov_id);
+        gov_client.accept_oracle_admin();
+
         let proposed_weights = ScoringWeights {
             vc_weight: 50,
             tx_weight: 20,
@@ -1659,7 +1991,7 @@ mod tests {
 
         let proposer = Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         let proposal = gov_client.get_proposal(&proposal_id).unwrap();
         assert_eq!(proposal.execution_delay_ledgers, 50);
@@ -1678,7 +2010,7 @@ mod tests {
             l.sequence_number += 101; // past expiry, but only 1 ledger into the delay
         });
 
-        // Execution must be rejected — timelock not yet expired
+        // Execution must be rejected â€” timelock not yet expired
         let res = gov_client.try_execute(&proposal_id);
         assert_eq!(res, Err(Ok(GovernanceError::TimelockNotExpired)));
 
@@ -1718,10 +2050,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1731,7 +2063,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter_for = Address::generate(&env);
         let voter_against = Address::generate(&env);
@@ -1754,11 +2086,11 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
         credit_oracle_client.initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1771,7 +2103,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &200);
@@ -1796,11 +2128,11 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
         credit_oracle_client.initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &500);
 
@@ -1819,10 +2151,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1854,9 +2186,9 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let client = GovernanceClient::new(&env, &gov_id);
         client.initialize(&admin, &credit_oracle_id, &1);
         client.register_voter(&admin, &Address::generate(&env), &101);
@@ -1871,6 +2203,7 @@ mod tests {
             },
             &10,
             &0,
+            &test_cid(&env),
         );
         assert_eq!(
             client.get_proposal(&proposal_id).unwrap().quorum_required,
@@ -1884,9 +2217,9 @@ mod tests {
         env.mock_all_auths();
         let admin = Address::generate(&env);
         let voter = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let client = GovernanceClient::new(&env, &gov_id);
         client.initialize(&admin, &credit_oracle_id, &1);
 
@@ -1904,6 +2237,7 @@ mod tests {
             },
             &10,
             &0,
+            &test_cid(&env),
         );
         assert_eq!(
             client.get_proposal(&proposal_id).unwrap().quorum_required,
@@ -1917,10 +2251,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1930,7 +2264,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         let res = gov_client.try_vote(&voter, &proposal_id, &true, &100);
@@ -1943,10 +2277,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1956,7 +2290,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -1972,10 +2306,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -1985,7 +2319,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -2021,10 +2355,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2034,7 +2368,7 @@ mod tests {
             repayment_weight: 25,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0);
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &1_000_000, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov_client.register_voter(&admin, &voter, &100);
@@ -2068,10 +2402,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2083,8 +2417,8 @@ mod tests {
         let proposer = Address::generate(&env);
 
         // Create two proposals
-        let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
-        let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id_1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
+        let proposal_id_2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id_1, 1);
         assert_eq!(proposal_id_2, 2);
 
@@ -2129,10 +2463,10 @@ mod tests {
 
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2157,10 +2491,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2186,10 +2520,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2205,6 +2539,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_tx_zero, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2218,6 +2553,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_tx_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2231,6 +2567,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_vc_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2244,6 +2581,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res_repayment_low, Err(Ok(GovernanceError::InvalidWeights)));
 
@@ -2257,6 +2595,7 @@ mod tests {
             },
             &100,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(prop_id, 1);
     }
@@ -2267,10 +2606,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2285,6 +2624,7 @@ mod tests {
             },
             &0,
             &10,
+            &test_cid(&env),
         );
         assert_eq!(res, Err(Ok(GovernanceError::InvalidVotingPeriod)));
     }
@@ -2297,10 +2637,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2317,6 +2657,7 @@ mod tests {
             &proposed_weights,
             &voting_period,
             &execution_delay,
+            &test_cid(&env),
         );
 
         let voter_for = Address::generate(&env);
@@ -2358,10 +2699,10 @@ mod tests {
         env.mock_all_auths();
 
         let admin = Address::generate(&env);
-        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        let credit_oracle_id = env.register(CreditOracle, ());
         CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
 
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov_client = GovernanceClient::new(&env, &gov_id);
         gov_client.initialize(&admin, &credit_oracle_id, &100);
 
@@ -2378,6 +2719,7 @@ mod tests {
             &proposed_weights,
             &voting_period,
             &execution_delay,
+            &test_cid(&env),
         );
 
         let voter_for = Address::generate(&env);
@@ -2409,5 +2751,167 @@ mod tests {
             !proposal_after.executed,
             "tied proposal must not be marked as executed"
         );
+    }
+
+    #[test]
+    fn test_create_proposal_stores_and_returns_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let cid = String::from_str(&env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &cid);
+
+        let proposal = gov_client.get_proposal(&proposal_id).unwrap();
+        assert_eq!(proposal.metadata_cid, cid);
+
+        let proposals = gov_client.list_proposals(&proposal_id, &1, &true);
+        assert_eq!(proposals.len(), 1);
+        assert_eq!(proposals.get(0).unwrap().metadata_cid, cid);
+    }
+
+    #[test]
+    fn test_create_proposal_rejects_empty_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let empty_cid = String::from_str(&env, "");
+        let res = gov_client.try_create_proposal(&proposer, &proposed_weights, &100, &10, &empty_cid);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidMetadataCid)));
+    }
+
+    #[test]
+    fn test_create_proposal_rejects_oversized_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        // 129 characters (MAX_METADATA_CID_LEN is 128)
+        let oversized_str = "123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789";
+        let oversized_cid = String::from_str(&env, oversized_str);
+        let res = gov_client.try_create_proposal(&proposer, &proposed_weights, &100, &10, &oversized_cid);
+        assert_eq!(res, Err(Ok(GovernanceError::InvalidMetadataCid)));
+    }
+
+    #[test]
+    fn test_create_proposal_accepts_boundary_length_metadata_cid() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+
+        // Boundary 1: minimum valid length (1 character)
+        let min_cid = String::from_str(&env, "x");
+        let id1 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &min_cid);
+        assert_eq!(gov_client.get_proposal(&id1).unwrap().metadata_cid, min_cid);
+
+        // Boundary 2: maximum allowed length (128 characters)
+        let max_str = "12345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678901234567890123456789012345678";
+        let max_cid = String::from_str(&env, max_str);
+        let id2 = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &max_cid);
+        assert_eq!(gov_client.get_proposal(&id2).unwrap().metadata_cid, max_cid);
+    }
+
+    #[test]
+    fn test_create_proposal_emits_metadata_cid_in_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register_contract(None, CreditOracle);
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+
+        let gov_id = env.register_contract(None, Governance);
+        let gov_client = GovernanceClient::new(&env, &gov_id);
+        gov_client.initialize(&admin, &credit_oracle_id, &100);
+
+        let proposer = Address::generate(&env);
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let cid = String::from_str(&env, "ipfs://QmTestProposalEventCID");
+        let proposal_id = gov_client.create_proposal(&proposer, &proposed_weights, &100, &10, &cid);
+
+        let events = env.events().all();
+        let mut found_event = false;
+
+        for (contract_id, topics, data) in events.iter() {
+            if contract_id == gov_id && topics.len() == 2 {
+                let symbol: soroban_sdk::Symbol = topics
+                    .get(0)
+                    .unwrap()
+                    .try_into_val(&env)
+                    .unwrap_or(soroban_sdk::symbol_short!("invalid"));
+                if symbol == soroban_sdk::symbol_short!("PropCreat") {
+                    let id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+                    if id == proposal_id {
+                        found_event = true;
+                        let (event_proposer, expiry_ledger, event_cid): (Address, u32, String) =
+                            data.try_into_val(&env).unwrap();
+                        assert_eq!(event_proposer, proposer);
+                        assert_eq!(expiry_ledger, env.ledger().sequence() + 100);
+                        assert_eq!(event_cid, cid);
+                    }
+                }
+            }
+        }
+
+        assert!(found_event, "ProposalCreated event with metadata_cid must be emitted");
     }
 }

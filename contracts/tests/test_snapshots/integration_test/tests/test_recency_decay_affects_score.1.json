@@ -254,6 +254,9 @@
                 },
                 {
                   "u32": 5000
+                },
+                {
+                  "u32": 300
                 }
               ]
             }
@@ -284,6 +287,9 @@
                 },
                 {
                   "u32": 5000
+                },
+                {
+                  "u32": 300
                 }
               ]
             }
@@ -1518,6 +1524,18 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "DecayFloorScore"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "u32": 300
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "IdentityOracleId"
                             }
                           ]
@@ -1536,6 +1554,46 @@
                         },
                         "val": {
                           "u32": 5000
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ProtocolMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_borrowers"
+                              },
+                              "val": {
+                                "u64": 1
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_repayments_count"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_volume_scored"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            }
+                          ]
                         }
                       },
                       {

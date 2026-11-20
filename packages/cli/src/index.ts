@@ -33,6 +33,8 @@ import {
   type CredentialTypeWeight,
   type IssuerTier,
   type ProtocolConfig,
+  type IdentityProtocolStats,
+  type CreditProtocolStats,
 } from "@stellar-did-credit/sdk";
 import { loadConfig, validateConfig, type NetworkType } from "./config";
 import { readBatchCsv, writeBatchResults, type BatchResult } from "./batch";
@@ -2048,6 +2050,7 @@ governance
   .argument("<repay-weight>", "Repayment score weight (0-100)", parseInt)
   .option("--voting-period <ledgers>", "Voting period in ledgers", parseInt, 17280)
   .option("--delay <ledgers>", "Execution delay in ledgers", parseInt, 0)
+  .option("--metadata-cid <cid>", "Metadata URI or IPFS CID explaining proposal rationale", "ipfs://QmDefaultMetadataCID")
   .option("--dry-run", "Simulate transaction execution without broadcasting")
   .action(
     async (
@@ -2055,7 +2058,7 @@ governance
       vcWeight: number,
       txWeight: number,
       repayWeight: number,
-      cmdOptions: { votingPeriod: number; delay: number; dryRun?: boolean },
+      cmdOptions: { votingPeriod: number; delay: number; metadataCid: string; dryRun?: boolean },
     ) => {
       const globalOptions = program.opts();
       const network = globalOptions.network as NetworkType;
@@ -2077,6 +2080,7 @@ governance
           scoringWeightsToScVal(weights),
           nativeToScVal(cmdOptions.votingPeriod, { type: "u32" }),
           nativeToScVal(cmdOptions.delay, { type: "u32" }),
+          nativeToScVal(cmdOptions.metadataCid, { type: "string" }),
         );
         await simulateDryRun({
           rpcUrl: config.rpcUrl,
@@ -2099,6 +2103,7 @@ governance
           weights,
           cmdOptions.votingPeriod,
           cmdOptions.delay,
+          cmdOptions.metadataCid,
         );
         console.log();
         console.log("Success!");
@@ -2357,14 +2362,14 @@ async function runPauseCommand(params: {
   const { action, target, adminSecret } = params;
   const network = program.opts().network as NetworkType;
   const config = loadConfig(network);
-  const targetConfig = {
-    identity: { configKey: "identityOracleId", contractName: "identity-oracle" },
-    credit: { configKey: "creditOracleId", contractName: "credit-oracle" },
-    revocation: { configKey: "revocationRegistryId", contractName: "revocation-registry" },
-  }[target];
+  const targetConfig = ({
+    identity: { configKey: "identityOracleId" as const, contractName: "identity-oracle" },
+    credit: { configKey: "creditOracleId" as const, contractName: "credit-oracle" },
+    revocation: { configKey: "revocationRegistryId" as const, contractName: "revocation-registry" },
+  } as const)[target];
   validateConfig(config, [targetConfig.configKey]);
 
-  const contractId = config[targetConfig.configKey]!;
+  const contractId = String(config[targetConfig.configKey]!);
   const keypair = parseSecret(adminSecret);
   if (params.dryRun) {
     const contract = new Contract(contractId);
@@ -2441,17 +2446,14 @@ async function runUpgradeCommand(params: {
   const { target, adminSecret, wasmHashHex } = params;
   const network = program.opts().network as NetworkType;
   const config = loadConfig(network);
-  const targetConfig: {
-    configKey: keyof ProtocolConfig;
-    contractName: string;
-  } = {
-    identity: { configKey: "identityOracleId", contractName: "identity-oracle" },
-    credit: { configKey: "creditOracleId", contractName: "credit-oracle" },
-    revocation: { configKey: "revocationRegistryId", contractName: "revocation-registry" },
-  }[target];
+  const targetConfig = ({
+    identity: { configKey: "identityOracleId" as const, contractName: "identity-oracle" },
+    credit: { configKey: "creditOracleId" as const, contractName: "credit-oracle" },
+    revocation: { configKey: "revocationRegistryId" as const, contractName: "revocation-registry" },
+  } as const)[target];
   validateConfig(config, [targetConfig.configKey]);
 
-  const contractId = config[targetConfig.configKey]!;
+  const contractId = String(config[targetConfig.configKey]!);
   const keypair = parseSecret(adminSecret);
   const wasmHash = parseWasmHash(wasmHashHex);
   if (!wasmHash) {

@@ -93,6 +93,7 @@ export interface GovernanceProposal {
   executed: boolean;
   cancelled: boolean;
   quorumRequired: bigint;
+  metadataCid: string;
 }
 
 /** An issuer and its configured trust multiplier, returned by listIssuerTiers. */
@@ -734,6 +735,7 @@ export class GovernanceClient {
     weights: ScoringWeights,
     votingPeriodLedgers: number,
     executionDelayLedgers: number,
+    metadataCid: string,
   ): Promise<bigint> {
     const proposer = getPublicKey(proposerKeypair);
     const contract = this.governanceContract();
@@ -745,6 +747,7 @@ export class GovernanceClient {
         scoringWeightsToScVal(weights),
         nativeToScVal(votingPeriodLedgers, { type: "u32" }),
         nativeToScVal(executionDelayLedgers, { type: "u32" }),
+        nativeToScVal(metadataCid, { type: "string" }),
       ),
       "createProposal",
     );
@@ -3148,6 +3151,7 @@ export class StellarDIDCreditSDK {
     const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
     const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
 
+    await ZkWasm.initZkWasm();
     const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
       vcPoints,
       Number(txStats.volume30d),
@@ -3357,14 +3361,16 @@ export class StellarDIDCreditSDK {
 
   /**
    * Poll for the credit-oracle's dispute events (`DsptFild`, `DsptRslv`,
-   * `DsptRjct`) for a single subject.
+   * `DsptRjct`, `DsptExpr`) for a single subject.
    *
    * A dispute is raised by `flag_score_input` and closed by `resolve_dispute`,
    * which emits `DsptRslv` when the admin accepts the flag and `DsptRjct` when
-   * they reject it. All three events carry `(subject, input_key)`, so the
-   * subscription filters on `subject` locally and derives `status` from the
-   * event topic. Events from before the subscription started are skipped, and
-   * the three topics share one poll per interval.
+   * they reject it. A stale dispute can also be closed by `expire_dispute`,
+   * which emits `DsptExpr` once the review timeout has elapsed. All events
+   * carry `(subject, input_key)`, so the subscription filters on `subject`
+   * locally and derives `status` from the event topic. Events from before the
+   * subscription started are skipped, and all topics share one poll per
+   * interval.
    *
    * @param subject - Subject address whose disputes to watch
    * @param callback - Called with each matching {@link DisputeEvent}
@@ -4123,6 +4129,7 @@ function parseGovernanceProposal(native: unknown): GovernanceProposal {
     executed: Boolean(raw["executed"]),
     cancelled: Boolean(raw["cancelled"]),
     quorumRequired: BigInt(raw["quorum_required"] as bigint | number | string),
+    metadataCid: String(raw["metadata_cid"] ?? ""),
   };
 }
 
@@ -4204,6 +4211,7 @@ function parseGovernanceProposalList(scVal: xdr.ScVal): GovernanceProposal[] {
       quorumRequired: BigInt(
         raw["quorum_required"] as bigint | number | string,
       ),
+      metadataCid: String(raw["metadata_cid"] ?? ""),
     };
   });
 }

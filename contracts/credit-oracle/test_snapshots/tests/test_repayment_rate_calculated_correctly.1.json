@@ -481,7 +481,7 @@
             },
             "ext": "v0"
           },
-          4095
+          518400
         ]
       ],
       [
@@ -617,6 +617,46 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ProtocolMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_borrowers"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_repayments_count"
+                              },
+                              "val": {
+                                "u64": 10
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_volume_scored"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 0
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "ProtocolStats"
                             }
                           ]
@@ -661,7 +701,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ],
       [
@@ -1078,7 +1118,7 @@
             },
             "ext": "v0"
           },
-          4095
+          500000
         ]
       ]
     ]

@@ -78,6 +78,7 @@ pub fn generate_score_proof(
         last_updated,
         computed_at_ledger,
         stale,
+        score_timestamp: last_updated,
         vc_points,
         on_time_count,
         total_count,
@@ -128,6 +129,8 @@ pub fn generate_score_proof(
         score_commitment: commitment,
         snapshot_ledger,
         domain_separator: Fr::from_be_bytes_mod_order(&domain_buf),
+        current_timestamp: last_updated,
+        max_validity_window: 86400 * 30,
     };
 
     let mut rng = StdRng::from_seed([0u8; 32]);

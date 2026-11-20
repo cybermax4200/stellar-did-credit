@@ -37,6 +37,9 @@ jobs:
       - name: Check score circuit constraint budget and prover time
         run: cargo test -p zk-circuit benchmark_score_circuit -- --ignored --nocapture
 
+      - name: Fuzz malformed score proofs (100000 cases)
+        run: PROPTEST_CASES=100000 cargo test -p score-range-verifier fuzz_verify_proof_bytes -- --nocapture
+
       - name: Run cargo deny
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
@@ -128,8 +131,22 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Build zk-wasm
-        run: pnpm --filter @stellar-did-credit/zk-wasm build
+      - name: Build baseline zk-wasm
+        run: wasm-pack build --release --target nodejs --no-opt --out-dir pkg-baseline
+        working-directory: packages/zk-wasm
+
+      - name: Build and verify optimized zk-wasm
+        run: |
+          pnpm --filter @stellar-did-credit/zk-wasm build
+          pnpm --filter @stellar-did-credit/zk-wasm test:build
+          pnpm --filter @stellar-did-credit/zk-wasm build:web
+          pnpm --filter @stellar-did-credit/zk-wasm test:browser
+
+      - name: Smoke test WASM imports in Node.js
+        run: pnpm --filter @stellar-did-credit/zk-wasm test
+
+      - name: Smoke test browser bundles in Vite and Webpack
+        run: pnpm --filter @stellar-did-credit/zk-wasm test:bundlers
 
       - name: Run TypeScript SDK tests
         run: pnpm run test

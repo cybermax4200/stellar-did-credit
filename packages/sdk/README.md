@@ -126,6 +126,7 @@ const proposalId = await sdk.governance.createProposal(
   { vcWeight: 50, txWeight: 25, repaymentWeight: 25 },
   17_280,
   17_280,
+  "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi",
 );
 
 await sdk.governance.vote(voterKeypair, proposalId, true, 100n);

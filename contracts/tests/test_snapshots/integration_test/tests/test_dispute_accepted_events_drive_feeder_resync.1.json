@@ -439,7 +439,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "filed_at_ledger"
+                        "symbol": "created_at_ledger"
                       },
                       "val": {
                         "u32": 0
@@ -1155,6 +1155,46 @@
                               },
                               "val": {
                                 "u32": 40
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
+                              "symbol": "ProtocolMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_borrowers"
+                              },
+                              "val": {
+                                "u64": 1
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_repayments_count"
+                              },
+                              "val": {
+                                "u64": 5
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_volume_scored"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 100000000000
+                                }
                               }
                             }
                           ]

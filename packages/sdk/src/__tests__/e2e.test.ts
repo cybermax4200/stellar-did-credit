@@ -92,6 +92,7 @@ describeE2E("E2E: deployed testnet contracts", () => {
       { vcWeight: 45, txWeight: 30, repaymentWeight: 25 },
       1,
       1,
+      "ipfs://QmTestProposalMetadata",
     );
     await sdk.governance.vote(issuerKeypair, proposalId, true, 1);
 

@@ -1494,6 +1494,46 @@
                         "key": {
                           "vec": [
                             {
+                              "symbol": "ProtocolMetrics"
+                            }
+                          ]
+                        },
+                        "val": {
+                          "map": [
+                            {
+                              "key": {
+                                "symbol": "total_borrowers"
+                              },
+                              "val": {
+                                "u64": 3
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_repayments_count"
+                              },
+                              "val": {
+                                "u64": 0
+                              }
+                            },
+                            {
+                              "key": {
+                                "symbol": "total_volume_scored"
+                              },
+                              "val": {
+                                "i128": {
+                                  "hi": 0,
+                                  "lo": 3500000000
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      },
+                      {
+                        "key": {
+                          "vec": [
+                            {
                               "symbol": "ProtocolStats"
                             }
                           ]

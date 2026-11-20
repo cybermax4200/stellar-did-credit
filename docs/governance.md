@@ -49,7 +49,7 @@ Weight changes from a passing proposal are gated by **two sequential waiting per
 Full end-to-end timeline from proposal creation to active weights:
 
 ```
-create_proposal(id=1, weights=W2, voting_period=VP, execution_delay=ED)
+create_proposal(id=1, weights=W2, voting_period=VP, execution_delay=ED, metadata_cid=CID)
   │
   ├─ current_sequence ─────────────────► proposal.expiry_ledger = seq + VP
   │                                                        │
@@ -114,6 +114,21 @@ The public `cancel_proposal(env, canceller, proposal_id)` entrypoint:
 - Emits a `PropCanc` event with `proposal_id` as an extra topic and the `canceller` address as data, so off-chain indexers can track cancellations.
 
 Cancellation has real on-chain enforcement: once cancelled, both `vote` and `execute` fail for that proposal for the rest of its lifetime.
+
+### 2.6 The Emergency Guardian and `emergency_veto()`
+
+The admin may designate a dedicated **security guardian** whose only power is to veto a proposal before it takes effect. This is the emergency brake for the case where a malicious proposal passes because of compromised voting keys: the guardian can cancel it during the execution-delay timelock, before `execute` queues new weights in the credit-oracle.
+
+- `set_guardian(env, admin, guardian)` — admin-only setter. Verifies `admin` equals the stored `DataKey::Admin` and requires its signature, then stores the address under `DataKey::Guardian`. Replaces any previous guardian. `get_guardian(env)` returns the current guardian (`Option<Address>`).
+- `emergency_veto(env, guardian, proposal_id, reason: String)` — requires `guardian.require_auth()` and checks the signer equals the stored `DataKey::Guardian`. Any other caller (including the admin) receives `NotAuthorized`; the same error is returned if no guardian has been configured.
+  - Errors: `ProposalNotFound` if the proposal does not exist, `ProposalAlreadyExecuted` if it already executed, `ProposalAlreadyCancelled` if it was already cancelled or vetoed.
+  - Sets `cancelled: bool = true` on the stored proposal — even if voting has already concluded — so the proposal becomes unexecutable immediately.
+  - Records the supplied reason under `DataKey::VetoReason(proposal_id)` (read via `get_veto_reason(env, proposal_id)`). The reason is stored separately so the `GovernanceProposal` layout stays compatible with proposals written before this feature shipped.
+  - Emits a `ProposalVetoed` event with topics `[Symbol("ProposalVetoed"), proposal_id]` and data `(guardian: Address, reason: String)`.
+
+`execute` checks `executed` and `cancelled` **before** the expiry/timelock gates, so calling `execute` on a vetoed proposal returns `ProposalAlreadyCancelled` immediately — whether the vote window is still open, the execution delay is running, or the delay has already elapsed. Like `cancel_proposal`, a veto does not refund already-used vote weight.
+
+Operationally, hold the guardian key separately from the admin key (for example in a security-team multisig or hardware wallet) so that compromising the admin or a proposer does not also defeat the veto.
 
 ---
 
@@ -199,17 +214,20 @@ pub fn create_proposal(
     weights: ScoringWeights,
     voting_period_ledgers: u32,
     execution_delay_ledgers: u32,
+    metadata_cid: String,
 ) -> Result<u64, GovernanceError>
 ```
 
 **Auth:** `proposer.require_auth()`. The proposer does not need to be a registered voter; any signer can create a proposal.
 
 **Errors:**
-- `InvalidWeights` if `vc_weight + tx_weight + repayment_weight != 100`.
+- `InvalidWeights` if `vc_weight + tx_weight + repayment_weight != 100` or a component is below `MIN_COMPONENT_WEIGHT` (10).
+- `InvalidVotingPeriod` if `voting_period_ledgers == 0`.
+- `InvalidMetadataCid` if `metadata_cid` is empty or exceeds `MAX_METADATA_CID_LEN` (128 characters).
 
 **Worked example — create a proposal shifting weights from tx to VC:**
 
-Default credit-oracle weights after initialization are `(vc=40, tx=30, repayment=30)`. Propose `(50, 20, 30)`, with a voting period of 14,400 ledgers (≈20 hours) and an execution delay of 1,000 ledgers (≈1.4 hours).
+Default credit-oracle weights after initialization are `(vc=40, tx=30, repayment=30)`. Propose `(50, 20, 30)`, with a voting period of 14,400 ledgers (≈20 hours), an execution delay of 1,000 ledgers (≈1.4 hours), and an IPFS CID explaining the proposal rationale.
 
 ```rust
 let new_weights = ScoringWeights {
@@ -217,12 +235,14 @@ let new_weights = ScoringWeights {
     tx_weight:        20,
     repayment_weight: 30,
 };
+let metadata_cid = String::from_str(&env, "ipfs://bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
 
 let proposal_id: u64 = gov_client.create_proposal(
     &proposer_addr,
     &new_weights,
-    &14_400,    // voting_period_ledgers — ~20h at 5s/ledger
-    &1_000,     // execution_delay_ledgers — extra reaction window after voting
+    &14_400,        // voting_period_ledgers — ~20h at 5s/ledger
+    &1_000,         // execution_delay_ledgers — extra reaction window after voting
+    &metadata_cid,  // metadata_cid — IPFS CID or URI explaining the rationale
 );
 // assert_eq!(proposal_id, 1);   // NextProposalId started at 1
 
@@ -233,11 +253,12 @@ assert_eq!(p.votes_for, 0);
 assert_eq!(p.votes_against, 0);
 assert_eq!(p.execution_delay_ledgers, 1_000);
 assert_eq!(p.quorum_required, 1_000);   // snapshotted from default at creation
+assert_eq!(p.metadata_cid, metadata_cid);
 assert!(!p.executed);
 // p.expiry_ledger == env.ledger().sequence() + 14_400
 ```
 
-Events: `PropCreat(u64 id)` with data `(proposer, expiry_ledger)`.
+Events: `PropCreat(u64 id)` with data `(proposer, expiry_ledger, metadata_cid)`.
 
 ### 3.3 `vote`
 
@@ -416,6 +437,7 @@ Voter and quorum configuration functions require `admin.require_auth()` AND veri
 | Function | Signature | Errors |
 |---|---|---|
 | `set_quorum` | `(env, admin, quorum_required: i128) -> Result<()>` | `InvalidQuorum` if <= 0; `NotAuthorized` if caller mismatch. |
+| `set_guardian` | `(env, admin, guardian: Address) -> Result<()>` | `NotAuthorized` if caller mismatch. Guardian may call `emergency_veto`. |
 | `register_voter` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight <= 0; `NotAuthorized`. |
 | `update_voter_weight` | `(env, admin, voter: Address, weight: i128) -> Result<()>` | `InvalidVoteWeight` if weight < 0; `NotAuthorized`. Passing weight = 0 deletes the VoterWeight key (same as deregister). |
 | `batch_register_voters` | `(env, admin, entries: Vec<VoterWeightEntry>) -> Result<()>` | `NotAuthorized`, `InvalidVoteWeight` if any weight <= 0, or `VoterBatchTooLarge` above 50 entries. |
@@ -444,6 +466,8 @@ No auth, no side effects.
 | Function | Signature | Returns |
 |---|---|---|
 | `get_quorum` | `(env) -> i128` | Default quorum for future proposals. Returns 0 if never set (shouldn't happen post-initialize). |
+| `get_guardian` | `(env) -> Option<Address>` | Current emergency guardian, or `None` if not configured. |
+| `get_veto_reason` | `(env, proposal_id: u64) -> Option<String>` | Reason recorded by `emergency_veto`, or `None` if the proposal was not vetoed. |
 | `get_proposal` | `(env, proposal_id: u64) -> Option<GovernanceProposal>` | Full `GovernanceProposal` struct copy, or `None`. |
 | `get_voter_weight` | `(env, voter: Address) -> Option<i128>` | Registered total weight, or `None` if not registered. |
 | `get_vote_weight_used` | `(env, proposal_id: u64, voter: Address) -> i128` | Used weight on a specific proposal. 0 if never voted. |
@@ -493,7 +517,7 @@ All events use Soroban's `(topics_tuple, data)` shape with the first topic eleme
 
 | Topic 1 (symbol) | Extra topic | Data tuple | Emitted by |
 |---|---|---|---|
-| `PropCreat` | `proposal_id: u64` | `(proposer: Address, expiry_ledger: u32)` | `create_proposal` |
+| `PropCreat` | `proposal_id: u64` | `(proposer: Address, expiry_ledger: u32, metadata_cid: String)` | `create_proposal` |
 | `Voted` | `proposal_id: u64` | `(voter: Address, vote_for: bool, vote_weight: i128)` | `vote` |
 | `PropExec` | `proposal_id: u64` | `(votes_for: i128, votes_against: i128)` | `execute` |
 | `WtApplied` | — | `(ledger_sequence_when_applied: u32)` | `apply_weights` |

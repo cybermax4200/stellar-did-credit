@@ -90,10 +90,14 @@ pub enum CreditOracleError {
     InvalidComputeCooldown = 18,
     /// Batch size exceeds maximum allowed.
     BatchTooLarge = 19,
+    /// Dispute bond amount must not be negative.
+    InvalidDisputeBondAmount = 20,
+    /// A positive dispute bond is configured but no bond token has been set.
+    DisputeBondTokenNotConfigured = 21,
     /// Dispute review timeout must be greater than zero.
-    InvalidDisputeTimeout = 20,
+    InvalidDisputeTimeout = 22,
     /// The dispute's review timeout has not elapsed yet.
-    DisputeNotExpired = 21,
+    DisputeNotExpired = 23,
 }
 
 /// Weights used in credit score calculation.

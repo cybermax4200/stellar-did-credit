@@ -1,9 +1,27 @@
 {
   "name": "@stellar-did-credit/zk-wasm",
   "version": "0.1.0",
-  "main": "pkg/zk_wasm.js",
-  "types": "pkg/zk_wasm.d.ts",
+  "type": "module",
+  "main": "./pkg/zk_wasm_cjs.cjs",
+  "types": "./pkg/zk_wasm.d.ts",
+  "exports": {
+    ".": {
+      "types": "./pkg/zk_wasm.d.ts",
+      "import": "./pkg/zk_wasm.js",
+      "require": "./pkg/zk_wasm_cjs.cjs"
+    }
+  },
   "scripts": {
-    "build": "wasm-pack build --target nodejs"
+    "build": "node scripts/build.mjs",
+    "build:web": "wasm-pack build --release --target web --out-dir pkg-web",
+    "test": "node --test test/node.test.mjs",
+    "test:build": "node test/compare-builds.cjs pkg-baseline pkg/node",
+    "test:browser": "node test/browser-smoke.cjs",
+    "test:bundlers": "node test/bundlers.mjs"
+  },
+  "devDependencies": {
+    "@stellar-did-credit/zk-wasm": "workspace:*",
+    "vite": "^6.4.1",
+    "webpack": "^5.105.0"
   }
 }

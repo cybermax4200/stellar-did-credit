@@ -12,6 +12,8 @@ Circuit for proving score > threshold without revealing exact score. Groth16 on 
 | score_commitment | BytesN<32> | Pedersen commitment to ScoreRecord |
 | snapshot_ledger | u32 | Ledger sequence at computation |
 | domain_separator | BytesN<32> | Protocol version binding |
+| current_timestamp | u64 | Verifier current timestamp (seconds) |
+| max_validity_window | u64 | Maximum allowed score age in seconds |
 
 **Scope note — reconciling with issue #177's literal wording:** the issue text lists "subject DID" and "VC hashes" as example inputs. This spec diverges from both, deliberately:
 
@@ -27,6 +29,7 @@ Circuit for proving score > threshold without revealing exact score. Groth16 on 
 | avg_counterparties | u32 | Average distinct counterparties, 30d (see §4 audit note) |
 | repayment_rate | u32 | Basis points (0-10000) |
 | last_updated | u64 | Ledger timestamp |
+| score_timestamp | u64 | Score generation timestamp |
 | vc_weight | u32 | Active VC weight |
 | tx_weight | u32 | Active TX weight |
 | repay_weight | u32 | Active repayment weight |
@@ -46,6 +49,8 @@ composite = (vc_score * vc_weight + (tx_score + counterparty_bonus) * tx_weight 
 score = clamp(300 + (composite * 550) / 100, 300, 850)
 vc_weight + tx_weight + repay_weight == 100
 score_commitment == PedersenCommit(score, vc_count, tx_volume_30d, avg_counterparties, repayment_rate, last_updated, blinding)
+score_timestamp <= current_timestamp
+current_timestamp - score_timestamp <= max_validity_window
 ```
 
 **Audit note — counterparty_bonus binding (fixed in this revision):** an earlier draft left `counterparty_bonus` as a free witness value with nothing tying it to on-chain data. `vc_score`, `tx_score`, and `repay_score` are each fully determined by fields already on the committed `ScoreRecord` (`vc_count`, `tx_volume_30d`, `repayment_rate`), so a prover can't lie about those without breaking the commitment opening. `avg_counterparties`, however, is not a field on `ScoreRecord` — it lives only on `TxStats` in `credit-oracle`'s storage — so nothing constrained `counterparty_bonus`. A dishonest prover could set `avg_counterparties = 10` (or higher) unconditionally and inflate the proven score by up to 3 composite points with no way for the verifier to catch it.
@@ -56,10 +61,10 @@ Fix applied above: `avg_counterparties` is now part of both the witness and the 
 Approximately 2,400 gates (32-bit comparisons including the `avg_counterparties >= 10` threshold check, integer divisions, weighted sum, Pedersen commitment of 8 scalars, 7 range checks). Revised upward slightly from the original 2,200 estimate to account for the added `avg_counterparties` binding — see §4. Treat as an order-of-magnitude estimate until a reference circuit is implemented (roadmap step 1 in zk-proof-design.md).
 
 ## 6. Soroban Verifier
-env.crypto().groth16_verify(&VERIFICATION_KEY, &public_inputs, &proof) with public inputs: threshold, subject, credit_oracle_id, score_commitment, snapshot_ledger, domain_separator.
+env.crypto().groth16_verify(&VERIFICATION_KEY, &public_inputs, &proof) with public inputs: threshold, subject, credit_oracle_id, score_commitment, snapshot_ledger, domain_separator, current_timestamp, max_validity_window.
 
 ## 7. Proof System
-Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. Proof size ~192 bytes.
+Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. The on-chain encoding is 384 bytes: uncompressed A (G1, 96 bytes), B (G2, 192 bytes), and C (G1, 96 bytes).
 
 ## 8. Prover Flow
 Subject calls compute_score() -> reads ScoreRecord + Weights from chain -> generates witness with random blinding -> runs Groth16 prover in browser WASM -> submits proof to verifier contract.

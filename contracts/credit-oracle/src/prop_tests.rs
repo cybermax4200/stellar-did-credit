@@ -7,7 +7,7 @@
 
 use crate::{
     compute_score_pure, is_dispute_expired, recency_multiplier_bps, BPS_DENOMINATOR,
-    MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
+    DEFAULT_DISPUTE_TIMEOUT_LEDGERS, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
 
@@ -48,6 +48,7 @@ proptest! {
             vc_points, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         prop_assert!(
             score >= MIN_SCORE && score <= MAX_SCORE,
@@ -82,11 +83,13 @@ proptest! {
             lo, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         let score_hi = compute_score_pure(
             hi, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
         prop_assert!(
             score_hi >= score_lo,
@@ -101,7 +104,7 @@ proptest! {
 // ---------------------------------------------------------------------------
 #[test]
 fn prop_zero_inputs_yields_min_score() {
-    let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+    let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
     assert_eq!(
         score, MIN_SCORE,
         "expected MIN_SCORE ({}) for all-zero inputs, got {}",
@@ -133,6 +136,7 @@ fn prop_perfect_inputs_yields_max_score() {
         40,
         30,
         30,
+        MIN_SCORE,
     );
     assert_eq!(
         score, MAX_SCORE,
@@ -163,12 +167,14 @@ proptest! {
             vc_points, volume_30d, avg_cps,
             on_time, total_count, total_repaid,
             40, 30, 30,
+            MIN_SCORE,
         );
         // VC-boosted weights (80 / 10 / 10) — vc_weight doubled, others halved
         let score_boosted = compute_score_pure(
             vc_points, volume_30d, avg_cps,
             on_time, total_count, total_repaid,
             80, 10, 10,
+            MIN_SCORE,
         );
         prop_assert!(
             score_boosted >= score_base,
@@ -206,6 +212,7 @@ proptest! {
             vc_points, volume_30d, avg_counterparties,
             on_time, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+            MIN_SCORE,
         );
 
         // --- Perturb vc_points by ±1 ---
@@ -215,6 +222,7 @@ proptest! {
                 perturbed_vc, volume_30d, avg_counterparties,
                 on_time, total_count, total_repaid,
                 vc_w, tx_w, repay_w,
+                MIN_SCORE,
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(
@@ -231,6 +239,7 @@ proptest! {
                 vc_points, perturbed_vol, avg_counterparties,
                 on_time, total_count, total_repaid,
                 vc_w, tx_w, repay_w,
+                MIN_SCORE,
             );
             let diff = (base as i64 - perturbed as i64).unsigned_abs();
             prop_assert!(
@@ -446,6 +455,7 @@ proptest! {
             vc_points, volume_30d, avg_counterparties,
             on_time_count, total_count, total_repaid,
             vc_w, tx_w, repay_w,
+        MIN_SCORE,
         );
         prop_assert!(
             score >= MIN_SCORE && score <= MAX_SCORE,
@@ -501,53 +511,53 @@ proptest! {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Property 15 — Dispute expiry boundary:
-//               A dispute is never expired before created + timeout and is
-//               always expired at or after it, including saturation edges.
-// ---------------------------------------------------------------------------
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(1_000))]
+    //  7. Dispute expiry boundary: saturating arithmetic, exact at-threshold
 
     #[test]
-    fn prop_dispute_not_expired_before_timeout(
-        created_at in 0u32..=1_000_000_000u32,
-        timeout    in 1u32..=1_000_000u32,
-        elapsed    in 0u32..=1_000_000u32,
+    fn prop_dispute_not_expired_before_boundary(
+        filed_at in any::<u32>(),
+        timeout  in 1u32..=u32::MAX,
     ) {
-        let elapsed = elapsed % timeout;
-        let current = created_at + elapsed;
-        prop_assert!(
-            !is_dispute_expired(created_at, timeout, current),
-            "dispute expired too early: created={}, timeout={}, current={}",
-            created_at, timeout, current
-        );
-    }
-
-    #[test]
-    fn prop_dispute_expired_at_or_after_timeout(
-        created_at in 0u32..=1_000_000_000u32,
-        timeout    in 1u32..=1_000_000u32,
-        extra      in 0u32..=1_000_000u32,
-    ) {
-        let expiry = created_at + timeout;
-        let current = expiry + extra;
-        prop_assert!(
-            is_dispute_expired(created_at, timeout, current),
-            "dispute not expired at/after timeout: created={}, timeout={}, current={}",
-            created_at, timeout, current
-        );
-    }
-
-    #[test]
-    fn prop_dispute_expiry_is_saturating_and_exact(
-        created_at in any::<u32>(),
-        timeout    in 1u32..=u32::MAX,
-    ) {
-        let expiry = created_at.saturating_add(timeout);
-        prop_assert!(is_dispute_expired(created_at, timeout, expiry));
+        let expiry = filed_at.saturating_add(timeout);
         if expiry > 0 {
-            prop_assert!(!is_dispute_expired(created_at, timeout, expiry - 1));
+            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expired_at_and_after_boundary(
+        filed_at in any::<u32>(),
+        timeout  in 1u32..=u32::MAX,
+        extra    in 0u32..=10_000,
+    ) {
+        let expiry = filed_at.saturating_add(timeout);
+        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
+        if let Some(after) = expiry.checked_add(extra) {
+            prop_assert!(is_dispute_expired(filed_at, timeout, after));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expiry_saturates_at_u32_max(
+        filed_at in (u32::MAX / 2)..=u32::MAX,
+        timeout  in (u32::MAX / 2)..=u32::MAX,
+    ) {
+        prop_assert!(is_dispute_expired(filed_at, timeout, u32::MAX));
+        if filed_at > 0 {
+            prop_assert!(!is_dispute_expired(filed_at, timeout, filed_at - 1));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expiry_default_timeout_exercises_172800(
+        filed_at in any::<u32>(),
+    ) {
+        let timeout = DEFAULT_DISPUTE_TIMEOUT_LEDGERS;
+        let expiry = filed_at.saturating_add(timeout);
+        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
+        if expiry > 0 {
+            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
         }
     }
 }

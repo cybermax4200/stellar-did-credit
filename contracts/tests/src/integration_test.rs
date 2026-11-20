@@ -3,25 +3,29 @@ mod tests {
     use credit_oracle::{
         CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
         ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
-        SubjectTxStatsEntry, TxStats, DEFAULT_DISPUTE_TIMEOUT_LEDGERS, MAX_BATCH_SIZE,
+        SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
-    use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
+    use revocation_registry::{RevocationReason, RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
         contract, contractimpl, symbol_short,
         testutils::{Address as _, Events, Ledger as _},
         Address, BytesN, Env, String, Symbol, TryIntoVal,
     };
 
+    fn test_cid(env: &Env) -> String {
+        String::from_str(env, "ipfs://QmDefaultMetadataCID123456789")
+    }
+
     #[test]
     fn test_score_freshness_enforcement() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -90,7 +94,7 @@ mod tests {
         // Issue #665: governance contract must also emit an Initialized event
         // with the admin and credit-oracle target addresses so off-chain
         // indexers can detect deployments before the first admin action.
-        let gov_id = env.register_contract(None, Governance);
+        let gov_id = env.register(Governance, ());
         let gov = GovernanceClient::new(&env, &gov_id);
         gov.initialize(&admin, &credit_id, &100i128);
 
@@ -131,12 +135,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_lender(&admin, &lender);
@@ -318,25 +322,25 @@ mod tests {
         env.mock_all_auths();
 
         // 2. Register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let _revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let _revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &_revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         revocation.initialize(&admin);
 
         // 3. Register an issuer in identity-oracle
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
         // 4. Call anchor_did for a test subject
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
@@ -353,8 +357,8 @@ mod tests {
         assert!(identity.is_verified(&subject));
 
         // 7. Register a lender and feeder in credit-oracle
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_lender(&admin, &lender);
         credit.register_feeder(&admin, &feeder);
 
@@ -392,20 +396,20 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
@@ -424,7 +428,7 @@ mod tests {
         );
 
         // Now set the cached value to 0 to ensure the cross-contract path is used
-        let feeder = soroban_sdk::Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_feeder(&admin, &feeder);
         credit.set_vc_count(&feeder, &subject, &0);
         env.ledger()
@@ -442,31 +446,31 @@ mod tests {
         env.mock_all_auths();
 
         // Setup: register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let _revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         _revocation.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
         let vc_hash = BytesN::from_array(&env, &[99u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_lender(&admin, &lender);
         credit.register_feeder(&admin, &feeder);
 
@@ -517,14 +521,14 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let bad_address = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let bad_address = Address::generate(&env);
 
         identity.initialize(&admin);
         credit.initialize(&admin);
@@ -538,14 +542,14 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let bad_address = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let bad_address = Address::generate(&env);
 
         identity.initialize(&admin);
         revocation.initialize(&admin);
@@ -562,13 +566,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         revocation.initialize(&admin);
 
@@ -576,10 +580,10 @@ mod tests {
         identity.set_revocation_registry(&revocation_id);
         revocation.set_identity_oracle(&identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[123u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
@@ -601,9 +605,63 @@ mod tests {
 
         // The subject forwarded to revoke() enables the per-subject revoked list
         assert_eq!(
-            identity.list_revoked_for_subject(&subject),
+            identity.list_revoked_for_subject(&subject, &0, &50),
             soroban_sdk::vec![&env, vc_hash.clone()]
         );
+    }
+
+    #[test]
+    fn test_revocation_reason_codes_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let default_hash = BytesN::from_array(&env, &[124u8; 32]);
+        let reason_hash = BytesN::from_array(&env, &[125u8; 32]);
+
+        revocation.initialize(&admin);
+        env.events().all();
+
+        revocation.revoke(&issuer, &subject, &default_hash);
+        assert_eq!(
+            revocation.get_revocation_reason(&default_hash),
+            Some(RevocationReason::Unspecified as u32)
+        );
+
+        revocation.revoke_with_reason(
+            &issuer,
+            &subject,
+            &reason_hash,
+            &(RevocationReason::Superseded as u32),
+        );
+        let events = env.events().all();
+        assert_eq!(
+            revocation.get_revocation_reason(&reason_hash),
+            Some(RevocationReason::Superseded as u32)
+        );
+
+        let mut found_reason_event = false;
+        for i in 0..events.len() {
+            let (_, topics, data) = events.get(i).unwrap();
+            if topics.len() != 1 {
+                continue;
+            }
+            let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+            if topic != symbol_short!("Revoked") {
+                continue;
+            }
+            let (_, event_hash, event_reason): (Address, BytesN<32>, u32) =
+                data.try_into_val(&env).unwrap();
+            if event_hash == reason_hash {
+                assert_eq!(event_reason, RevocationReason::Superseded as u32);
+                found_reason_event = true;
+            }
+        }
+        assert!(found_reason_event);
     }
 
     #[test]
@@ -614,23 +672,23 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         revocation.initialize(&admin);
 
         identity.set_revocation_registry(&revocation_id);
         revocation.set_identity_oracle(&identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let hash_a = BytesN::from_array(&env, &[0u8; 32]);
         let hash_b = BytesN::from_array(&env, &[1u8; 32]);
         let hash_c = BytesN::from_array(&env, &[2u8; 32]);
@@ -656,19 +714,19 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         revocation.initialize(&admin);
         revocation.set_identity_oracle(&identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
         let unknown_hash = BytesN::from_array(&env, &[124u8; 32]);
 
         assert!(!revocation.is_revoked(&unknown_hash));
@@ -693,21 +751,21 @@ mod tests {
         env.mock_all_auths();
 
         // Setup: register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let _identity = IdentityOracleClient::new(&env, &identity_id);
         let _credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         revocation.initialize(&admin);
 
         // Two different issuers
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         // A VC hash that issuer_b should not be able to revoke after issuer_a registered it
         let vc_hash = BytesN::from_array(&env, &[7u8; 32]);
@@ -732,25 +790,25 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Register and initialize all 3 contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         revocation.initialize(&admin);
 
         // 2. Register issuer
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
         // 3. Create subject and DID
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmBatchTestDID");
         identity.anchor_did(&subject, &cid);
 
@@ -819,8 +877,8 @@ mod tests {
         );
 
         // 14. Setup credit-oracle to test score changes
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_lender(&admin, &lender);
         credit.register_feeder(&admin, &feeder);
 
@@ -860,20 +918,20 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
 
         // Anchor 3 VCs for the subject
         let vc_hashes: [BytesN<32>; 3] = [
@@ -925,15 +983,15 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         revocation.initialize(&admin);
 
-        let issuer1 = soroban_sdk::Address::generate(&env);
-        let issuer2 = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let issuer1 = Address::generate(&env);
+        let issuer2 = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         let hash1 = BytesN::from_array(&env, &[1u8; 32]);
         let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
@@ -973,10 +1031,10 @@ mod tests {
     fn test_batch_revoke_requires_auth_before_size_check() {
         let env = Env::default();
         // Deliberately do NOT mock authorizations: nothing is signed.
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
 
         // 101 hashes: exceeds the batch size limit.
         let mut batch = soroban_sdk::Vec::new(&env);
@@ -1010,20 +1068,20 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let revocation_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         revocation.initialize(&admin);
 
-        let issuer1 = soroban_sdk::Address::generate(&env);
-        let issuer2 = soroban_sdk::Address::generate(&env);
+        let issuer1 = Address::generate(&env);
+        let issuer2 = Address::generate(&env);
 
         assert_eq!(revocation.get_revocation_count(&issuer1), 0);
         assert_eq!(revocation.get_revocation_count(&issuer2), 0);
         assert_eq!(revocation.list_revoked(&issuer1, &0, &10).len(), 0);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         // 1. Single revocation by issuer1
         let hash_a = BytesN::from_array(&env, &[101u8; 32]);
         revocation.revoke(&issuer1, &subject, &hash_a);
@@ -1072,7 +1130,7 @@ mod tests {
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
         assert_eq!(credit.get_governance(), None);
@@ -1101,13 +1159,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1122,11 +1180,11 @@ mod tests {
         };
 
         // Create a proposal
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Cast a passing vote (so execute would succeed if not cancelled)
-        let voter = soroban_sdk::Address::generate(&env);
+        let voter = Address::generate(&env);
         gov.register_voter(&admin, &voter, &200);
         gov.vote(&voter, &proposal_id, &true, &200);
 
@@ -1186,13 +1244,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1202,8 +1260,8 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Admin (not the proposer) cancels the proposal
         gov.cancel_proposal(&admin, &proposal_id);
@@ -1215,19 +1273,112 @@ mod tests {
         );
     }
 
+    /// The emergency guardian can veto a proposal that has already passed
+    /// voting while it is still inside the execution-delay timelock. The veto
+    /// is permanent and execution fails with `ProposalAlreadyCancelled`.
+    #[test]
+    fn test_emergency_veto_blocks_execution_during_timelock() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register_contract(None, Governance);
+
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let gov = GovernanceClient::new(&env, &gov_id);
+
+        let admin = Address::generate(&env);
+        credit.initialize(&admin);
+        gov.initialize(&admin, &credit_id, &100);
+
+        // Transfer oracle admin to governance contract.
+        credit.propose_new_admin(&gov_id);
+        gov.accept_oracle_admin();
+
+        let guardian = Address::generate(&env);
+        gov.set_guardian(&admin, &guardian);
+        assert_eq!(gov.get_guardian(), Some(guardian.clone()));
+
+        let proposed_weights = ScoringWeights {
+            vc_weight: 50,
+            tx_weight: 20,
+            repayment_weight: 30,
+        };
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &String::from_str(&env, "QmEmergencyVetoTest"));
+
+        let voter = Address::generate(&env);
+        gov.register_voter(&admin, &voter, &200);
+        gov.vote(&voter, &proposal_id, &true, &200);
+
+        // Voting has concluded but the execution timelock is still running.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 101;
+        });
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::TimelockNotExpired))
+        );
+
+        let reason = String::from_str(&env, "emergency: compromised proposer key");
+        gov.emergency_veto(&guardian, &proposal_id, &reason);
+
+        // Capture events before any further contract call drains the buffer.
+        let events = env.events().all();
+        let veto_events: Vec<_> = events
+            .iter()
+            .filter(|(id, topics, _)| {
+                if *id != gov_id || topics.len() != 2 {
+                    return false;
+                }
+                let sym: Result<Symbol, _> = topics.get(0).unwrap().try_into_val(&env);
+                sym.map(|s| s == Symbol::new(&env, "ProposalVetoed"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert_eq!(veto_events.len(), 1, "exactly one ProposalVetoed event");
+        let (_, topics, data) = &veto_events[0];
+        let event_proposal_id: u64 = topics.get(1).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(event_proposal_id, proposal_id);
+        let (event_guardian, event_reason): (soroban_sdk::Address, String) =
+            data.clone().try_into_val(&env).unwrap();
+        assert_eq!(event_guardian, guardian);
+        assert_eq!(event_reason, reason);
+
+        let proposal = gov.get_proposal(&proposal_id).unwrap();
+        assert!(proposal.cancelled, "proposal must be cancelled by veto");
+        assert!(!proposal.executed, "veto must not execute the proposal");
+        assert_eq!(gov.get_veto_reason(&proposal_id), Some(reason));
+
+        // Unexecutable immediately, still inside the timelock.
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+
+        // Unexecutable after the delay period would have elapsed.
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 50;
+        });
+        assert_eq!(
+            gov.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::ProposalAlreadyCancelled))
+        );
+    }
+
     /// A third party (neither proposer nor admin) cannot cancel a proposal.
     #[test]
     fn test_unauthorized_cancel_is_rejected() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1237,10 +1388,10 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
-        let third_party = soroban_sdk::Address::generate(&env);
+        let third_party = Address::generate(&env);
         let res = gov.try_cancel_proposal(&third_party, &proposal_id);
         assert_eq!(
             res,
@@ -1259,13 +1410,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1275,8 +1426,8 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // First cancel succeeds
         gov.cancel_proposal(&proposer, &proposal_id);
@@ -1298,13 +1449,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1314,12 +1465,12 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         // Register a voter and cast a vote before cancellation.
-        let voter1 = soroban_sdk::Address::generate(&env);
-        let voter2 = soroban_sdk::Address::generate(&env);
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
         gov.register_voter(&admin, &voter1, &500);
         gov.register_voter(&admin, &voter2, &500);
         gov.vote(&voter1, &proposal_id, &true, &300);
@@ -1363,8 +1514,8 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
@@ -1382,7 +1533,7 @@ mod tests {
             repayment_weight: 30,
         };
         let proposer = Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
 
         let voter = Address::generate(&env);
         gov.register_voter(&admin, &voter, &200);
@@ -1439,13 +1590,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         credit.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100);
 
@@ -1459,12 +1610,12 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
+        let proposer = Address::generate(&env);
         // voting_period = 100 ledgers, execution_delay = 50 ledgers
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &50, &test_cid(&env));
 
         // Cast passing votes
-        let voter = soroban_sdk::Address::generate(&env);
+        let voter = Address::generate(&env);
 
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200);
@@ -1534,17 +1685,17 @@ mod tests {
         env.mock_all_auths();
 
         // Deploy all four contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
 
         // Initialize all contracts with the same admin for simplicity
         identity.initialize(&admin);
@@ -1557,14 +1708,14 @@ mod tests {
         credit.set_identity_oracle(&admin, &identity_id);
 
         // 1) Two-step admin transfer on `credit`: admin -> new_admin
-        let new_admin = soroban_sdk::Address::generate(&env);
+        let new_admin = Address::generate(&env);
         // Propose new admin (signed by current admin)
         credit.propose_new_admin(&new_admin);
         // Accept as new admin
         credit.accept_admin(&new_admin);
 
         // Verify admin changed by exercising an admin-only call using `new_admin`
-        let feeder = soroban_sdk::Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_feeder(&new_admin, &feeder);
 
         // 2) Transfer oracle admin to governance contract
@@ -1579,11 +1730,11 @@ mod tests {
             repayment_weight: 30,
         };
 
-        let proposer = soroban_sdk::Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32);
+        let proposer = Address::generate(&env);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &10u32, &0u32, &test_cid(&env));
 
         // Cast votes to pass the proposal
-        let voter = soroban_sdk::Address::generate(&env);
+        let voter = Address::generate(&env);
 
         // Register voter with sufficient weight
         gov.register_voter(&admin, &voter, &200i128);
@@ -1621,15 +1772,15 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
 
-        let issuer_a = soroban_sdk::Address::generate(&env);
-        let issuer_b = soroban_sdk::Address::generate(&env);
-        let issuer_c = soroban_sdk::Address::generate(&env);
+        let issuer_a = Address::generate(&env);
+        let issuer_b = Address::generate(&env);
+        let issuer_c = Address::generate(&env);
 
         identity.register_issuer(&issuer_a);
         identity.register_issuer(&issuer_b);
@@ -1664,13 +1815,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
 
         identity.register_issuer(&issuer);
         let first = identity.list_issuers();
@@ -1691,10 +1842,10 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
 
         assert_eq!(identity.get_issuer_count(), 0);
@@ -1703,7 +1854,7 @@ mod tests {
 
         let mut issuers = std::vec::Vec::new();
         for _ in 0..5 {
-            let iss = soroban_sdk::Address::generate(&env);
+            let iss = Address::generate(&env);
             identity.register_issuer(&iss);
             issuers.push(iss);
         }
@@ -1735,13 +1886,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
+        let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
         // Verify initial stats are zero
@@ -1751,7 +1902,7 @@ mod tests {
         assert_eq!(stats0.total_vcs_revoked, 0);
 
         // Anchor a DID
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = soroban_sdk::String::from_str(&env, "ipfs://QmStatsTestDID");
         identity.anchor_did(&subject, &cid);
 
@@ -1781,11 +1932,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
         credit.initialize(&admin);
         credit.register_lender(&admin, &lender);
 
@@ -1795,7 +1946,7 @@ mod tests {
         assert_eq!(stats0.total_repayments_recorded, 0);
 
         // Record some repayments
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         for _ in 0..3 {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
@@ -1820,7 +1971,7 @@ mod tests {
         assert_eq!(stats3.total_subjects_scored, 1);
 
         // Compute score for a different subject
-        let subject2 = soroban_sdk::Address::generate(&env);
+        let subject2 = Address::generate(&env);
         credit.compute_score(&subject2);
 
         let stats4 = credit.get_protocol_stats();
@@ -1832,12 +1983,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
         credit.register_lender(&admin, &lender);
@@ -1848,8 +1999,8 @@ mod tests {
         assert_eq!(m0.total_borrowers, 0);
         assert_eq!(m0.total_repayments_count, 0);
 
-        let subject1 = soroban_sdk::Address::generate(&env);
-        let subject2 = soroban_sdk::Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
 
         // Record repayments
         credit.record_repayment(&lender, &subject1, &100_000_000i128, &true);
@@ -1917,13 +2068,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
 
@@ -1931,11 +2082,11 @@ mod tests {
         credit.set_identity_oracle(&admin, &identity_id);
 
         // Register an issuer
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
         // Create a subject with a DID and 2 VCs
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmTestDID");
         identity.anchor_did(&subject, &cid);
 
@@ -1945,8 +2096,8 @@ mod tests {
         identity.anchor_vc(&issuer, &subject, &vc_hash2);
 
         // Register a lender and record repayments so score > 300
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let lender = Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_lender(&admin, &lender);
         credit.register_feeder(&admin, &feeder);
 
@@ -2037,13 +2188,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
@@ -2141,17 +2292,17 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, CreditOracleV1Mock);
+        let contract_id = env.register(CreditOracleV1Mock, ());
         let client_v1 = CreditOracleV1MockClient::new(&env, &contract_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         client_v1.initialize(&admin);
 
-        let lender = soroban_sdk::Address::generate(&env);
+        let lender = Address::generate(&env);
         client_v1.register_lender(&lender);
 
-        let subject1 = soroban_sdk::Address::generate(&env);
-        let subject2 = soroban_sdk::Address::generate(&env);
+        let subject1 = Address::generate(&env);
+        let subject2 = Address::generate(&env);
 
         client_v1.record_repayment(&lender, &subject1, &true);
         client_v1.record_repayment(&lender, &subject1, &false);
@@ -2166,7 +2317,7 @@ mod tests {
         assert_eq!(rec1_v1.on_time_count, 1);
         assert_eq!(rec1_v1.total_count, 2);
 
-        env.register_contract(Some(&contract_id), CreditOracle);
+        env.register_at(&contract_id, CreditOracle, ());
         let client_v2 = CreditOracleClient::new(&env, &contract_id);
 
         let score1_before = client_v2.compute_score(&subject1);
@@ -2226,9 +2377,9 @@ mod tests {
         let identity_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &identity_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
         identity.initialize(&admin);
         identity.register_issuer(&issuer);
 
@@ -2273,12 +2424,12 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let contract_id = env.register_contract(None, IdentityOracle);
+        let contract_id = env.register(IdentityOracle, ());
         let client = IdentityOracleClient::new(&env, &contract_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
         let did_uri =
             String::from_str(&env, "ipfs://QmTestDIDDocumentHash123456789012345678901234");
 
@@ -2374,7 +2525,7 @@ mod tests {
         assert_eq!(vc_records.get(0).unwrap().vc_hash, vc_hash);
 
         // Verify new operations continue to succeed after migration
-        let subject2 = soroban_sdk::Address::generate(&env);
+        let subject2 = Address::generate(&env);
         let did_uri2 = String::from_str(&env, "ipfs://QmSecondSubjectDIDDocumentHash123456789012");
         client.anchor_did(&subject2, &did_uri2);
         assert_eq!(client.get_did_document(&subject2), Some(did_uri2));
@@ -2397,11 +2548,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         // First call succeeds
@@ -2423,20 +2574,20 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let cid = String::from_str(&env, "ipfs://QmCooldownTestDID");
         identity.anchor_did(&subject, &cid);
         let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
@@ -2476,11 +2627,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         // Override cooldown to 0
@@ -2503,11 +2654,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         // First computation
@@ -2520,7 +2671,7 @@ mod tests {
         );
 
         // Advance ledger and change an input so a write actually occurs
-        let feeder = soroban_sdk::Address::generate(&env);
+        let feeder = Address::generate(&env);
         credit.register_feeder(&admin, &feeder);
         credit.set_vc_count(&feeder, &subject, &3);
         env.ledger()
@@ -2549,20 +2700,20 @@ mod tests {
         env.mock_all_auths();
 
         let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         credit.set_identity_oracle(&admin, &identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleAge"));
         identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
 
@@ -2594,20 +2745,20 @@ mod tests {
         env.mock_all_auths();
 
         let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         credit.set_identity_oracle(&admin, &identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmStaleIdentity"));
         identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[7u8; 32]));
 
@@ -2643,14 +2794,14 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject_a = soroban_sdk::Address::generate(&env);
-        let subject_b = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
@@ -2694,13 +2845,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         revocation.initialize(&admin);
 
@@ -2708,10 +2859,10 @@ mod tests {
         // Verify get_revocation_registry returns None
         assert!(identity.get_revocation_registry().is_none());
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         let vc_hash = BytesN::from_array(&env, &[210u8; 32]);
         identity.anchor_vc(&issuer, &subject, &vc_hash);
 
@@ -2753,13 +2904,13 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
@@ -2786,7 +2937,7 @@ mod tests {
         );
 
         // Step 1: Subject files a dispute against tx_stats.
-        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let input_key = Symbol::new(&env, "tx_stats");
         let reason = soroban_sdk::String::from_str(
             &env,
             "My 30d volume is much lower; feeder data is incorrect",
@@ -2894,10 +3045,10 @@ mod tests {
         let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
@@ -2997,10 +3148,10 @@ mod tests {
         let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
@@ -3079,8 +3230,8 @@ mod tests {
         let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         let tx_key = Symbol::new(&env, "tx_stats");
@@ -3149,11 +3300,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         let bad_key = soroban_sdk::Symbol::new(&env, "bad_key");
@@ -3172,11 +3323,11 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
         credit.initialize(&admin);
 
         let input_key = soroban_sdk::Symbol::new(&env, "repayment");
@@ -3191,98 +3342,23 @@ mod tests {
         );
     }
 
-    /// Issue #1160: a Pending dispute expires after the review timeout, emits
-    /// `DsptExpr`, clears the pending lock, and can be re-filed.
-    #[test]
-    fn test_dispute_expires_after_timeout_and_allows_refile_integration() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let credit_id = env.register_contract(None, CreditOracle);
-        let credit = CreditOracleClient::new(&env, &credit_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
-        credit.initialize(&admin);
-
-        assert_eq!(
-            credit.get_dispute_timeout_ledgers(),
-            DEFAULT_DISPUTE_TIMEOUT_LEDGERS
-        );
-
-        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
-        let reason = soroban_sdk::String::from_str(&env, "Volume is inflated");
-        let created = env.ledger().sequence();
-        credit.flag_score_input(&subject, &input_key, &reason);
-        let filed_events = dispute_events(&env, &credit_id);
-        assert_eq!(
-            filed_events,
-            vec![(
-                symbol_short!("DsptFild"),
-                subject.clone(),
-                input_key.clone()
-            )]
-        );
-
-        // One ledger before the timeout the dispute cannot be expired.
-        env.ledger()
-            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS - 1);
-        assert_eq!(
-            credit.try_expire_dispute(&subject, &input_key),
-            Err(Ok(CreditOracleError::DisputeNotExpired))
-        );
-        assert_eq!(
-            credit.get_dispute(&subject, &input_key).unwrap().status,
-            DisputeStatus::Pending
-        );
-
-        // At the timeout, anyone can expire it; exactly one DsptExpr is emitted
-        // for the right subject and input key.
-        env.ledger()
-            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
-        credit.expire_dispute(&subject, &input_key);
-
-        // Read events immediately after the call (the host buffers per invocation).
-        let events = dispute_events(&env, &credit_id);
-        assert_eq!(
-            events,
-            vec![(
-                symbol_short!("DsptExpr"),
-                subject.clone(),
-                input_key.clone()
-            )],
-            "expiration must emit exactly one DsptExpr for the dispute"
-        );
-
-        let expired = credit.get_dispute(&subject, &input_key).unwrap();
-        assert_eq!(expired.status, DisputeStatus::Expired);
-        assert_eq!(expired.created_at_ledger, created);
-
-        // The pending lock is cleared: re-filing succeeds and starts fresh.
-        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after timeout");
-        credit.flag_score_input(&subject, &input_key, &reason2);
-        let refiled = credit.get_dispute(&subject, &input_key).unwrap();
-        assert_eq!(refiled.status, DisputeStatus::Pending);
-        assert_eq!(refiled.created_at_ledger, env.ledger().sequence());
-    }
-
     #[test]
     fn test_persistent_storage_ttl_survival_after_ledger_advance() {
         let env = Env::default();
         env.mock_all_auths();
 
-        let id_oracle_id = env.register_contract(None, IdentityOracle);
+        let id_oracle_id = env.register(IdentityOracle, ());
         let identity = IdentityOracleClient::new(&env, &id_oracle_id);
 
-        let rev_reg_id = env.register_contract(None, RevocationRegistry);
+        let rev_reg_id = env.register(RevocationRegistry, ());
         let revocation = RevocationRegistryClient::new(&env, &rev_reg_id);
 
-        let credit_id = env.register_contract(None, CreditOracle);
+        let credit_id = env.register(CreditOracle, ());
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         identity.initialize(&admin);
         identity.register_issuer(&issuer);
@@ -3327,26 +3403,26 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Deploy all four contracts
-        let credit_id = env.register_contract(None, CreditOracle);
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let credit_id = env.register(CreditOracle, ());
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
         let gov = GovernanceClient::new(&env, &gov_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
 
         credit.initialize(&admin);
         identity.initialize(&admin);
         revocation.initialize(&admin);
         gov.initialize(&admin, &credit_id, &100i128);
 
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let feeder = Address::generate(&env);
 
         identity.register_issuer(&issuer);
         credit.register_feeder(&admin, &feeder);
@@ -3398,22 +3474,22 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
         identity.initialize(&admin);
         credit.initialize(&admin);
         // Decay needs `anchored_at`, which only the cross-contract path exposes.
         credit.set_identity_oracle(&admin, &identity_id);
 
-        let issuer = soroban_sdk::Address::generate(&env);
+        let issuer = Address::generate(&env);
         identity.register_issuer(&issuer);
 
-        let subject = soroban_sdk::Address::generate(&env);
+        let subject = Address::generate(&env);
         identity.anchor_did(&subject, &String::from_str(&env, "ipfs://QmRecency"));
 
         // Five generic VCs anchored at T0 => 5 x 20 = 100 undecayed VC points.
@@ -3436,6 +3512,7 @@ mod tests {
                 weights.vc_weight,
                 weights.tx_weight,
                 weights.repayment_weight,
+                credit_oracle::MIN_SCORE,
             )
         };
 
@@ -3444,7 +3521,7 @@ mod tests {
         assert_eq!(baseline, expected(100));
 
         // Enable the documented defaults: 5 bps/day with a 50% floor.
-        credit.set_recency_decay(&admin, &true, &5, &5_000);
+        credit.set_recency_decay(&admin, &true, &5, &5_000, &credit_oracle::MIN_SCORE);
 
         // 100 days old => 10_000 - 500 = 9_500 bps => 19 points per VC.
         env.ledger().set_timestamp(t0 + 100 * day);
@@ -3466,10 +3543,51 @@ mod tests {
         assert!(aged_5y < aged_100d, "decay must be monotonic in age");
 
         // Turning decay off restores the pre-#530 score exactly.
-        credit.set_recency_decay(&admin, &false, &5, &5_000);
+        credit.set_recency_decay(&admin, &false, &5, &5_000, &credit_oracle::MIN_SCORE);
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
         assert_eq!(credit.compute_score(&subject), baseline);
+    }
+
+    #[test]
+    fn test_recency_decay_preserves_score_floor_for_repayment_history() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject_with_history = Address::generate(&env);
+        let subject_without_history = Address::generate(&env);
+
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+        identity.register_issuer(&issuer);
+        credit.register_lender(&admin, &lender);
+
+        let t0 = 1_700_000_000u64;
+        env.ledger().set_timestamp(t0);
+        for subject in [&subject_with_history, &subject_without_history] {
+            identity.anchor_did(subject, &String::from_str(&env, "ipfs://DecayFloor"));
+            for i in 0..5u8 {
+                identity.anchor_vc(&issuer, subject, &BytesN::from_array(&env, &[i; 32]));
+            }
+        }
+
+        credit.record_repayment(&lender, &subject_with_history, &100_000_000i128, &true);
+        credit.set_recency_decay(&admin, &true, &10_000, &0, &600);
+
+        env.ledger().set_timestamp(t0 + 86_400);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+
+        assert_eq!(credit.compute_score(&subject_with_history), 600);
+        assert_eq!(credit.compute_score(&subject_without_history), 300);
     }
 
     /// Full cross-contract integration test for the governance -> credit-oracle
@@ -3484,10 +3602,10 @@ mod tests {
         env.mock_all_auths();
 
         // 1. Deploy all four contracts
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let gov_id = env.register_contract(None, Governance);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let gov_id = env.register(Governance, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let credit = CreditOracleClient::new(&env, &credit_id);
@@ -3520,7 +3638,7 @@ mod tests {
         };
 
         let proposer = Address::generate(&env);
-        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0);
+        let proposal_id = gov.create_proposal(&proposer, &proposed_weights, &100, &0, &test_cid(&env));
         assert_eq!(proposal_id, 1);
 
         // 6. Register voters and vote
@@ -3537,7 +3655,7 @@ mod tests {
             tx_weight: 25,
             repayment_weight: 30,
         };
-        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0);
+        let next_proposal_id = gov.create_proposal(&proposer, &next_weights, &100, &0, &test_cid(&env));
         gov.vote(&voter1, &next_proposal_id, &true, &1000);
 
         let proposal = gov.get_proposal(&proposal_id).unwrap();
@@ -3640,23 +3758,23 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let credit = CreditOracleClient::new(&env, &credit_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        let lender = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let lender = Address::generate(&env);
 
         credit.initialize(&admin);
         credit.register_feeder(&admin, &feeder);
         credit.register_lender(&admin, &lender);
 
-        let subject_a = soroban_sdk::Address::generate(&env);
-        let subject_b = soroban_sdk::Address::generate(&env);
-        let subject_c = soroban_sdk::Address::generate(&env);
+        let subject_a = Address::generate(&env);
+        let subject_b = Address::generate(&env);
+        let subject_c = Address::generate(&env);
 
         // 1. Empty batch validation: succeeds as a no-op when feeder is authorized
         let empty_batch = soroban_sdk::Vec::new(&env);
@@ -3748,7 +3866,7 @@ mod tests {
         let mut large_batch = soroban_sdk::Vec::new(&env);
         for _ in 0..(MAX_BATCH_SIZE + 1) {
             large_batch.push_back(SubjectTxStatsEntry {
-                subject: soroban_sdk::Address::generate(&env),
+                subject: Address::generate(&env),
                 stats: TxStats {
                     volume_30d: 100,
                     tx_count_30d: 1,
@@ -3765,15 +3883,15 @@ mod tests {
         let env = Env::default();
         env.mock_all_auths();
 
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let revocation_id = env.register_contract(None, RevocationRegistry);
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
 
         let identity = IdentityOracleClient::new(&env, &identity_id);
         let revocation = RevocationRegistryClient::new(&env, &revocation_id);
 
-        let admin = soroban_sdk::Address::generate(&env);
-        let issuer = soroban_sdk::Address::generate(&env);
-        let subject = soroban_sdk::Address::generate(&env);
+        let admin = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
 
         identity.initialize(&admin);
         revocation.initialize(&admin);
@@ -3815,5 +3933,76 @@ mod tests {
         let empty_hashes = soroban_sdk::Vec::new(&env);
         let empty_results = identity.batch_verify_vc(&subject, &empty_hashes);
         assert_eq!(empty_results.len(), 0);
+    }
+    /// Issue #1160: a Pending dispute expires after the review timeout, emits
+    /// `DsptExpr`, clears the pending lock, and can be re-filed.
+    #[test]
+    fn test_dispute_expires_after_timeout_and_allows_refile_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register(CreditOracle, ());
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        credit.initialize(&admin);
+
+        assert_eq!(
+            credit.get_dispute_timeout_ledgers(),
+            credit_oracle::DEFAULT_DISPUTE_TIMEOUT_LEDGERS
+        );
+
+        let input_key = Symbol::new(&env, "tx_stats");
+        let reason = String::from_str(&env, "Volume is inflated");
+        let created = env.ledger().sequence();
+        credit.flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(
+            dispute_events(&env, &credit_id),
+            vec![(
+                symbol_short!("DsptFild"),
+                subject.clone(),
+                input_key.clone()
+            )]
+        );
+
+        // One ledger before the timeout the dispute cannot be expired.
+        env.ledger()
+            .set_sequence_number(created + credit_oracle::DEFAULT_DISPUTE_TIMEOUT_LEDGERS - 1);
+        assert_eq!(
+            credit.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotExpired))
+        );
+        assert_eq!(
+            credit.get_dispute(&subject, &input_key).unwrap().status,
+            DisputeStatus::Pending
+        );
+
+        // At the timeout, anyone can expire it; exactly one DsptExpr is emitted
+        // for the right subject and input key.
+        env.ledger()
+            .set_sequence_number(created + credit_oracle::DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        credit.expire_dispute(&subject, &input_key);
+
+        assert_eq!(
+            dispute_events(&env, &credit_id),
+            vec![(
+                symbol_short!("DsptExpr"),
+                subject.clone(),
+                input_key.clone()
+            )],
+            "expiration must emit exactly one DsptExpr for the dispute"
+        );
+
+        let expired = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(expired.status, DisputeStatus::Expired);
+        assert_eq!(expired.created_at_ledger, created);
+
+        // The pending lock is cleared: re-filing succeeds and starts fresh.
+        let reason2 = String::from_str(&env, "Still wrong after timeout");
+        credit.flag_score_input(&subject, &input_key, &reason2);
+        let refiled = credit.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(refiled.status, DisputeStatus::Pending);
+        assert_eq!(refiled.created_at_ledger, env.ledger().sequence());
     }
 }

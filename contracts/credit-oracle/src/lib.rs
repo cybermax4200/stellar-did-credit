@@ -4,8 +4,8 @@ pub use credit_oracle_types::{
     PendingWeightsRecord, ScoringWeights,
 };
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, BytesN, Env, IntoVal, String,
-    Symbol, TryFromVal, Val, Vec,
+    contract, contractimpl, contracttype, symbol_short, token, Address, BytesN, Env, IntoVal,
+    String, Symbol, TryFromVal, Val, Vec,
 };
 
 pub const MIN_SCORE: u32 = 300;
@@ -84,7 +84,7 @@ pub enum DataKey {
     ProtocolMetrics,
     /// Append-only index of every address ever registered as a trusted
     /// feeder. Entries are never removed on deregistration (that would
-    /// require an O(n) rewrite on every `deregister_feeder` call) — a
+    /// require an O(n) rewrite on every `deregister_feeder` call) â€” a
     /// deregistered feeder's entry is left in place and its `TrustedFeeder`
     /// flag is set to `false` instead. Use `list_feeders` (which filters
     /// this index against `TrustedFeeder`) to get the currently-active set.
@@ -101,6 +101,14 @@ pub enum DataKey {
     /// Number of ledgers a dispute may remain `Pending` before anyone can
     /// expire it. Absent means [`DEFAULT_DISPUTE_TIMEOUT_LEDGERS`].
     DisputeTimeoutLedgers,
+    /// Escrowed bond paid for a specific pending dispute
+    DisputeBond(Address, Symbol),
+    /// Bond amount (in `DisputeBondToken`) required to file a dispute.
+    /// Zero (the default) disables bonds.
+    DisputeBondAmount,
+    /// SEP-41 token contract used to collect and refund dispute bonds
+    /// (typically the native XLM Stellar Asset Contract).
+    DisputeBondToken,
     /// Whether the contract is currently paused for writes.
     Paused,
     /// Issue #530: whether VC recency decay is applied inside `compute_score`.
@@ -110,6 +118,8 @@ pub enum DataKey {
     DecayBpsPerDay,
     /// Issue #530: lower bound (bps) the recency multiplier may decay to.
     MinRecencyBps,
+    /// Issue #1167: minimum score for subjects with repayment history during decay.
+    DecayFloorScore,
     /// Issue #933: governance contract that currently holds the admin role.
     /// Written by `accept_admin` when the accepting address is a contract and
     /// removed when an account address accepts. Read via `get_governance`.
@@ -129,10 +139,13 @@ pub const DEFAULT_DECAY_BPS_PER_DAY: u32 = 5;
 /// Default recency floor from docs/vc-weighting-design.md: 5_000 bps (50%).
 pub const DEFAULT_MIN_RECENCY_BPS: u32 = 5_000;
 
+/// Default score floor preserves the existing minimum score of 300.
+pub const DEFAULT_DECAY_FLOOR_SCORE: u32 = MIN_SCORE;
+
 /// Recency decay configuration for the VC component of the score (issue #530).
 ///
 /// Returned by `get_recency_decay` and written by `set_recency_decay`. When
-/// `enabled` is `false` the other two fields are ignored and `compute_score`
+/// `enabled` is `false` the recency fields are ignored and `compute_score`
 /// behaves exactly as it did before recency decay existed.
 #[contracttype]
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -143,6 +156,8 @@ pub struct RecencyDecayConfig {
     pub decay_bps_per_day: u32,
     /// Floor (bps) below which the multiplier never falls, e.g. 5_000 = 50%.
     pub min_recency_bps: u32,
+    /// Minimum score to preserve for subjects with repayment history.
+    pub decay_floor_score: u32,
 }
 
 /// Recency multiplier in basis points for a credential anchored at `anchored_at`.
@@ -194,8 +209,8 @@ pub fn apply_recency_bps(points: u32, recency_bps: u32) -> u32 {
 /// Score is always clamped to [MIN_SCORE, MAX_SCORE] range.
 ///
 /// Every intermediate step uses saturating arithmetic (or `checked_div` where
-/// the divisor may be zero) so that malformed feeder inputs — `u32::MAX`
-/// counterparty counts, `i128::MAX` volumes, skewed weights — can never panic
+/// the divisor may be zero) so that malformed feeder inputs â€” `u32::MAX`
+/// counterparty counts, `i128::MAX` volumes, skewed weights â€” can never panic
 /// under the workspace's `overflow-checks = true` release profile. The inputs
 /// are otherwise clamped (`vc_points`/`volume_score`/`counterparty_bonus`) so
 /// the composite stays far inside the `u128` range even in the worst case.
@@ -210,6 +225,7 @@ pub fn compute_score_pure(
     vc_weight: u32,
     tx_weight: u32,
     repayment_weight: u32,
+    decay_floor_score: u32,
 ) -> u32 {
     // Clamped to 100 before widening, so the later multiply cannot overflow.
     let vc_score = vc_points.min(100) as u128;
@@ -245,7 +261,11 @@ pub fn compute_score_pure(
 
     let score =
         (MIN_SCORE as u128).saturating_add(composite.saturating_mul(550).saturating_div(100));
-    score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32
+    let mut score = score.min(MAX_SCORE as u128).max(MIN_SCORE as u128) as u32;
+    if total_count > 0 {
+        score = score.max(decay_floor_score.min(MAX_SCORE));
+    }
+    score
 }
 
 /// Number of ledgers after which a score is considered stale.
@@ -429,32 +449,48 @@ pub struct DisputeRecord {
     pub input_key: Symbol,
     /// Free-text reason provided by the subject.
     pub reason: String,
-    /// Ledger sequence number when the dispute was created (filed).
+    /// Ledger sequence number when the dispute was filed.
     pub created_at_ledger: u32,
     /// Current resolution status.
     pub status: DisputeStatus,
+}
+
+/// Escrowed bond recorded for a pending dispute.
+///
+/// Stored separately from [`DisputeRecord`] so the bond can be refunded using
+/// the exact token and amount that were paid, even if the admin later changes
+/// the bond configuration.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DisputeBondRecord {
+    /// Token contract the bond was paid in.
+    pub token: Address,
+    /// Amount escrowed.
+    pub amount: i128,
+    /// Subject that paid the bond and receives the refund if accepted.
+    pub depositor: Address,
 }
 
 const TIMELOCK_LEDGERS: u32 = 17_280; // approximately 24 hours
 const DEFAULT_COMPUTE_COOLDOWN_LEDGERS: u32 = 1;
 /// Longest supported compute-score cooldown (approximately five days).
 pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
+/// Persistent-entry TTL threshold (â‰ˆ 7 days at 5 s/ledger).
+const PERS_TTL_THRESHOLD: u32 = 120_960;
+/// Persistent-entry TTL extension (â‰ˆ 30 days at 5 s/ledger).
+const PERS_TTL_EXTEND: u32 = 518_400;
+/// Instance-storage TTL bump threshold (ledgers).
+const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
+/// Instance-storage TTL bump amount (â‰ˆ 29 days at 5 s/ledger).
+const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
+/// Maximum number of entries allowed in a single batch operation.
+pub const MAX_BATCH_SIZE: u32 = 50;
 /// Default dispute review timeout (≈ 10 days at 5 s/ledger).
 ///
 /// After this many ledgers a `Pending` dispute can be expired by anyone via
 /// `expire_dispute`, so an abandoned review cannot lock the subject's input
 /// indefinitely.
 pub const DEFAULT_DISPUTE_TIMEOUT_LEDGERS: u32 = 172_800;
-/// Persistent-entry TTL threshold (≈ 7 days at 5 s/ledger).
-const PERS_TTL_THRESHOLD: u32 = 120_960;
-/// Persistent-entry TTL extension (≈ 30 days at 5 s/ledger).
-const PERS_TTL_EXTEND: u32 = 518_400;
-/// Instance-storage TTL bump threshold (ledgers).
-const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
-/// Instance-storage TTL bump amount (≈ 29 days at 5 s/ledger).
-const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
-/// Maximum number of entries allowed in a single batch operation.
-pub const MAX_BATCH_SIZE: u32 = 50;
 
 /// Return `true` once `current_ledger` has reached a dispute's expiry ledger
 /// (`created_at_ledger + timeout_ledgers`).
@@ -554,6 +590,11 @@ fn load_recency_config(env: &Env) -> RecencyDecayConfig {
             .instance()
             .get(&DataKey::MinRecencyBps)
             .unwrap_or(DEFAULT_MIN_RECENCY_BPS),
+        decay_floor_score: env
+            .storage()
+            .instance()
+            .get(&DataKey::DecayFloorScore)
+            .unwrap_or(DEFAULT_DECAY_FLOOR_SCORE),
     }
 }
 
@@ -657,7 +698,7 @@ impl CreditOracle {
             &DataKey::ComputeCooldownLedgers,
             &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
         );
-        // New deployments start at storage layout V2 — no migration needed.
+        // New deployments start at storage layout V2 â€” no migration needed.
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
@@ -710,7 +751,7 @@ impl CreditOracle {
     /// Register a trusted feeder address.
     ///
     /// `FeedersIndex` is append-only: the address is pushed only when it is
-    /// not already in the index, so a deregister → re-register cycle never
+    /// not already in the index, so a deregister â†’ re-register cycle never
     /// duplicates the entry. The flag key is then set to `true`, which both
     /// activates a fresh registration and clears a deregistration tombstone.
     ///
@@ -739,7 +780,7 @@ impl CreditOracle {
 
         // Append-only dedup: check index membership rather than flag-key
         // presence. A tombstoned (deregistered) feeder still has its flag key,
-        // and a long-dormant flag can outlive — or predecease — its index
+        // and a long-dormant flag can outlive â€” or predecease â€” its index
         // entry as the two keys' TTLs are bumped independently, so `has()` on
         // the flag is not a reliable "already indexed" test.
         let mut already_indexed = false;
@@ -804,7 +845,7 @@ impl CreditOracle {
     /// Register a trusted lender address.
     ///
     /// `LendersIndex` is append-only: the address is pushed only when it is
-    /// not already in the index, so a deregister → re-register cycle never
+    /// not already in the index, so a deregister â†’ re-register cycle never
     /// duplicates the entry. The flag key is then set to `true`, which both
     /// activates a fresh registration and clears a deregistration tombstone.
     ///
@@ -831,7 +872,7 @@ impl CreditOracle {
             .get(&index_key)
             .unwrap_or(Vec::new(&env));
 
-        // Append-only dedup — see `register_feeder` for why index membership,
+        // Append-only dedup â€” see `register_feeder` for why index membership,
         // not flag-key presence, is the reliable "already indexed" test.
         let mut already_indexed = false;
         for addr in lenders.iter() {
@@ -961,6 +1002,14 @@ impl CreditOracle {
             PERS_TTL_THRESHOLD,
             PERS_TTL_EXTEND,
         );
+        env.events().publish(
+            (Symbol::new(&env, "TxStatsUpdated"), subject, feeder),
+            (
+                stats.volume_30d,
+                stats.tx_count_30d,
+                stats.avg_counterparties,
+            ),
+        );
         Ok(())
     }
 
@@ -1027,11 +1076,15 @@ impl CreditOracle {
         apply_repayment(
             &env,
             &RepaymentEntry {
-                subject,
+                subject: subject.clone(),
                 amount,
                 on_time,
             },
             current_version,
+        );
+        env.events().publish(
+            (Symbol::new(&env, "RepaymentRecorded"), subject, lender),
+            (amount, on_time),
         );
         increment_repayments_recorded(&env, 1);
         Ok(())
@@ -1163,8 +1216,8 @@ impl CreditOracle {
     ///
     /// When `compute_score` processes a VC, its type weight (in basis points)
     /// determines how many score points that VC contributes:
-    ///   `points = 20 × weight / 100`
-    /// Default weight for unregistered types (or VCs with no type) is 100 (1×).
+    ///   `points = 20 Ã— weight / 100`
+    /// Default weight for unregistered types (or VCs with no type) is 100 (1Ã—).
     ///
     /// Auth: admin only.
     pub fn set_vc_type_weight(
@@ -1213,20 +1266,20 @@ impl CreditOracle {
     /// restores the previous behavior on the next `compute_score`.
     ///
     /// Suggested values from docs/vc-weighting-design.md: `decay_bps_per_day =
-    /// 5` (0.05%/day) and `min_recency_bps = 5_000` (50% floor).
+    /// 5` (0.05%/day), `min_recency_bps = 5_000` (50% floor), and a
+    /// `decay_floor_score` of 300 (the base score).
     ///
     /// Auth: admin only.
     ///
     /// Errors with `InvalidRecencyConfig` when `min_recency_bps` exceeds
-    /// `BPS_DENOMINATOR`, which would otherwise define a floor above full
-    /// weight. `decay_bps_per_day` needs no bound: the floor already caps how
-    /// far any rate can push the multiplier down.
+    /// `BPS_DENOMINATOR` or `decay_floor_score` exceeds `MAX_SCORE`.
     pub fn set_recency_decay(
         env: Env,
         admin: Address,
         enabled: bool,
         decay_bps_per_day: u32,
         min_recency_bps: u32,
+        decay_floor_score: u32,
     ) -> Result<(), CreditOracleError> {
         let stored_admin: Address = env
             .storage()
@@ -1237,7 +1290,7 @@ impl CreditOracle {
             return Err(CreditOracleError::NotAuthorized);
         }
         admin.require_auth();
-        if min_recency_bps > BPS_DENOMINATOR {
+        if min_recency_bps > BPS_DENOMINATOR || decay_floor_score > MAX_SCORE {
             return Err(CreditOracleError::InvalidRecencyConfig);
         }
 
@@ -1250,10 +1303,18 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::MinRecencyBps, &min_recency_bps);
+        env.storage()
+            .instance()
+            .set(&DataKey::DecayFloorScore, &decay_floor_score);
 
         env.events().publish(
             (symbol_short!("RecDecay"),),
-            (enabled, decay_bps_per_day, min_recency_bps),
+            (
+                enabled,
+                decay_bps_per_day,
+                min_recency_bps,
+                decay_floor_score,
+            ),
         );
         Ok(())
     }
@@ -1376,6 +1437,12 @@ impl CreditOracle {
         // is never computed, so the per-VC arithmetic below is identical to the
         // pre-#530 code path.
         let recency_config = load_recency_config(&env);
+        let decay_floor_score =
+            if recency_config.enabled && env.storage().instance().has(&DataKey::IdentityOracleId) {
+                recency_config.decay_floor_score
+            } else {
+                MIN_SCORE
+            };
         let recency = if recency_config.enabled {
             Some(recency_config)
         } else {
@@ -1496,6 +1563,7 @@ impl CreditOracle {
             weights.vc_weight,
             weights.tx_weight,
             weights.repayment_weight,
+            decay_floor_score,
         );
 
         // Compute the repayment rate in basis points. The counters are u32, so
@@ -1562,7 +1630,7 @@ impl CreditOracle {
         Ok(score)
     }
 
-    /// Check cooldown — reject if the last computation was within the cooldown window.
+    /// Check cooldown â€” reject if the last computation was within the cooldown window.
     fn check_compute_cooldown(env: &Env, subject: &Address) -> Result<(), CreditOracleError> {
         let cooldown: u32 = env
             .storage()
@@ -1953,7 +2021,8 @@ impl CreditOracle {
     /// lock so the subject can file again.
     ///
     /// If the admin resolves the dispute first, this returns `DisputeNotFound`
-    /// because the record is no longer pending. Emits a `DsptExpr` event.
+    /// because the record is no longer pending. Any escrowed bond is refunded to
+    /// the depositor. Emits a `DsptExpr` event.
     pub fn expire_dispute(
         env: Env,
         subject: Address,
@@ -1980,6 +2049,21 @@ impl CreditOracle {
             return Err(CreditOracleError::DisputeNotExpired);
         }
 
+        // Refund any escrowed bond on liveness expiry (no ruling/forfeit).
+        let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+        if let Some(bond) = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeBondRecord>(&bond_key)
+        {
+            token::TokenClient::new(&env, &bond.token).transfer(
+                &env.current_contract_address(),
+                &bond.depositor,
+                &bond.amount,
+            );
+            env.storage().persistent().remove(&bond_key);
+        }
+
         record.status = DisputeStatus::Expired;
         env.storage().persistent().set(&dispute_key, &record);
         env.storage()
@@ -1989,6 +2073,94 @@ impl CreditOracle {
         env.events()
             .publish((symbol_short!("DsptExpr"),), (subject, input_key));
         Ok(())
+    }
+
+    /// Set the dispute bond amount, denominated in the configured bond token.
+    ///
+    /// When non-zero, `flag_score_input` escrows this amount from the subject
+    /// before recording the dispute. Accepted disputes refund the bond;
+    /// rejected disputes forfeit it to the contract. Set to `0` to disable
+    /// bonds entirely (the default).
+    ///
+    /// A positive amount requires `set_dispute_bond_token` to have configured a
+    /// token contract first.
+    ///
+    /// Auth: admin only.
+    pub fn set_dispute_bond(
+        env: Env,
+        admin: Address,
+        amount: i128,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if amount < 0 {
+            return Err(CreditOracleError::InvalidDisputeBondAmount);
+        }
+        if amount > 0 && !env.storage().instance().has(&DataKey::DisputeBondToken) {
+            return Err(CreditOracleError::DisputeBondTokenNotConfigured);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeBondAmount, &amount);
+        Ok(())
+    }
+
+    /// Return the configured dispute bond amount. `0` means bonds are disabled.
+    pub fn get_dispute_bond(env: Env) -> i128 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(0)
+    }
+
+    /// Configure the SEP-41 token contract used to collect dispute bonds.
+    ///
+    /// For XLM, pass the Stellar Asset Contract (SAC) address of the native
+    /// asset. Changing the token does not affect bonds already escrowed for
+    /// pending disputes, because each bond records the token it was paid in.
+    ///
+    /// Auth: admin only.
+    pub fn set_dispute_bond_token(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeBondToken, &token);
+        Ok(())
+    }
+
+    /// Return the configured dispute bond token, if any.
+    pub fn get_dispute_bond_token(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::DisputeBondToken)
+    }
+
+    /// Return the escrowed bond for a `(subject, input_key)` dispute, if paid.
+    pub fn get_dispute_bond_record(
+        env: Env,
+        subject: Address,
+        input_key: Symbol,
+    ) -> Option<DisputeBondRecord> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::DisputeBond(subject, input_key))
     }
 
     /// Flag a specific score input as potentially incorrect.
@@ -2032,6 +2204,22 @@ impl CreditOracle {
             }
         }
 
+        let bond_amount: i128 = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeBondAmount)
+            .unwrap_or(0);
+        let bond_token: Option<Address> = if bond_amount > 0 {
+            Some(
+                env.storage()
+                    .instance()
+                    .get(&DataKey::DisputeBondToken)
+                    .ok_or(CreditOracleError::DisputeBondTokenNotConfigured)?,
+            )
+        } else {
+            None
+        };
+
         let record = DisputeRecord {
             subject: subject.clone(),
             input_key: input_key.clone(),
@@ -2068,6 +2256,27 @@ impl CreditOracle {
                 .extend_ttl(&index_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
         }
 
+        // Escrow the bond after the dispute is recorded so a reentrant token
+        // contract cannot file the same dispute twice. A failed transfer panics
+        // and reverts the whole invocation, including the stored record.
+        if let Some(token_id) = bond_token {
+            let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+            let bond = DisputeBondRecord {
+                token: token_id.clone(),
+                amount: bond_amount,
+                depositor: subject.clone(),
+            };
+            env.storage().persistent().set(&bond_key, &bond);
+            env.storage()
+                .persistent()
+                .extend_ttl(&bond_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            token::TokenClient::new(&env, &token_id).transfer(
+                &subject,
+                &env.current_contract_address(),
+                &bond_amount,
+            );
+        }
+
         env.events()
             .publish((symbol_short!("DsptFild"),), (subject, input_key));
         Ok(())
@@ -2075,7 +2284,7 @@ impl CreditOracle {
 
     /// Resolve a pending dispute as admin.
     ///
-    /// Pass `accepted = true` to mark the dispute `Resolved` — signalling to
+    /// Pass `accepted = true` to mark the dispute `Resolved` â€” signalling to
     /// the off-chain feeder that the flagged input should be re-fetched and
     /// corrected.  Pass `accepted = false` to mark it `Rejected` (the input
     /// is deemed correct).  After resolution the subject may file a new
@@ -2116,6 +2325,25 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        // Settle any escrowed bond. Accepted disputes refund the depositor;
+        // rejected disputes forfeit the bond to the contract. The escrow record
+        // is removed either way so it can never be refunded twice.
+        let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+        if let Some(bond) = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeBondRecord>(&bond_key)
+        {
+            if accepted {
+                token::TokenClient::new(&env, &bond.token).transfer(
+                    &env.current_contract_address(),
+                    &bond.depositor,
+                    &bond.amount,
+                );
+            }
+            env.storage().persistent().remove(&bond_key);
+        }
 
         if accepted {
             // DsptRslv signals feeders to re-fetch and correct the flagged input.
@@ -2201,33 +2429,75 @@ mod tests {
     // from `credit-oracle-types` at the crate root.
     use identity_oracle::IdentityOracle;
     use soroban_sdk::testutils::{Address as _, Events as _, Ledger as _};
+    use soroban_sdk::token::{StellarAssetClient, TokenClient};
     use soroban_sdk::TryIntoVal;
 
     #[test]
     fn test_scoring_spec_example_1_new_user_scores_300() {
-        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30);
+        let score = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(score, 300);
     }
 
     #[test]
+    fn test_compute_score_pure_applies_decay_floor_only_with_repayment_history() {
+        let score_with_history = compute_score_pure(0, 0, 0, 0, 1, 0, 40, 30, 30, 600);
+        assert_eq!(score_with_history, 600);
+
+        let score_without_history = compute_score_pure(0, 0, 0, 0, 0, 0, 40, 30, 30, 600);
+        assert_eq!(score_without_history, MIN_SCORE);
+    }
+
+    #[test]
     fn test_scoring_spec_example_2_moderate_scores_569() {
-        let score = compute_score_pure(60, 3_000_000_000, 0, 8, 10, 3_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            60,
+            3_000_000_000,
+            0,
+            8,
+            10,
+            3_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 569);
     }
 
     #[test]
     fn test_scoring_spec_example_3_strong_scores_817() {
-        let score = compute_score_pure(100, 8_000_000_000, 0, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            8_000_000_000,
+            0,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 817);
     }
 
     #[test]
     fn test_scoring_spec_perfect_scores_850() {
-        let score =
-            compute_score_pure(100, 10_000_000_000, 100, 20, 20, 10_000_000_000, 40, 30, 30);
+        let score = compute_score_pure(
+            100,
+            10_000_000_000,
+            100,
+            20,
+            20,
+            10_000_000_000,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert_eq!(score, 850);
     }
@@ -2236,8 +2506,8 @@ mod tests {
     fn test_compute_score_pure_u32_max_counterparties_is_clamped_to_bonus_cap() {
         // counterparty_bonus = min(avg_counterparties / 5, 20); at 100 the cap is
         // already reached, so `u32::MAX` must yield exactly the same score.
-        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30);
-        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 0, 100, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_max = compute_score_pure(0, 0, u32::MAX, 0, 0, 0, 40, 30, 30, MIN_SCORE);
 
         assert_eq!(at_cap, at_max);
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2246,14 +2516,15 @@ mod tests {
     #[test]
     fn test_compute_score_pure_u32_max_volume_30d_is_handled_without_overflow() {
         // volume_score = min(volume_30d / 1e8, 80). `u32::MAX` raw units is 42
-        // units — below the 80-unit cap — so it must match the equivalent
+        // units â€” below the 80-unit cap â€” so it must match the equivalent
         // explicit unit count, while `i128::MAX` saturates the cap at 80.
-        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_units = compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30);
+        let at_max = compute_score_pure(0, u32::MAX as i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_units =
+            compute_score_pure(0, 42 * 100_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_max, at_units);
 
-        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30);
-        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30);
+        let at_cap = compute_score_pure(0, 8_000_000_000i128, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
+        let at_i128_max = compute_score_pure(0, i128::MAX, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(at_cap, at_i128_max);
 
         assert!((MIN_SCORE..=MAX_SCORE).contains(&at_max));
@@ -2274,6 +2545,7 @@ mod tests {
             u32::MAX,
             u32::MAX,
             u32::MAX,
+            MIN_SCORE,
         );
 
         assert!(
@@ -2287,7 +2559,18 @@ mod tests {
     fn test_compute_score_pure_negative_and_zero_inputs_do_not_panic() {
         // i128::MIN volumes and a zero repayment divisor (no repayment history)
         // are the other malformed-edge shapes the scoring path must survive.
-        let score = compute_score_pure(0, i128::MIN, 0, u32::MAX, 0, i128::MIN, 40, 30, 30);
+        let score = compute_score_pure(
+            0,
+            i128::MIN,
+            0,
+            u32::MAX,
+            0,
+            i128::MIN,
+            40,
+            30,
+            30,
+            MIN_SCORE,
+        );
 
         assert!(
             (MIN_SCORE..=MAX_SCORE).contains(&score),
@@ -2321,6 +2604,7 @@ mod tests {
                 40,
                 30,
                 30,
+                MIN_SCORE,
             )
         };
 
@@ -2343,7 +2627,7 @@ mod tests {
     fn test_default_weights_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2357,7 +2641,7 @@ mod tests {
     fn test_only_admin_can_register_feeder() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2373,7 +2657,7 @@ mod tests {
     fn test_register_lender_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2395,7 +2679,7 @@ mod tests {
     fn test_tx_stats_stored_and_retrieved() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2428,7 +2712,7 @@ mod tests {
     fn test_repayment_rate_calculated_correctly() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2459,7 +2743,7 @@ mod tests {
     fn test_compute_score_repayment_rate_does_not_overflow() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2498,7 +2782,7 @@ mod tests {
     fn test_base_score_is_300() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2513,7 +2797,7 @@ mod tests {
     fn test_compute_score_emits_score_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2534,7 +2818,7 @@ mod tests {
         // Verify the event was emitted by this contract
         assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
 
-        // Verify the topic is Symbol("Score") — decode Val back to Symbol for comparison
+        // Verify the topic is Symbol("Score") â€” decode Val back to Symbol for comparison
         assert_eq!(topics.len(), 1, "expected 1 topic element");
         let topic_val = topics.get(0).unwrap();
         let topic_sym: Symbol = topic_val
@@ -2542,7 +2826,7 @@ mod tests {
             .expect("topic should be a Symbol");
         assert_eq!(topic_sym, symbol_short!("Score"), "expected Score topic");
 
-        // Verify the data payload is (subject, score) — decode Val back to typed tuple
+        // Verify the data payload is (subject, score) â€” decode Val back to typed tuple
         let (event_subject, event_score): (Address, u32) = data
             .try_into_val(&env)
             .expect("data should be (Address, u32)");
@@ -2554,7 +2838,7 @@ mod tests {
     fn test_counterparty_bonus_adds_points() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2611,7 +2895,7 @@ mod tests {
     fn test_score_increases_with_repayments() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2632,7 +2916,7 @@ mod tests {
     fn test_repayment_amount_affects_score() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2660,7 +2944,7 @@ mod tests {
     fn test_score_bounded_300_850() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2697,12 +2981,12 @@ mod tests {
     fn test_weights_must_sum_to_100() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
-        // Invalid weights (sum != 100) — should return error via try_
+        // Invalid weights (sum != 100) â€” should return error via try_
         let result = client.try_propose_weights(&ScoringWeights {
             vc_weight: 40,
             tx_weight: 40,
@@ -2710,7 +2994,7 @@ mod tests {
         });
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidWeights)));
 
-        // Component below MIN_COMPONENT_WEIGHT (10) — should return error
+        // Component below MIN_COMPONENT_WEIGHT (10) â€” should return error
         let res_vc_low = client.try_propose_weights(&ScoringWeights {
             vc_weight: 9,
             tx_weight: 45,
@@ -2735,7 +3019,7 @@ mod tests {
             Err(Ok(CreditOracleError::InvalidWeights))
         );
 
-        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) — should succeed
+        // Valid weights with exact MIN_COMPONENT_WEIGHT (10) â€” should succeed
         let res_valid_min = client.try_propose_weights(&ScoringWeights {
             vc_weight: 50,
             tx_weight: 10,
@@ -2748,7 +3032,7 @@ mod tests {
     fn test_propose_weights_unchanged_until_applied() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2771,7 +3055,7 @@ mod tests {
     fn test_get_pending_weights_returns_correct_record() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2800,7 +3084,7 @@ mod tests {
     fn test_apply_weights_before_timelock_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2818,7 +3102,7 @@ mod tests {
     fn test_apply_weights_with_no_pending_weights_fails() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2831,7 +3115,7 @@ mod tests {
     fn test_apply_weights_after_timelock_succeeds() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2861,7 +3145,7 @@ mod tests {
     fn test_deregistered_feeder_cannot_update_tx_stats() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2896,7 +3180,7 @@ mod tests {
     fn test_batch_update_tx_stats_success_multiple_subjects() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2951,7 +3235,7 @@ mod tests {
     fn test_batch_update_tx_stats_empty_batch_validation() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -2977,7 +3261,7 @@ mod tests {
     fn test_batch_update_tx_stats_partial_duplicates() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3044,7 +3328,7 @@ mod tests {
     fn test_batch_update_tx_stats_exceeds_max_batch_size() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3073,7 +3357,7 @@ mod tests {
     fn test_batch_update_tx_stats_feeder_not_registered() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3098,7 +3382,7 @@ mod tests {
     #[test]
     fn test_batch_update_tx_stats_requires_auth_before_size_check() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let feeder = Address::generate(&env);
@@ -3124,7 +3408,7 @@ mod tests {
     fn test_compute_score_not_initialized() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3144,7 +3428,7 @@ mod tests {
     fn test_deregistered_lender_cannot_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3163,7 +3447,7 @@ mod tests {
     fn test_record_repayment_invalid_amount() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3181,10 +3465,140 @@ mod tests {
     }
 
     #[test]
-    fn test_list_feeders_returns_only_currently_registered() {
+    fn test_record_repayment_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let lender = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_lender(&admin, &lender);
+
+        // Clear setup events so only the repayment event is inspected.
+        env.events().all();
+
+        client.record_repayment(&lender, &subject, &1_000, &true);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+        assert_eq!(
+            topics.len(),
+            3,
+            "expected event name, subject, and lender topics"
+        );
+
+        let topic_sym: Symbol = topics
+            .get(0)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(
+            topic_sym,
+            Symbol::new(&env, "RepaymentRecorded"),
+            "expected RepaymentRecorded topic"
+        );
+
+        let event_subject: Address = topics
+            .get(1)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("subject topic should be an Address");
+        assert_eq!(event_subject, subject, "event subject mismatch");
+
+        let event_lender: Address = topics
+            .get(2)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("lender topic should be an Address");
+        assert_eq!(event_lender, lender, "event lender mismatch");
+
+        let (event_amount, event_on_time): (i128, bool) = data
+            .try_into_val(&env)
+            .expect("data should be (i128, bool)");
+        assert_eq!(event_amount, 1_000, "event amount mismatch");
+        assert!(event_on_time, "event on_time mismatch");
+    }
+
+    #[test]
+    fn test_update_tx_stats_emits_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let feeder = Address::generate(&env);
+        let subject = Address::generate(&env);
+
+        client.initialize(&admin);
+        client.register_feeder(&admin, &feeder);
+
+        // Clear setup events so only the stats event is inspected.
+        env.events().all();
+
+        let stats = TxStats {
+            volume_30d: 5_000_000,
+            tx_count_30d: 42,
+            avg_counterparties: 7,
+        };
+        client.update_tx_stats(&feeder, &subject, &stats);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = events.get(0).unwrap();
+        assert_eq!(event_contract_id, contract_id, "event contract id mismatch");
+        assert_eq!(
+            topics.len(),
+            3,
+            "expected event name, subject, and feeder topics"
+        );
+
+        let topic_sym: Symbol = topics
+            .get(0)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("topic should be a Symbol");
+        assert_eq!(
+            topic_sym,
+            Symbol::new(&env, "TxStatsUpdated"),
+            "expected TxStatsUpdated topic"
+        );
+
+        let event_subject: Address = topics
+            .get(1)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("subject topic should be an Address");
+        assert_eq!(event_subject, subject, "event subject mismatch");
+
+        let event_feeder: Address = topics
+            .get(2)
+            .unwrap()
+            .try_into_val(&env)
+            .expect("feeder topic should be an Address");
+        assert_eq!(event_feeder, feeder, "event feeder mismatch");
+
+        let (event_volume, event_tx_count, event_avg): (i128, u32, u32) = data
+            .try_into_val(&env)
+            .expect("data should be (i128, u32, u32)");
+        assert_eq!(event_volume, 5_000_000, "event volume_30d mismatch");
+        assert_eq!(event_tx_count, 42, "event tx_count_30d mismatch");
+        assert_eq!(event_avg, 7, "event avg_counterparties mismatch");
+    }
+
+    #[test]
+    fn test_list_feeders_returns_only_currently_registered() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3202,13 +3616,13 @@ mod tests {
 
         client.deregister_feeder(&admin, &feeder1);
 
-        // Only the still-registered feeder is listed …
+        // Only the still-registered feeder is listed â€¦
         assert_eq!(
             client.list_feeders(),
             Vec::from_array(&env, [feeder2.clone()])
         );
 
-        // … while FeedersIndex stays append-only (no removal on deregister).
+        // â€¦ while FeedersIndex stays append-only (no removal on deregister).
         let index_len: u32 = env.as_contract(&contract_id, || {
             let index: Vec<Address> = env
                 .storage()
@@ -3224,7 +3638,7 @@ mod tests {
     fn test_list_lenders_returns_only_currently_registered() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3242,13 +3656,13 @@ mod tests {
 
         client.deregister_lender(&admin, &lender1);
 
-        // Only the still-registered lender is listed …
+        // Only the still-registered lender is listed â€¦
         assert_eq!(
             client.list_lenders(),
             Vec::from_array(&env, [lender2.clone()])
         );
 
-        // … while LendersIndex stays append-only (no removal on deregister).
+        // â€¦ while LendersIndex stays append-only (no removal on deregister).
         let index_len: u32 = env.as_contract(&contract_id, || {
             let index: Vec<Address> = env
                 .storage()
@@ -3264,7 +3678,7 @@ mod tests {
     fn test_list_feeders_empty_index_returns_empty_vec() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3278,7 +3692,7 @@ mod tests {
     fn test_list_lenders_empty_index_returns_empty_vec() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3292,7 +3706,7 @@ mod tests {
     fn test_reregistering_deregistered_feeder_does_not_duplicate_index() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3304,7 +3718,7 @@ mod tests {
         client.register_feeder(&admin, &feeder);
 
         // list_feeders must show the feeder exactly once even though it went
-        // through a register → deregister → register cycle, and the append-only
+        // through a register â†’ deregister â†’ register cycle, and the append-only
         // FeedersIndex must hold it exactly once.
         assert_eq!(
             client.list_feeders(),
@@ -3325,7 +3739,7 @@ mod tests {
     fn test_deregister_feeder_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3371,7 +3785,7 @@ mod tests {
     fn test_deregister_lender_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3417,7 +3831,7 @@ mod tests {
     fn test_upgrade_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3433,7 +3847,7 @@ mod tests {
     fn test_counterparty_bonus_zero_when_tx_weight_is_zero() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3449,8 +3863,8 @@ mod tests {
         assert_eq!(res_zero, Err(Ok(CreditOracleError::InvalidWeights)));
 
         // Pure calculation check: when tx_weight = 0, counterparty bonus has no effect
-        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40);
-        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40);
+        let score_with = compute_score_pure(0, 0, 100, 0, 0, 0, 60, 0, 40, MIN_SCORE);
+        let score_without = compute_score_pure(0, 0, 0, 0, 0, 0, 60, 0, 40, MIN_SCORE);
         assert_eq!(
             score_with, score_without,
             "counterparty bonus should have no effect when tx_weight is 0"
@@ -3463,7 +3877,7 @@ mod tests {
     fn test_counterparty_bonus_applied_when_tx_weight_is_high() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3522,7 +3936,7 @@ mod tests {
     fn test_get_identity_oracle_returns_none_when_not_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3536,10 +3950,10 @@ mod tests {
     fn test_set_and_get_identity_oracle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
 
         let admin = Address::generate(&env);
 
@@ -3558,10 +3972,10 @@ mod tests {
     fn test_set_identity_oracle_emits_descriptive_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
@@ -3600,7 +4014,7 @@ mod tests {
     fn test_admin_transfer_two_step() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -3626,7 +4040,7 @@ mod tests {
     fn test_non_pending_admin_cannot_accept() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin1 = Address::generate(&env);
@@ -3643,7 +4057,7 @@ mod tests {
     fn test_get_governance_returns_none_when_not_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // Before initialize and after it, no governance contract is recorded.
@@ -3656,7 +4070,7 @@ mod tests {
     fn test_get_governance_set_when_contract_accepts_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // Any registered contract stands in for the governance contract: only
@@ -3680,7 +4094,7 @@ mod tests {
     fn test_get_governance_not_set_when_account_accepts_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         // `Address::generate` yields contract-form (C...) addresses in the test
@@ -3704,7 +4118,7 @@ mod tests {
     fn test_get_governance_cleared_when_admin_returns_to_account() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let governance = env.register(CreditOracle, ());
@@ -3730,7 +4144,7 @@ mod tests {
     fn test_compute_score_skips_write_when_inputs_unchanged() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3746,7 +4160,7 @@ mod tests {
             .set_sequence_number(env.ledger().sequence() + 1);
         env.ledger().set_timestamp(env.ledger().timestamp() + 100);
 
-        // Second computation with identical inputs — write is skipped
+        // Second computation with identical inputs â€” write is skipped
         client.compute_score(&subject);
         let record2 = client.get_score(&subject).unwrap();
 
@@ -3777,7 +4191,7 @@ mod tests {
     fn test_score_history_rolls_over_and_preserves_order() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
@@ -3822,7 +4236,7 @@ mod tests {
     #[test]
     fn test_protocol_stats_default_zero() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let stats = client.get_protocol_stats();
@@ -3834,7 +4248,7 @@ mod tests {
     fn test_protocol_stats_increments_on_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3856,7 +4270,7 @@ mod tests {
     fn test_protocol_stats_increments_subjects_scored() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3878,7 +4292,7 @@ mod tests {
     fn test_protocol_stats_no_double_count_recompute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3886,7 +4300,7 @@ mod tests {
 
         let subject = Address::generate(&env);
 
-        // First computation — subjects_scored should increment
+        // First computation â€” subjects_scored should increment
         client.compute_score(&subject);
         let stats1 = client.get_protocol_stats();
         assert_eq!(stats1.total_subjects_scored, 1);
@@ -3895,7 +4309,7 @@ mod tests {
         env.ledger()
             .set_sequence_number(env.ledger().sequence() + 1);
 
-        // Second computation with identical inputs — should NOT double count
+        // Second computation with identical inputs â€” should NOT double count
         client.compute_score(&subject);
         let stats2 = client.get_protocol_stats();
         assert_eq!(stats2.total_subjects_scored, 1);
@@ -3904,7 +4318,7 @@ mod tests {
     #[test]
     fn test_protocol_metrics_default_zero() {
         let env = Env::default();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let metrics = client.get_protocol_metrics();
@@ -3917,7 +4331,7 @@ mod tests {
     fn test_protocol_metrics_increments_on_record_repayment() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -3941,7 +4355,7 @@ mod tests {
     fn test_protocol_metrics_accumulates_volume_and_borrowers_idempotently() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4025,13 +4439,13 @@ mod tests {
         assert_eq!(m2_final.total_repayments_count, 2);
     }
 
-    // ── Dispute mechanism tests ───────────────────────────────────────────
+    // â”€â”€ Dispute mechanism tests â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
     #[test]
     fn test_flag_score_input_stores_pending_dispute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4050,149 +4464,10 @@ mod tests {
     }
 
     #[test]
-    fn flag_score_input_invalid_key() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let bad_key = soroban_sdk::Symbol::new(&env, "invalid");
-        let reason = soroban_sdk::String::from_str(&env, "test");
-        let result = client.try_flag_score_input(&subject, &bad_key, &reason);
-        assert_eq!(result, Err(Ok(CreditOracleError::InvalidInputKey)));
-    }
-
-    #[test]
-    fn test_flag_score_input_rejects_duplicate_pending() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
-        let reason = soroban_sdk::String::from_str(&env, "Repayment not recorded");
-        client.flag_score_input(&subject, &input_key, &reason);
-
-        // Second filing with pending status should fail
-        let result = client.try_flag_score_input(&subject, &input_key, &reason);
-        assert_eq!(result, Err(Ok(CreditOracleError::DisputeAlreadyPending)));
-    }
-
-    #[test]
-    fn test_resolve_dispute_accepted() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
-        let reason = soroban_sdk::String::from_str(&env, "VC count is wrong");
-        client.flag_score_input(&subject, &input_key, &reason);
-
-        client.resolve_dispute(&subject, &input_key, &true);
-
-        let record = client.get_dispute(&subject, &input_key).unwrap();
-        assert_eq!(record.status, DisputeStatus::Resolved);
-    }
-
-    #[test]
-    fn test_resolve_dispute_rejected() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
-        let reason = soroban_sdk::String::from_str(&env, "Tx volume wrong");
-        client.flag_score_input(&subject, &input_key, &reason);
-
-        client.resolve_dispute(&subject, &input_key, &false);
-
-        let record = client.get_dispute(&subject, &input_key).unwrap();
-        assert_eq!(record.status, DisputeStatus::Rejected);
-    }
-
-    #[test]
-    fn test_resolve_nonexistent_dispute_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
-        let result = client.try_resolve_dispute(&subject, &input_key, &true);
-        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
-    }
-
-    #[test]
-    fn test_resolve_already_resolved_dispute_fails() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
-        let reason = soroban_sdk::String::from_str(&env, "test");
-        client.flag_score_input(&subject, &input_key, &reason);
-        client.resolve_dispute(&subject, &input_key, &true);
-
-        // Resolving again should fail
-        let result = client.try_resolve_dispute(&subject, &input_key, &true);
-        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
-    }
-
-    #[test]
-    fn test_new_dispute_allowed_after_resolution() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
-        let client = CreditOracleClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let subject = Address::generate(&env);
-        client.initialize(&admin);
-
-        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
-        let reason = soroban_sdk::String::from_str(&env, "First dispute");
-        client.flag_score_input(&subject, &input_key, &reason);
-        client.resolve_dispute(&subject, &input_key, &false); // rejected
-
-        // After rejection, subject can re-file for the same key
-        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after review");
-        client.flag_score_input(&subject, &input_key, &reason2);
-        let record = client.get_dispute(&subject, &input_key).unwrap();
-        assert_eq!(record.status, DisputeStatus::Pending);
-    }
-
-    #[test]
     fn test_expire_dispute_rejected_before_timeout() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4204,8 +4479,8 @@ mod tests {
             DEFAULT_DISPUTE_TIMEOUT_LEDGERS
         );
 
-        let input_key = Symbol::new(&env, "tx_stats");
-        let reason = String::from_str(&env, "Volume is wrong");
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
         let created = env.ledger().sequence();
         client.flag_score_input(&subject, &input_key, &reason);
 
@@ -4225,15 +4500,15 @@ mod tests {
     fn test_expire_dispute_after_timeout_emits_event_and_allows_refile() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        let input_key = Symbol::new(&env, "tx_stats");
-        let reason = String::from_str(&env, "Volume is wrong");
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
         let created = env.ledger().sequence();
         client.flag_score_input(&subject, &input_key, &reason);
 
@@ -4241,17 +4516,16 @@ mod tests {
             .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
         client.expire_dispute(&subject, &input_key);
 
-        // Read events immediately: the test host buffers events per invocation.
         let events = env.events().all();
         let mut expired_events = 0u32;
         let mut payload_matches = false;
         for i in 0..events.len() {
             let (id, topics, data) = events.get(i).unwrap();
             if id == contract_id && topics.len() == 1 {
-                let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                let topic: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
                 if topic == symbol_short!("DsptExpr") {
                     expired_events += 1;
-                    let payload: (Address, Symbol) = data.try_into_val(&env).unwrap();
+                    let payload: (Address, soroban_sdk::Symbol) = data.try_into_val(&env).unwrap();
                     payload_matches = payload.0 == subject && payload.1 == input_key;
                 }
             }
@@ -4260,12 +4534,10 @@ mod tests {
         let record = client.get_dispute(&subject, &input_key).unwrap();
         assert_eq!(record.status, DisputeStatus::Expired);
         assert_eq!(record.created_at_ledger, created);
-
         assert_eq!(expired_events, 1, "expected exactly one DsptExpr event");
         assert!(payload_matches, "DsptExpr payload must name the dispute");
 
-        // Expiration clears the pending lock, so the subject can re-file.
-        let reason2 = String::from_str(&env, "Still wrong after timeout");
+        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after timeout");
         client.flag_score_input(&subject, &input_key, &reason2);
         let refiled = client.get_dispute(&subject, &input_key).unwrap();
         assert_eq!(refiled.status, DisputeStatus::Pending);
@@ -4276,7 +4548,7 @@ mod tests {
     fn test_custom_dispute_timeout_is_honored() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4284,8 +4556,8 @@ mod tests {
         client.initialize(&admin);
         client.set_dispute_timeout_ledgers(&admin, &5);
 
-        let input_key = Symbol::new(&env, "vc_count");
-        let reason = String::from_str(&env, "VC count is wrong");
+        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
+        let reason = soroban_sdk::String::from_str(&env, "VC count is wrong");
         let created = env.ledger().sequence();
         client.flag_score_input(&subject, &input_key, &reason);
 
@@ -4307,23 +4579,20 @@ mod tests {
     fn test_expire_dispute_requires_pending_record() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        let input_key = Symbol::new(&env, "repayment");
-
-        // No record at all.
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
         assert_eq!(
             client.try_expire_dispute(&subject, &input_key),
             Err(Ok(CreditOracleError::DisputeNotFound))
         );
 
-        // Already resolved records cannot be expired.
-        let reason = String::from_str(&env, "Repayment missing");
+        let reason = soroban_sdk::String::from_str(&env, "Repayment missing");
         client.flag_score_input(&subject, &input_key, &reason);
         client.resolve_dispute(&subject, &input_key, &true);
         env.ledger()
@@ -4338,15 +4607,15 @@ mod tests {
     fn test_expired_dispute_cannot_be_resolved() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let subject = Address::generate(&env);
         client.initialize(&admin);
 
-        let input_key = Symbol::new(&env, "tx_stats");
-        let reason = String::from_str(&env, "Volume is wrong");
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
         let created = env.ledger().sequence();
         client.flag_score_input(&subject, &input_key, &reason);
 
@@ -4364,7 +4633,7 @@ mod tests {
     fn test_set_dispute_timeout_validates_admin_and_value() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4385,10 +4654,337 @@ mod tests {
     }
 
     #[test]
-    fn test_list_disputes_returns_all_filed() {
+    fn test_dispute_bond_admin_setter_validates() {
         let env = Env::default();
         env.mock_all_auths();
         let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Bonds are disabled by default.
+        assert_eq!(client.get_dispute_bond(), 0);
+        assert!(client.get_dispute_bond_token().is_none());
+
+        assert_eq!(
+            client.try_set_dispute_bond(&non_admin, &1),
+            Err(Ok(CreditOracleError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_set_dispute_bond(&admin, &-1),
+            Err(Ok(CreditOracleError::InvalidDisputeBondAmount))
+        );
+        // Enabling a positive bond before configuring a token is rejected.
+        assert_eq!(
+            client.try_set_dispute_bond(&admin, &100),
+            Err(Ok(CreditOracleError::DisputeBondTokenNotConfigured))
+        );
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        assert_eq!(
+            client.try_set_dispute_bond_token(&non_admin, &token_id),
+            Err(Ok(CreditOracleError::NotAuthorized))
+        );
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        assert_eq!(client.get_dispute_bond(), 100);
+        assert_eq!(client.get_dispute_bond_token(), Some(token_id));
+    }
+
+    #[test]
+    fn test_flag_score_input_escrows_bond_and_refunds_on_accept() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "tx_stats");
+        let reason = String::from_str(&env, "wrong volume");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Bond moved from the subject to the contract.
+        assert_eq!(token.balance(&subject), 900);
+        assert_eq!(token.balance(&contract_id), 100);
+        let bond = client
+            .get_dispute_bond_record(&subject, &input_key)
+            .expect("bond should be escrowed");
+        assert_eq!(bond.token, token_id);
+        assert_eq!(bond.amount, 100);
+        assert_eq!(bond.depositor, subject);
+
+        // Accepted dispute refunds the bond and clears the escrow record.
+        client.resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_rejected_dispute_forfeits_bond() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &500);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "repayment");
+        let reason = String::from_str(&env, "counts look wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(token.balance(&subject), 400);
+
+        // Rejected dispute forfeits the bond: the tokens stay in the contract.
+        client.resolve_dispute(&subject, &input_key, &false);
+        assert_eq!(token.balance(&subject), 400);
+        assert_eq!(token.balance(&contract_id), 100);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_dispute_bond_zero_disables_escrow() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &0);
+
+        let input_key = Symbol::new(&env, "vc_count");
+        let reason = String::from_str(&env, "count mismatch");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
+        assert!(client
+            .get_dispute_bond_record(&subject, &input_key)
+            .is_none());
+    }
+
+    #[test]
+    fn test_pending_bond_refund_uses_original_amount_after_config_change() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let token_admin = Address::generate(&env);
+        let token_id = env
+            .register_stellar_asset_contract_v2(token_admin)
+            .address();
+        StellarAssetClient::new(&env, &token_id).mint(&subject, &1_000);
+        let token = TokenClient::new(&env, &token_id);
+
+        client.set_dispute_bond_token(&admin, &token_id);
+        client.set_dispute_bond(&admin, &100);
+
+        let input_key = Symbol::new(&env, "tx_stats");
+        let reason = String::from_str(&env, "stale volume");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Raising the bond after filing must not change the pending refund.
+        client.set_dispute_bond(&admin, &250);
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        assert_eq!(token.balance(&subject), 1_000);
+        assert_eq!(token.balance(&contract_id), 0);
+    }
+
+    #[test]
+    fn flag_score_input_invalid_key() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let bad_key = soroban_sdk::Symbol::new(&env, "invalid");
+        let reason = soroban_sdk::String::from_str(&env, "test");
+        let result = client.try_flag_score_input(&subject, &bad_key, &reason);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidInputKey)));
+    }
+
+    #[test]
+    fn test_flag_score_input_rejects_duplicate_pending() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let reason = soroban_sdk::String::from_str(&env, "Repayment not recorded");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        // Second filing with pending status should fail
+        let result = client.try_flag_score_input(&subject, &input_key, &reason);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeAlreadyPending)));
+    }
+
+    #[test]
+    fn test_resolve_dispute_accepted() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
+        let reason = soroban_sdk::String::from_str(&env, "VC count is wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Resolved);
+    }
+
+    #[test]
+    fn test_resolve_dispute_rejected() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Tx volume wrong");
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        client.resolve_dispute(&subject, &input_key, &false);
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Rejected);
+    }
+
+    #[test]
+    fn test_resolve_nonexistent_dispute_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let result = client.try_resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
+    }
+
+    #[test]
+    fn test_resolve_already_resolved_dispute_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        let reason = soroban_sdk::String::from_str(&env, "test");
+        client.flag_score_input(&subject, &input_key, &reason);
+        client.resolve_dispute(&subject, &input_key, &true);
+
+        // Resolving again should fail
+        let result = client.try_resolve_dispute(&subject, &input_key, &true);
+        assert_eq!(result, Err(Ok(CreditOracleError::DisputeNotFound)));
+    }
+
+    #[test]
+    fn test_new_dispute_allowed_after_resolution() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "First dispute");
+        client.flag_score_input(&subject, &input_key, &reason);
+        client.resolve_dispute(&subject, &input_key, &false); // rejected
+
+        // After rejection, subject can re-file for the same key
+        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after review");
+        client.flag_score_input(&subject, &input_key, &reason2);
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Pending);
+    }
+
+    #[test]
+    fn test_list_disputes_returns_all_filed() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4407,7 +5003,7 @@ mod tests {
     fn test_list_disputes_empty_for_new_subject() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4422,7 +5018,7 @@ mod tests {
     fn test_get_dispute_returns_none_when_no_dispute() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4437,7 +5033,7 @@ mod tests {
     fn test_flag_score_input_emits_event() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4466,7 +5062,7 @@ mod tests {
     fn test_vc_type_weight_scoring() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4502,7 +5098,7 @@ mod tests {
         client.anchor_vc(&feeder, &user, &vc4, &Some(unreg));
 
         let score = client.compute_score(&user);
-        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30);
+        let expected = compute_score_pure(90, 0, 0, 0, 0, 0, 40, 30, 30, MIN_SCORE);
         assert_eq!(score, expected);
 
         let record = client.get_score(&user).unwrap();
@@ -4513,10 +5109,10 @@ mod tests {
     fn test_set_vc_count_emits_deprecation_event_when_oracle_configured() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
-        let identity_oracle_id = env.register_contract(None, identity_oracle::IdentityOracle);
+        let identity_oracle_id = env.register(identity_oracle::IdentityOracle, ());
 
         let admin = Address::generate(&env);
         let feeder = Address::generate(&env);
@@ -4561,7 +5157,7 @@ mod tests {
     fn test_set_vc_count_does_not_emit_deprecation_event_without_oracle() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4650,7 +5246,7 @@ mod tests {
     fn test_get_recency_decay_defaults_to_disabled() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4660,13 +5256,14 @@ mod tests {
         assert!(!cfg.enabled, "decay must be opt-in");
         assert_eq!(cfg.decay_bps_per_day, DEFAULT_DECAY_BPS_PER_DAY);
         assert_eq!(cfg.min_recency_bps, DEFAULT_MIN_RECENCY_BPS);
+        assert_eq!(cfg.decay_floor_score, DEFAULT_DECAY_FLOOR_SCORE);
     }
 
     #[test]
     fn test_compute_cooldown_getter_and_setter() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -4679,7 +5276,7 @@ mod tests {
     fn test_compute_cooldown_setter_rejects_invalid_values() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         client.initialize(&admin);
@@ -4697,32 +5294,33 @@ mod tests {
     fn test_set_recency_decay_stores_config() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        client.set_recency_decay(&admin, &true, &10, &2_500);
+        client.set_recency_decay(&admin, &true, &10, &2_500, &600);
 
         let cfg = client.get_recency_decay();
         assert!(cfg.enabled);
         assert_eq!(cfg.decay_bps_per_day, 10);
         assert_eq!(cfg.min_recency_bps, 2_500);
+        assert_eq!(cfg.decay_floor_score, 600);
     }
 
     #[test]
     fn test_set_recency_decay_rejects_non_admin() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         let non_admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000);
+        let result = client.try_set_recency_decay(&non_admin, &true, &5, &5_000, &600);
         assert_eq!(result, Err(Ok(CreditOracleError::NotAuthorized)));
     }
 
@@ -4730,13 +5328,16 @@ mod tests {
     fn test_set_recency_decay_rejects_floor_above_full_weight() {
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
         client.initialize(&admin);
 
-        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001);
+        let result = client.try_set_recency_decay(&admin, &true, &5, &10_001, &600);
+        assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
+
+        let result = client.try_set_recency_decay(&admin, &true, &5, &5_000, &(MAX_SCORE + 1));
         assert_eq!(result, Err(Ok(CreditOracleError::InvalidRecencyConfig)));
 
         // The rejected call must not have mutated stored config.
@@ -4749,7 +5350,7 @@ mod tests {
         // leave the score untouched (backward compatibility).
         let env = Env::default();
         env.mock_all_auths();
-        let contract_id = env.register_contract(None, CreditOracle);
+        let contract_id = env.register(CreditOracle, ());
         let client = CreditOracleClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
@@ -4765,7 +5366,7 @@ mod tests {
 
         let before = client.compute_score(&user);
 
-        client.set_recency_decay(&admin, &true, &5, &5_000);
+        client.set_recency_decay(&admin, &true, &5, &5_000, &DEFAULT_DECAY_FLOOR_SCORE);
         // Age the ledger by 5 years and recompute.
         env.ledger().set_timestamp(1_700_000_000 + 1_825 * 86_400);
         env.ledger()
@@ -4821,6 +5422,7 @@ mod tests {
                     40,
                     30,
                     30,
+                    MIN_SCORE,
                 )
             };
 
