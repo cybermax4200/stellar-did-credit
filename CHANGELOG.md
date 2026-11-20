@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `zk-wasm`: conditional ESM/CommonJS exports and `initZkWasm` for Node buffers and browser URLs, with Node, Vite, and Webpack initialization smoke tests (#1186).
+- `score-range-verifier`: reject malformed, infinite, off-curve, and non-subgroup proof points with `InvalidProof` before unsafe host calls; exercise the contract with a 100000-case property runner (#1188).
 - `governance`: prevent proposal execution while credit-oracle weights are under an active timelock; allow execution after the timelock expires (#1169)
 - SDK: restore the missing `IssuerTier` result type used by `listIssuerTiers` (#1071).
 - CLI: restore missing issuer-tier formatting helpers for `get`, `list`, and `set` commands (#1071).

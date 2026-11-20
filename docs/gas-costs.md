@@ -87,6 +87,31 @@ The following benchmarks were recorded across the core protocol operations (`com
 ### 5. `get_score` (Credit Oracle)
 - **Constant Overhead**: ~45,120 CPU instructions, 6,800 bytes memory ($O(1)$ read-only).
 
+### 6. Revoked credential queries (Identity Oracle)
+
+`list_revoked_for_subject(subject, start_index, limit)` returns at most 50 hashes,
+so the raw hash payload is bounded to 1,600 bytes, plus Soroban vector encoding.
+The query still loads the subject's existing anchor vector and scans records
+until it has skipped `start_index` revoked credentials and filled the page.
+Worst-case CPU and storage-loading memory remain $O(A)$ for $A$ anchored records;
+linked-registry revocation checks can add a cross-contract read per active record.
+`get_revoked_count_for_subject(subject)` scans all anchors with the same
+revocation rules. A zero page limit returns before loading anchors.
+
+The profiling harness records `list_revoked_page` and `get_revoked_count` with
+three revoked credentials. These changes have no new measured resource figures:
+local tests and profiling were intentionally not run for this update.
+
+### 7. Proof verification (Score Range Verifier)
+
+All verification entrypoints check a fixed 384-byte proof and reject malformed
+coordinates, off-curve points, infinity, and non-subgroup points before pairing.
+Finite-point decoding and curve checks add bounded CPU work for A, B, and C;
+successful verification also publishes `ProofVerified`. `verify_proof` requires
+verifier authorization and writes no replay record. `verify_and_consume` retains
+its existing replay-record write and TTL extension before publishing the event.
+Simulate the final transaction to measure these costs for the deployed WASM.
+
 ---
 
 ## Mainnet Fee & Resource Limit Recommendations
@@ -109,7 +134,7 @@ For mainnet transactions, integrators should set explicit resource limit buffers
 ### Local Rust Profiling Harness
 To run the in-memory budget test harness:
 ```bash
-cargo test --package tests gas_profiling -- --nocapture
+cargo test --package integration-tests gas_profiling -- --nocapture
 ```
 
 ### CLI Script Harness

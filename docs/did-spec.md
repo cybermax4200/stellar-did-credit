@@ -332,3 +332,18 @@ By anchoring the DID to a Stellar address, the identity is permanently linked to
 ## 6. Reference Implementation
 
 The canonical implementation of the anchor contract is located in `contracts/identity-oracle/`.
+
+## Revoked credential pagination
+
+`list_revoked_for_subject(subject, start_index, limit)` returns revoked hashes
+in credential anchor insertion order. The zero-based offset counts only revoked
+credentials, including both local flags and the linked registry's revocations.
+The limit is capped at 50. A zero limit, an unknown subject, or an offset at or
+beyond the revoked count returns an empty vector.
+
+Use `get_revoked_count_for_subject(subject)` for the total, then request pages
+with offsets 0, 50, 100, and so on. Query a consistent ledger snapshot when
+combining pages, since new revocations can shift offsets. The previous
+one-argument list signature is replaced by this paginated signature. Existing
+anchor storage is retained; reads still scan anchor records and may query the
+registry, but each response contains at most 50 hashes.

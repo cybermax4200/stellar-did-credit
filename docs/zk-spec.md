@@ -64,7 +64,7 @@ Approximately 2,400 gates (32-bit comparisons including the `avg_counterparties 
 env.crypto().groth16_verify(&VERIFICATION_KEY, &public_inputs, &proof) with public inputs: threshold, subject, credit_oracle_id, score_commitment, snapshot_ledger, domain_separator, current_timestamp, max_validity_window.
 
 ## 7. Proof System
-Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. Proof size ~192 bytes.
+Groth16 on BLS12-381 via CAP-0059. WASM prover via arkworks-rs or snarkjs. The on-chain encoding is 384 bytes: uncompressed A (G1, 96 bytes), B (G2, 192 bytes), and C (G1, 96 bytes).
 
 ## 8. Prover Flow
 Subject calls compute_score() -> reads ScoreRecord + Weights from chain -> generates witness with random blinding -> runs Groth16 prover in browser WASM -> submits proof to verifier contract.
