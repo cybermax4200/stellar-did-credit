@@ -3149,7 +3149,6 @@ export class StellarDIDCreditSDK {
     const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
     const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
 
-    await ZkWasm.initZkWasm();
     const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
       vcPoints,
       Number(txStats.volume30d),
