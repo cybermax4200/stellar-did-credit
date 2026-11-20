@@ -94,6 +94,8 @@ pub enum CreditOracleError {
     InvalidDisputeBondAmount = 20,
     /// A positive dispute bond is configured but no bond token has been set.
     DisputeBondTokenNotConfigured = 21,
+    /// The dispute's expiration deadline has not yet been reached.
+    DisputeNotExpired = 22,
 }
 
 /// Weights used in credit score calculation.

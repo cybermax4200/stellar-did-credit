@@ -6,10 +6,11 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE,
-    MIN_SCORE, SECONDS_PER_DAY,
+    compute_score_pure, recency_multiplier_bps, CreditOracle, CreditOracleClient,
+    BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -508,5 +509,54 @@ proptest! {
         }
         prop_assert_eq!(rescore_borrowers, expected_borrowers);
         prop_assert_eq!(rescore_volume, expected_volume);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Property 15 — Dispute totals track successive accepted/rejected lifecycles.
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn prop_dispute_stats_track_resolutions(
+        decisions in proptest::collection::vec(any::<bool>(), 1..=12),
+    ) {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let keys = [
+            Symbol::new(&env, "tx_stats"),
+            Symbol::new(&env, "repayment"),
+            Symbol::new(&env, "vc_count"),
+        ];
+        let reason = String::from_str(&env, "property test");
+        let mut accepted_count = 0u64;
+        let mut rejected_count = 0u64;
+
+        for (index, accepted) in decisions.iter().enumerate() {
+            let key = keys[index % keys.len()].clone();
+            client.flag_score_input(&subject, &key, &reason);
+            client.resolve_dispute(&subject, &key, &accepted);
+            if accepted {
+                accepted_count += 1;
+            } else {
+                rejected_count += 1;
+            }
+
+            assert_eq!(
+                client.get_dispute_stats(),
+                crate::DisputeStats {
+                    pending: 0,
+                    accepted: accepted_count,
+                    rejected: rejected_count,
+                }
+            );
+        }
     }
 }
