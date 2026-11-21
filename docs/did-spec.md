@@ -304,11 +304,46 @@ Relying parties (e.g. lenders or anchors) can verify verifiable credentials anch
 - **`verify_vc(subject, vc_hash)`**: Verifies a single credential. Returns `true` when `subject` has an active anchored VC record matching `vc_hash` that has not been revoked (checking both local record status and any linked `RevocationRegistry`), and `false` otherwise.
 - **`batch_verify_vc(subject, vc_hashes)`**: Verifies multiple credentials in a single atomic invocation. Takes a vector of `BytesN<32>` VC hashes and returns a vector of booleans of equal length, where each boolean indicates the validity of the corresponding hash. Unanchored or revoked credentials report `false`, while valid credentials report `true`. An empty input vector returns an empty output vector.
 
+### 3.6 Issuer Delegation
+
+A trusted credential issuer can authorize multiple delegate Stellar addresses to
+perform credential operations without transferring the issuer identity. The
+issuer calls `add_issuer_delegate(issuer, delegate)` and signs the operation
+with the issuer address. The issuer can revoke a grant at any time with
+`remove_issuer_delegate(issuer, delegate)`, also signed by the issuer. A
+delegate cannot grant or remove permissions for itself or for another issuer.
+
+An authorized delegate signs its own credential operations using
+`anchor_vc_as_delegate(issuer, delegate, subject, vc_hash)` (or
+`anchor_vc_typed_as_delegate` for a typed credential) to anchor, and
+`mark_vc_revoked_as_delegate(issuer, delegate, subject, vc_hash)` to revoke.
+The contract verifies both the delegate's Soroban authorization and the
+active `(issuer, delegate)` grant. These permissions are limited to anchoring
+and revoking credentials; they do not let delegates manage issuer
+delegations, register or deregister issuers, or change issuer configuration.
+The issuer itself can continue to use `anchor_vc`, `anchor_vc_typed`, and
+`mark_vc_revoked` with its own signature.
+
+Credential records and events always retain the original issuer address,
+regardless of whether the issuer or an authorized delegate performed the
+operation. Delegation therefore changes only who may sign the operation; it
+does not transfer credential ownership or alter issuer attribution. Removing
+a delegate immediately prevents subsequent delegate operations. Existing
+credential records remain attributed to the issuer and retain their existing
+revocation state.
+
 ## 4. Security Considerations
 
 ### 4.1 Authentication and Authorization
 
 All updates to the DID anchor MUST require a valid signature from the Stellar address associated with the DID. This is enforced by the `identity-oracle` contract using `subject.require_auth()`.
+
+Credential anchoring and revocation require the issuer's signature when using
+the primary issuer entry points. The delegate entry points require the named
+delegate's signature and an active grant stored specifically for that issuer.
+Delegates cannot impersonate the issuer because the issuer address passed to
+the contract remains the recorded credential issuer, while the delegate must
+authenticate as itself. Only the issuer can add or remove its delegates.
 
 **Overwrite semantics:** The `anchor_did` function allows unconditional overwrites. Any subject
 with signing authority can replace their DID CID at any time without restrictions. There is no

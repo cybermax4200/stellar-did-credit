@@ -161,6 +161,8 @@ pub enum DataKey {
     /// told apart from first-time registration without rescanning
     /// `IssuersIndex`.
     TrustedIssuer(Address),
+    /// Whether `delegate` is authorized to manage credentials for `issuer`.
+    IssuerDelegate(Address, Address),
     /// The DID document hash anchored for the given subject address.
     DIDDocument(Address),
     /// The list of VC anchors associated with the given subject address.
@@ -254,6 +256,163 @@ fn cid_starts_with(_env: &Env, s: &String, prefix: &String) -> bool {
     s.copy_into_slice(&mut s_buf[..slen]);
     prefix.copy_into_slice(&mut p_buf[..plen]);
     s_buf[..plen] == p_buf[..plen]
+}
+
+fn require_issuer_or_delegate_auth(
+    env: &Env,
+    issuer: &Address,
+    actor: &Address,
+) -> Result<(), IdentityOracleError> {
+    if actor != issuer {
+        let key = DataKey::IssuerDelegate(issuer.clone(), actor.clone());
+        let is_delegate: bool = env.storage().persistent().get(&key).unwrap_or(false);
+        if !is_delegate {
+            return Err(IdentityOracleError::NotAuthorized);
+        }
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    }
+    actor.require_auth();
+    Ok(())
+}
+
+fn anchor_vc_core(
+    env: &Env,
+    issuer: Address,
+    actor: Address,
+    subject: Address,
+    vc_hash: BytesN<32>,
+    credential_type: Symbol,
+) -> Result<(), IdentityOracleError> {
+    ensure_not_paused(env)?;
+    require_issuer_or_delegate_auth(env, &issuer, &actor)?;
+
+    let is_trusted: bool = env
+        .storage()
+        .persistent()
+        .get(&DataKey::TrustedIssuer(issuer.clone()))
+        .unwrap_or(false);
+    if !is_trusted {
+        return Err(IdentityOracleError::IssuerNotRegistered);
+    }
+
+    let key = DataKey::VCAnchors(subject.clone());
+    let mut anchors: Vec<IdentityVCRecord> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+
+    for record in anchors.iter() {
+        if record.vc_hash == vc_hash && record.issuer == issuer {
+            return Ok(());
+        }
+    }
+
+    let active_count: u32 = anchors
+        .iter()
+        .filter(|record| !record.revoked && !is_record_revoked(env, record))
+        .count() as u32;
+    if active_count >= MAX_VCS_PER_SUBJECT {
+        return Err(IdentityOracleError::VCLimitReached);
+    }
+
+    let record = IdentityVCRecord {
+        vc_hash: vc_hash.clone(),
+        issuer: issuer.clone(),
+        anchored_at: env.ledger().timestamp(),
+        revoked: false,
+    };
+    let is_active = !is_record_revoked(env, &record);
+
+    store_credential_type(env, &subject, &vc_hash, credential_type);
+
+    anchors.push_back(record);
+    env.storage().persistent().set(&key, &anchors);
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    record_last_state_change(env, &subject);
+
+    if let Some(mut active_count) = load_active_vc_count(env, &subject) {
+        if is_active {
+            active_count = active_count
+                .checked_add(1)
+                .expect("active VC count overflow");
+        }
+        let active_key = DataKey::ActiveVCCount(subject.clone());
+        env.storage().persistent().set(&active_key, &active_count);
+        env.storage()
+            .persistent()
+            .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    } else {
+        seed_active_vc_count(env, &subject);
+    }
+
+    increment_vcs_anchored(env);
+    env.events()
+        .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
+    Ok(())
+}
+
+fn mark_vc_revoked_core(
+    env: &Env,
+    issuer: Address,
+    actor: Address,
+    subject: Address,
+    vc_hash: BytesN<32>,
+) -> Result<(), IdentityOracleError> {
+    ensure_not_paused(env)?;
+    require_issuer_or_delegate_auth(env, &issuer, &actor)?;
+    let key = DataKey::VCAnchors(subject.clone());
+    let anchors: Vec<IdentityVCRecord> = env
+        .storage()
+        .persistent()
+        .get(&key)
+        .unwrap_or(Vec::new(env));
+
+    let mut found = false;
+    let mut transitioned_to_revoked = false;
+    let mut updated = Vec::new(env);
+    for mut record in anchors.iter() {
+        if record.vc_hash == vc_hash && record.issuer == issuer {
+            if !record.revoked {
+                transitioned_to_revoked = true;
+            }
+            record.revoked = true;
+            found = true;
+        }
+        updated.push_back(record);
+    }
+
+    if !found {
+        return Err(IdentityOracleError::VCNotFound);
+    }
+
+    env.storage().persistent().set(&key, &updated);
+    if transitioned_to_revoked {
+        record_last_state_change(env, &subject);
+        increment_vcs_revoked(env, 1);
+        if let Some(mut active_count) = load_active_vc_count(env, &subject) {
+            active_count = active_count
+                .checked_sub(1)
+                .expect("active VC count underflow");
+            let active_key = DataKey::ActiveVCCount(subject.clone());
+            env.storage().persistent().set(&active_key, &active_count);
+            env.storage()
+                .persistent()
+                .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        } else {
+            seed_active_vc_count(env, &subject);
+        }
+    } else if load_active_vc_count(env, &subject).is_none() {
+        seed_active_vc_count(env, &subject);
+    }
+    env.storage()
+        .persistent()
+        .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+    Ok(())
 }
 
 #[contract]
@@ -698,6 +857,61 @@ impl IdentityOracle {
         Ok(())
     }
 
+    /// Authorize a delegate to anchor and revoke credentials for an issuer.
+    ///
+    /// Only the issuer can grant this permission. The delegate must sign each
+    /// credential operation themselves; issuer attribution remains unchanged.
+    pub fn add_issuer_delegate(
+        env: Env,
+        issuer: Address,
+        delegate: Address,
+    ) -> Result<(), IdentityOracleError> {
+        ensure_not_paused(&env)?;
+        issuer.require_auth();
+        if issuer == delegate {
+            return Err(IdentityOracleError::InvalidIssuerDelegate);
+        }
+
+        let key = DataKey::IssuerDelegate(issuer.clone(), delegate.clone());
+        if env.storage().persistent().get::<_, bool>(&key).unwrap_or(false) {
+            return Err(IdentityOracleError::IssuerDelegateAlreadyExists);
+        }
+
+        env.storage().persistent().set(&key, &true);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.events()
+            .publish((symbol_short!("IssDelAdd"),), (issuer, delegate));
+        Ok(())
+    }
+
+    /// Remove an issuer delegate's permission to manage credentials.
+    ///
+    /// Only the original issuer can remove its delegates. Removal takes
+    /// effect immediately for subsequent operations.
+    pub fn remove_issuer_delegate(
+        env: Env,
+        issuer: Address,
+        delegate: Address,
+    ) -> Result<(), IdentityOracleError> {
+        ensure_not_paused(&env)?;
+        issuer.require_auth();
+
+        let key = DataKey::IssuerDelegate(issuer.clone(), delegate.clone());
+        if !env.storage().persistent().get::<_, bool>(&key).unwrap_or(false) {
+            return Err(IdentityOracleError::IssuerDelegateNotFound);
+        }
+
+        env.storage().persistent().set(&key, &false);
+        env.storage()
+            .persistent()
+            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+        env.events()
+            .publish((symbol_short!("IssDelRem"),), (issuer, delegate));
+        Ok(())
+    }
+
     /// Check whether a subject has already anchored a DID document.
     pub fn has_anchored_did(env: Env, subject: Address) -> bool {
         env.storage()
@@ -836,77 +1050,57 @@ impl IdentityOracle {
         vc_hash: BytesN<32>,
         credential_type: Symbol,
     ) -> Result<(), IdentityOracleError> {
-        ensure_not_paused(&env)?;
-        issuer.require_auth();
-        let is_trusted: bool = env
-            .storage()
-            .persistent()
-            .get(&DataKey::TrustedIssuer(issuer.clone()))
-            .unwrap_or(false);
-        if !is_trusted {
-            return Err(IdentityOracleError::IssuerNotRegistered);
-        }
+        anchor_vc_core(
+            &env,
+            issuer.clone(),
+            issuer,
+            subject,
+            vc_hash,
+            credential_type,
+        )
+    }
 
-        let key = DataKey::VCAnchors(subject.clone());
-        let mut anchors: Vec<IdentityVCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
+    /// Anchor a VC using an issuer-authorized delegate's signature.
+    ///
+    /// The original issuer remains recorded as the VC issuer.
+    pub fn anchor_vc_as_delegate(
+        env: Env,
+        issuer: Address,
+        delegate: Address,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), IdentityOracleError> {
+        anchor_vc_core(
+            &env,
+            issuer,
+            delegate,
+            subject,
+            vc_hash,
+            generic_credential_type(&env),
+        )
+    }
 
-        // Dedup: same (issuer, vc_hash) pair is a no-op
-        for i in 0..anchors.len() {
-            let record = anchors.get(i).unwrap();
-            if record.vc_hash == vc_hash && record.issuer == issuer {
-                return Ok(());
-            }
-        }
+    /// Anchor a typed VC using an issuer-authorized delegate's signature.
+    pub fn anchor_vc_typed_as_delegate(
+        env: Env,
+        issuer: Address,
+        delegate: Address,
+        subject: Address,
+        vc_hash: BytesN<32>,
+        credential_type: Symbol,
+    ) -> Result<(), IdentityOracleError> {
+        anchor_vc_core(&env, issuer, delegate, subject, vc_hash, credential_type)
+    }
 
-        // Enforce active VC cap: revoked VCs do not count toward the limit.
-        let active_count: u32 = anchors
-            .iter()
-            .filter(|r| !r.revoked && !is_record_revoked(&env, r))
-            .count() as u32;
-        if active_count >= MAX_VCS_PER_SUBJECT {
-            return Err(IdentityOracleError::VCLimitReached);
-        }
-
-        let record = IdentityVCRecord {
-            vc_hash: vc_hash.clone(),
-            issuer: issuer.clone(),
-            anchored_at: env.ledger().timestamp(),
-            revoked: false,
-        };
-        let is_active = !is_record_revoked(&env, &record);
-
-        store_credential_type(&env, &subject, &vc_hash, credential_type);
-
-        anchors.push_back(record);
-        env.storage().persistent().set(&key, &anchors);
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        record_last_state_change(&env, &subject);
-
-        if let Some(mut active_count) = load_active_vc_count(&env, &subject) {
-            if is_active {
-                active_count = active_count
-                    .checked_add(1)
-                    .expect("active VC count overflow");
-            }
-            let active_key = DataKey::ActiveVCCount(subject.clone());
-            env.storage().persistent().set(&active_key, &active_count);
-            env.storage()
-                .persistent()
-                .extend_ttl(&active_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        } else {
-            seed_active_vc_count(&env, &subject);
-        }
-
-        increment_vcs_anchored(&env);
-        env.events()
-            .publish((symbol_short!("VCAnch"),), (issuer, subject, vc_hash));
-        Ok(())
+    /// Mark a previously anchored VC as revoked by its issuer-authorized delegate.
+    pub fn mark_vc_revoked_as_delegate(
+        env: Env,
+        issuer: Address,
+        delegate: Address,
+        subject: Address,
+        vc_hash: BytesN<32>,
+    ) -> Result<(), IdentityOracleError> {
+        mark_vc_revoked_core(&env, issuer, delegate, subject, vc_hash)
     }
 
     /// Mark a previously anchored VC as revoked by its issuer.
@@ -916,58 +1110,7 @@ impl IdentityOracle {
         subject: Address,
         vc_hash: BytesN<32>,
     ) -> Result<(), IdentityOracleError> {
-        ensure_not_paused(&env)?;
-        issuer.require_auth();
-        let key = DataKey::VCAnchors(subject.clone());
-        let anchors: Vec<IdentityVCRecord> = env
-            .storage()
-            .persistent()
-            .get(&key)
-            .unwrap_or(Vec::new(&env));
-
-        let mut found = false;
-        let mut transitioned_to_revoked = false;
-        let mut updated = Vec::new(&env);
-        for mut record in anchors.iter() {
-            if record.vc_hash == vc_hash && record.issuer == issuer {
-                if !record.revoked {
-                    transitioned_to_revoked = true;
-                }
-                record.revoked = true;
-                found = true;
-            }
-            updated.push_back(record);
-        }
-
-        if !found {
-            return Err(IdentityOracleError::VCNotFound);
-        }
-
-        env.storage().persistent().set(&key, &updated);
-        if transitioned_to_revoked {
-            record_last_state_change(&env, &subject);
-            increment_vcs_revoked(&env, 1);
-            if let Some(mut active_count) = load_active_vc_count(&env, &subject) {
-                active_count = active_count
-                    .checked_sub(1)
-                    .expect("active VC count underflow");
-                let active_key = DataKey::ActiveVCCount(subject.clone());
-                env.storage().persistent().set(&active_key, &active_count);
-                env.storage().persistent().extend_ttl(
-                    &active_key,
-                    PERS_TTL_THRESHOLD,
-                    PERS_TTL_EXTEND,
-                );
-            } else {
-                seed_active_vc_count(&env, &subject);
-            }
-        } else if load_active_vc_count(&env, &subject).is_none() {
-            seed_active_vc_count(&env, &subject);
-        }
-        env.storage()
-            .persistent()
-            .extend_ttl(&key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-        Ok(())
+        mark_vc_revoked_core(&env, issuer.clone(), issuer, subject, vc_hash)
     }
 
     /// Check if a subject has at least one non-revoked verifiable credential anchored.
