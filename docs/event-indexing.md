@@ -35,6 +35,20 @@ The `identity-oracle`, `credit-oracle`, and `revocation-registry` contracts emit
 - **Emitted When:** A subject anchors or updates their DID document CID.
 - **feeder Action:** None (metadata tracking).
 
+#### DIDDeact
+
+- **Topic:** `[Symbol("DIDDeact")]`
+- **Data:** `(subject: Address, reason: String)`; `reason` is limited to 256 bytes and defaults to `"unspecified"` when the legacy `deactivate_did` entry point is used.
+- **Emitted When:** A subject deactivates their DID, removing the DID document CID and revoking their active VCs.
+
+#### IdDeact
+
+- **Topic:** `[Symbol("IdDeact")]`
+- **Data:** `(subject: Address, revoked_count: u32, reason: String)`; `reason` is limited to 256 bytes and defaults to `"unspecified"` when the legacy `deactivate_identity` entry point is used.
+- **Emitted When:** A subject deactivates their identity while retaining the DID document CID and revoking their active VCs.
+
+**Decoder update:** The payloads for both deactivation events have changed to include `reason`. Indexers must update their event decoders before consuming events emitted by the updated contract.
+
 #### VCAnch
 
 - **Topic:** `[Symbol("VCAnch")]`

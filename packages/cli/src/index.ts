@@ -32,7 +32,6 @@ import {
   type RecencyDecayConfig,
   type CredentialTypeWeight,
   type IssuerTier,
-  type ProtocolConfig,
   type IdentityProtocolStats,
   type CreditProtocolStats,
 } from "@stellar-did-credit/sdk";
