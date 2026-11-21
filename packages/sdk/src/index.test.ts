@@ -901,6 +901,7 @@ describe("StellarDIDCreditSDK", () => {
                   ["symbol:DsptFild"],
                   ["symbol:DsptRslv"],
                   ["symbol:DsptRjct"],
+                  ["symbol:DsptExpr"],
                 ],
               },
             ],
@@ -914,6 +915,7 @@ describe("StellarDIDCreditSDK", () => {
         ["DsptFild", "Pending"],
         ["DsptRslv", "Resolved"],
         ["DsptRjct", "Rejected"],
+        ["DsptExpr", "Expired"],
       ])("filters %s disputes by subject", async (eventType, status) => {
         mockGetEvents.mockResolvedValueOnce({
           latestLedger: 100,
@@ -1049,6 +1051,7 @@ describe("StellarDIDCreditSDK", () => {
       it.each([
         ["DsptRslv", "Resolved"],
         ["DsptRjct", "Rejected"],
+        ["DsptExpr", "Expired"],
       ])("delivers filing followed by %s across polls", async (eventType, status) => {
         mockGetEvents
           .mockResolvedValueOnce({
@@ -3221,7 +3224,7 @@ describe("StellarDIDCreditSDK", () => {
               subject: subjectAddress,
               input_key: "tx_stats",
               reason: "incorrect value",
-              filed_at_ledger: 12345,
+              created_at_ledger: 12345,
               status: { Pending: null },
             },
           },
@@ -3233,7 +3236,7 @@ describe("StellarDIDCreditSDK", () => {
         subject: subjectAddress,
         inputKey: "tx_stats",
         reason: "incorrect value",
-        filedAtLedger: 12345,
+        createdAtLedger: 12345,
         status: "Pending",
       });
     });
@@ -3272,14 +3275,14 @@ describe("StellarDIDCreditSDK", () => {
                 subject: subjectAddress,
                 input_key: "tx_stats",
                 reason: "err",
-                filed_at_ledger: 111,
+                created_at_ledger: 111,
                 status: { Resolved: null },
               },
               {
                 subject: subjectAddress,
                 input_key: "vc_count",
                 reason: "wrong",
-                filed_at_ledger: 222,
+                created_at_ledger: 222,
                 status: { Pending: null },
               },
             ],

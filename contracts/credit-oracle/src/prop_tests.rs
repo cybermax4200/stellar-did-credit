@@ -6,8 +6,8 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE,
-    MIN_SCORE, SECONDS_PER_DAY,
+    compute_score_pure, is_dispute_expired, recency_multiplier_bps, BPS_DENOMINATOR,
+    DEFAULT_DISPUTE_TIMEOUT_LEDGERS, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
 
@@ -508,5 +508,56 @@ proptest! {
         }
         prop_assert_eq!(rescore_borrowers, expected_borrowers);
         prop_assert_eq!(rescore_volume, expected_volume);
+    }
+}
+
+proptest! {
+    //  7. Dispute expiry boundary: saturating arithmetic, exact at-threshold
+
+    #[test]
+    fn prop_dispute_not_expired_before_boundary(
+        filed_at in any::<u32>(),
+        timeout  in 1u32..=u32::MAX,
+    ) {
+        let expiry = filed_at.saturating_add(timeout);
+        if expiry > 0 {
+            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expired_at_and_after_boundary(
+        filed_at in any::<u32>(),
+        timeout  in 1u32..=u32::MAX,
+        extra    in 0u32..=10_000,
+    ) {
+        let expiry = filed_at.saturating_add(timeout);
+        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
+        if let Some(after) = expiry.checked_add(extra) {
+            prop_assert!(is_dispute_expired(filed_at, timeout, after));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expiry_saturates_at_u32_max(
+        filed_at in (u32::MAX / 2)..=u32::MAX,
+        timeout  in (u32::MAX / 2)..=u32::MAX,
+    ) {
+        prop_assert!(is_dispute_expired(filed_at, timeout, u32::MAX));
+        if filed_at > 0 {
+            prop_assert!(!is_dispute_expired(filed_at, timeout, filed_at - 1));
+        }
+    }
+
+    #[test]
+    fn prop_dispute_expiry_default_timeout_exercises_172800(
+        filed_at in any::<u32>(),
+    ) {
+        let timeout = DEFAULT_DISPUTE_TIMEOUT_LEDGERS;
+        let expiry = filed_at.saturating_add(timeout);
+        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
+        if expiry > 0 {
+            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
+        }
     }
 }

@@ -483,7 +483,7 @@ function printDisputeRecord(record: DisputeRecord): void {
   console.log(`Dispute for ${record.inputKey} [${record.status}]`);
   console.log(`  Subject:      ${record.subject}`);
   console.log(`  Reason:       ${record.reason}`);
-  console.log(`  Filed Ledger: ${record.filedAtLedger}`);
+  console.log(`  Created Ledger: ${record.createdAtLedger}`);
 }
 
 // ---------------------------------------------------------------------------

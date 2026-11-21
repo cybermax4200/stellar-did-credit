@@ -78,7 +78,7 @@ export interface DisputeRecord {
   subject: string;
   inputKey: string;
   reason: string;
-  filedAtLedger: number;
+  createdAtLedger: number;
   status: DisputeStatus;
 }
 
@@ -133,10 +133,10 @@ export interface ProtocolConfig {
 export type Unsubscribe = () => void;
 
 /** Credit-oracle event topics of the dispute lifecycle. */
-export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct";
+export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct" | "DsptExpr";
 
 /** `DisputeStatus` stored by the credit-oracle once a dispute event fires. */
-export type DisputeStatus = "Pending" | "Resolved" | "Rejected";
+export type DisputeStatus = "Pending" | "Resolved" | "Rejected" | "Expired";
 
 /**
  * A score event emitted by the credit-oracle on every successful
@@ -159,7 +159,7 @@ export interface ScoreEvent {
  * {@link StellarDIDCreditSDK.subscribeToDisputeEvents}.
  */
 export interface DisputeEvent {
-  /** Lifecycle transition: DsptFild, DsptRslv or DsptRjct. */
+  /** Lifecycle transition: DsptFild, DsptRslv, DsptRjct or DsptExpr. */
   eventType: DisputeEventType;
   /** Subject address the dispute was filed against. */
   subject: string;
@@ -173,12 +173,14 @@ const DISPUTE_EVENT_STATUS: Record<DisputeEventType, DisputeStatus> = {
   DsptFild: "Pending",
   DsptRslv: "Resolved",
   DsptRjct: "Rejected",
+  DsptExpr: "Expired",
 };
 
 const DISPUTE_EVENT_TOPICS: DisputeEventType[] = [
   "DsptFild",
   "DsptRslv",
   "DsptRjct",
+  "DsptExpr",
 ];
 
 export type SDKErrorCode =
@@ -3358,14 +3360,16 @@ export class StellarDIDCreditSDK {
 
   /**
    * Poll for the credit-oracle's dispute events (`DsptFild`, `DsptRslv`,
-   * `DsptRjct`) for a single subject.
+   * `DsptRjct`, `DsptExpr`) for a single subject.
    *
    * A dispute is raised by `flag_score_input` and closed by `resolve_dispute`,
    * which emits `DsptRslv` when the admin accepts the flag and `DsptRjct` when
-   * they reject it. All three events carry `(subject, input_key)`, so the
-   * subscription filters on `subject` locally and derives `status` from the
-   * event topic. Events from before the subscription started are skipped, and
-   * the three topics share one poll per interval.
+   * they reject it. A stale dispute can also be closed by `expire_dispute`,
+   * which emits `DsptExpr` once the review timeout has elapsed. All events
+   * carry `(subject, input_key)`, so the subscription filters on `subject`
+   * locally and derives `status` from the event topic. Events from before the
+   * subscription started are skipped, and all topics share one poll per
+   * interval.
    *
    * @param subject - Subject address whose disputes to watch
    * @param callback - Called with each matching {@link DisputeEvent}
@@ -4171,7 +4175,9 @@ function parseDisputeRecord(native: unknown): DisputeRecord {
     subject: String(raw["subject"]),
     inputKey: String(raw["input_key"]),
     reason: String(raw["reason"]),
-    filedAtLedger: Number(raw["filed_at_ledger"]),
+    createdAtLedger: Number(
+      raw["created_at_ledger"] ?? raw["filed_at_ledger"],
+    ),
     status,
   };
 }
