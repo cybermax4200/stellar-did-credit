@@ -1,7 +1,7 @@
 use ark_serialize::CanonicalSerialize;
 use ark_std::rand::rngs::StdRng;
 use ark_std::rand::SeedableRng;
-use zk_circuit::generate_test_keys;
+use zk_circuit::{generate_test_keys, generate_tier_test_keys};
 
 fn print_array(name: &str, bytes: &[u8]) {
     print!("let {} = [\n    ", name);
@@ -14,9 +14,24 @@ fn print_array(name: &str, bytes: &[u8]) {
     println!("];\n");
 }
 
+/// Usage: `generate_vk [threshold|tier]` (default: `threshold`).
+///
+/// Prints the development verification key (fixed-seed setup, NOT a trusted
+/// setup) for the selected circuit as Rust byte arrays, ready to paste into
+/// `contracts/score-range-verifier/src/lib.rs`.
 fn main() {
+    let which = std::env::args()
+        .nth(1)
+        .unwrap_or_else(|| "threshold".to_string());
     let mut rng = StdRng::from_seed([0u8; 32]);
-    let (_, vk) = generate_test_keys(&mut rng).unwrap();
+    let (_, vk) = match which.as_str() {
+        "threshold" => generate_test_keys(&mut rng).unwrap(),
+        "tier" => generate_tier_test_keys(&mut rng).unwrap(),
+        other => {
+            eprintln!("unknown circuit `{other}`; expected `threshold` or `tier`");
+            std::process::exit(2);
+        }
+    };
 
     let mut alpha_bytes = vec![0u8; 96];
     vk.alpha_g1

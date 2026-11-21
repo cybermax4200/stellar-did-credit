@@ -32,7 +32,6 @@ import {
   type RecencyDecayConfig,
   type CredentialTypeWeight,
   type IssuerTier,
-  type ProtocolConfig,
   type IdentityProtocolStats,
   type CreditProtocolStats,
 } from "@stellar-did-credit/sdk";
@@ -483,7 +482,7 @@ function printDisputeRecord(record: DisputeRecord): void {
   console.log(`Dispute for ${record.inputKey} [${record.status}]`);
   console.log(`  Subject:      ${record.subject}`);
   console.log(`  Reason:       ${record.reason}`);
-  console.log(`  Filed Ledger: ${record.filedAtLedger}`);
+  console.log(`  Created Ledger: ${record.createdAtLedger}`);
 }
 
 // ---------------------------------------------------------------------------

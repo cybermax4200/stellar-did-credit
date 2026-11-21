@@ -221,7 +221,9 @@ DID document at any time by calling `anchor_did` again.
 
 ### 3.4 DID Deactivation
 
-The Stellar DID protocol provides two distinct on-chain deactivation entry points on the `identity-oracle` contract: [`deactivate_did`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L734) and [`deactivate_identity`](file:///Users/tejaschavan1907/stellar-did-credit/contracts/identity-oracle/src/lib.rs#L939). Both functions enforce subject signature authorization (`subject.require_auth()`) and share foundational revocation logic, but they differ in storage retention of the DID document, event emission, return types, and intended operational lifecycles.
+The Stellar DID protocol provides two distinct on-chain deactivation entry points on the `identity-oracle` contract: `deactivate_did` and `deactivate_identity`. Their corresponding `deactivate_did_with_reason` and `deactivate_identity_with_reason` entry points accept a caller-supplied reason, while both original entry points remain available and use the default reason `"unspecified"`. All four functions enforce subject signature authorization (`subject.require_auth()`) and share foundational revocation logic, but they differ in storage retention of the DID document, event emission, return types, and intended operational lifecycles.
+
+Reasons may be empty and are limited to 256 bytes. For example: `"Key compromised"`, `"User requested deletion"`, or `"Compliance order"`. The supplied reason is included in the deactivation event data.
 
 #### 3.4.1 Shared Deactivation Core (`deactivate_core`)
 
@@ -248,8 +250,10 @@ The two entry points diverge in DID Document storage retention, return values, a
 | **Credit Scoring Impact** | Suppressed in `credit-oracle` | Suppressed in `credit-oracle` |
 | **Return Type** | `Result<(), IdentityOracleError>` | `u32` (count of VCs revoked) |
 | **Emitted Event Topic** | `[Symbol("DIDDeact")]` | `[Symbol("IdDeact")]` |
-| **Emitted Event Data** | `subject: Address` | `(subject: Address, revoked_count: u32)` |
+| **Emitted Event Data** | `(subject: Address, reason: String)` | `(subject: Address, revoked_count: u32, reason: String)` |
 | **Reactivation Restoration** | Must re-anchor DID document + reissue VCs | Only reissue VCs (DID document already present) |
+
+The `_with_reason` entry points take `(subject, reason)`; `deactivate_did_with_reason` returns `Result<(), IdentityOracleError>` and `deactivate_identity_with_reason` returns `Result<u32, IdentityOracleError>`. The original entry points keep their existing signatures and emit `"unspecified"` as the reason. A reason longer than 256 bytes fails with `ReasonTooLong` before changing state or emitting an event.
 
 #### 3.4.3 When to Use Each Function
 
