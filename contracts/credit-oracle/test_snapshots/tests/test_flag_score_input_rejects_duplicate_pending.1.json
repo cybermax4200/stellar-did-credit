@@ -106,7 +106,7 @@
                   "map": [
                     {
                       "key": {
-                        "symbol": "filed_at_ledger"
+                        "symbol": "created_at_ledger"
                       },
                       "val": {
                         "u32": 0
