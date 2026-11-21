@@ -3149,9 +3149,10 @@ export class StellarDIDCreditSDK {
 
     const subjectHash = hash(nativeToScVal(subjectAddress, { type: "address" }).address().toXDR());
     const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
-    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
+    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v2"));
 
-    const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
+    // The scoring inputs shared by the prover and the commitment helper.
+    const scoringArgs = [
       vcPoints,
       Number(txStats.volume30d),
       txStats.avgCounterparties,
@@ -3166,6 +3167,10 @@ export class StellarDIDCreditSDK {
       scoreRecord.computedAtLedger,
       scoreRecord.stale,
       blinding,
+    ] as const;
+
+    const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
+      ...scoringArgs,
       threshold,
       subjectHash,
       oracleHash,
@@ -3175,16 +3180,12 @@ export class StellarDIDCreditSDK {
 
     // Append public inputs as a 68-byte trailer so verifyScoreProof can
     // reconstruct the ScoreRangePublicInputs without extra round-trips:
-    //   [0..32)  score_commitment (SHA-256 of the blinded score fields, 32 bytes)
+    //   [0..32)  score_commitment (Poseidon over BLS12-381 Fr, 32 bytes big-endian)
     //   [32..36) snapshot_ledger  (u32 big-endian)
     //   [36..68) domain_separator (32 bytes)
-    const scoreCommitment = hash(Buffer.concat([
-      Buffer.from(new Uint32Array([scoreRecord.score]).buffer).reverse(),
-      Buffer.from(new Uint32Array([scoreRecord.vcCount]).buffer).reverse(),
-      Buffer.from(new BigInt64Array([BigInt(scoreRecord.lastUpdated)]).buffer).reverse(),
-      Buffer.from(new Uint32Array([scoreRecord.computedAtLedger]).buffer).reverse(),
-      Buffer.from(new Uint32Array([blinding]).buffer).reverse(),
-    ]));
+    // The commitment comes from the same Rust code the circuit uses, so the
+    // off-chain value matches the in-circuit one bit-for-bit.
+    const scoreCommitment = Buffer.from(ZkWasm.compute_score_commitment(...scoringArgs));
     const snapshotLedgerBuf = Buffer.alloc(4);
     snapshotLedgerBuf.writeUInt32BE(scoreRecord.computedAtLedger, 0);
 

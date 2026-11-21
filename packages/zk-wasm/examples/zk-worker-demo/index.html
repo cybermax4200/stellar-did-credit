@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>zk-wasm Web Worker demo</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }
+    #spinner { display: inline-block; width: 1.2rem; height: 1.2rem; border: 3px solid #ccc;
+               border-top-color: #333; border-radius: 50%; animation: spin 0.8s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    code, pre { background: #f4f4f4; padding: 0.1rem 0.3rem; border-radius: 3px; word-break: break-all; }
+    button { font-size: 1rem; padding: 0.5rem 1rem; margin-right: 0.5rem; }
+    #log { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Proof generation in a Web Worker</h1>
+  <p>
+    The spinner and the tick counter below are driven by the main thread. If proving ran there,
+    they would freeze for 1&ndash;2 seconds. Here they keep moving.
+  </p>
+  <p><span id="spinner"></span> main-thread ticks: <code id="ticks">0</code>
+     &middot; longest gap between ticks: <code id="gap">0</code> ms</p>
+  <p>
+    <button id="threshold">Prove score &gt; 600</button>
+    <button id="tier">Prove tier</button>
+  </p>
+  <div id="log">Ready.</div>
+  <script type="module" src="./main.js"></script>
+</body>
+</html>
