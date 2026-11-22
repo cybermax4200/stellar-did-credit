@@ -517,6 +517,151 @@ mod tests {
     }
 
     #[test]
+    fn test_issuer_delegate_credential_management() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+
+        let subject = Address::generate(&env);
+        let primary_hash = BytesN::from_array(&env, &[1u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &primary_hash);
+        assert!(identity.is_verified(&subject));
+        identity.mark_vc_revoked(&issuer, &subject, &primary_hash);
+        assert!(!identity.is_verified(&subject));
+
+        let delegate_one = Address::generate(&env);
+        let delegate_two = Address::generate(&env);
+        let unauthorized = Address::generate(&env);
+
+        assert_eq!(
+            identity.try_add_issuer_delegate(&issuer, &issuer),
+            Err(Ok(IdentityOracleError::InvalidIssuerDelegate))
+        );
+        identity.add_issuer_delegate(&issuer, &delegate_one);
+        identity.add_issuer_delegate(&issuer, &delegate_two);
+        assert_eq!(
+            identity.try_add_issuer_delegate(&issuer, &delegate_one),
+            Err(Ok(IdentityOracleError::IssuerDelegateAlreadyExists))
+        );
+        assert_eq!(
+            identity.try_remove_issuer_delegate(&issuer, &unauthorized),
+            Err(Ok(IdentityOracleError::IssuerDelegateNotFound))
+        );
+
+        let unauthorized_anchor_hash = BytesN::from_array(&env, &[2u8; 32]);
+        let unauthorized_revoke_hash = BytesN::from_array(&env, &[3u8; 32]);
+        identity.anchor_vc(&issuer, &subject, &unauthorized_revoke_hash);
+        assert_eq!(
+            identity.try_anchor_vc_as_delegate(
+                &issuer,
+                &unauthorized,
+                &subject,
+                &unauthorized_anchor_hash
+            ),
+            Err(Ok(IdentityOracleError::NotAuthorized))
+        );
+        assert_eq!(
+            identity.try_mark_vc_revoked_as_delegate(
+                &issuer,
+                &unauthorized,
+                &subject,
+                &unauthorized_revoke_hash
+            ),
+            Err(Ok(IdentityOracleError::NotAuthorized))
+        );
+
+        let other_issuer = Address::generate(&env);
+        identity.register_issuer(&other_issuer);
+        let other_issuer_hash = BytesN::from_array(&env, &[8u8; 32]);
+        identity.anchor_vc(&other_issuer, &subject, &other_issuer_hash);
+        assert_eq!(
+            identity.try_mark_vc_revoked_as_delegate(
+                &other_issuer,
+                &delegate_one,
+                &subject,
+                &other_issuer_hash
+            ),
+            Err(Ok(IdentityOracleError::NotAuthorized))
+        );
+
+        let delegate_one_hash = BytesN::from_array(&env, &[4u8; 32]);
+        let delegate_two_hash = BytesN::from_array(&env, &[5u8; 32]);
+        identity.anchor_vc_as_delegate(
+            &issuer,
+            &delegate_one,
+            &subject,
+            &delegate_one_hash,
+        );
+        identity.anchor_vc_as_delegate(
+            &issuer,
+            &delegate_two,
+            &subject,
+            &delegate_two_hash,
+        );
+
+        let records = identity.get_vc_details(&subject);
+        assert!(records
+            .iter()
+            .any(|record| record.vc_hash == delegate_one_hash && record.issuer == issuer));
+        assert!(records
+            .iter()
+            .any(|record| record.vc_hash == delegate_two_hash && record.issuer == issuer));
+
+        identity.remove_issuer_delegate(&issuer, &delegate_one);
+        assert_eq!(
+            identity.try_anchor_vc_as_delegate(
+                &issuer,
+                &delegate_one,
+                &subject,
+                &BytesN::from_array(&env, &[6u8; 32])
+            ),
+            Err(Ok(IdentityOracleError::NotAuthorized))
+        );
+        assert_eq!(
+            identity.try_mark_vc_revoked_as_delegate(
+                &issuer,
+                &delegate_one,
+                &subject,
+                &delegate_one_hash
+            ),
+            Err(Ok(IdentityOracleError::NotAuthorized))
+        );
+
+        identity.mark_vc_revoked_as_delegate(
+            &issuer,
+            &delegate_two,
+            &subject,
+            &delegate_two_hash,
+        );
+        assert!(!identity.verify_vc(&subject, &delegate_two_hash));
+        assert!(identity.verify_vc(&subject, &delegate_one_hash));
+
+        // Even a configured delegate must provide its own Soroban auth.
+        env.mock_auths(&[]);
+        assert!(identity
+            .try_anchor_vc_as_delegate(
+                &issuer,
+                &delegate_two,
+                &subject,
+                &BytesN::from_array(&env, &[7u8; 32])
+            )
+            .is_err());
+        assert!(identity
+            .try_add_issuer_delegate(&issuer, &unauthorized)
+            .is_err());
+        assert!(identity
+            .try_remove_issuer_delegate(&issuer, &delegate_two)
+            .is_err());
+    }
+
+    #[test]
     fn test_set_identity_oracle_rejects_invalid_contract() {
         let env = Env::default();
         env.mock_all_auths();
