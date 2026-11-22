@@ -116,6 +116,12 @@ pub enum IdentityOracleError {
     InvalidIssuerTier = 11,
     /// The deactivation reason exceeds the maximum allowed length.
     ReasonTooLong = 12,
+    /// The issuer cannot delegate credential management to itself.
+    InvalidIssuerDelegate = 13,
+    /// The issuer delegate is already authorized.
+    IssuerDelegateAlreadyExists = 14,
+    /// The issuer delegate is not currently authorized.
+    IssuerDelegateNotFound = 15,
 }
 
 /// Maximum number of active (non-revoked) VCs a subject can have anchored.
