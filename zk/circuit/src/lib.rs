@@ -15,6 +15,7 @@
 //! The circuit uses **BLS12-381** (CAP-0059 available on Stellar) for the
 //! pairing check.
 
+pub mod ceremony;
 pub mod commitment;
 pub mod merkle;
 pub mod range;
@@ -270,6 +271,83 @@ mod tests {
         let proof = generate_proof(w, public_inputs.clone(), &pk, &mut rng).unwrap();
         let valid = verify_proof(&proof, &public_inputs, &vk).unwrap();
         assert!(valid, "proof should verify");
+    }
+
+    /// Issue #1176 acceptance: run a multi-party ceremony on the real score
+    /// circuit, verify every step, and check that a proof generated with the
+    /// ceremony key verifies against the ceremony verification key (and not
+    /// against the pre-ceremony one). Heavy, so it only runs in release builds
+    /// (`cargo test --release`).
+    /// The tier-band circuit goes through the same ceremony pipeline, and its
+    /// key stays distinct from the threshold circuit's. Release-only (heavy).
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "heavy: run with --release")]
+    fn ceremony_supports_the_tier_circuit() {
+        use crate::ceremony::{
+            contribute, initial_params, params_hash, verify_contribution,
+            verify_params_consistency, Transcript,
+        };
+
+        let mut rng = big_rng();
+        let initial = initial_params("tier", &mut rng).unwrap();
+        assert_eq!(initial.vk.gamma_abc_g1.len(), 9, "same 8-input layout");
+        verify_params_consistency(&initial).unwrap();
+
+        let (next, c) = contribute(&initial, "alice", &mut rng).unwrap();
+        verify_contribution(&initial, &next, &c, &mut rng).unwrap();
+        let mut transcript = Transcript::new("tier", &initial);
+        transcript.contributions.push(c);
+        transcript.verify_delta_chain().unwrap();
+        assert_eq!(transcript.head_hash(), params_hash(&next));
+
+        // Different circuit, different key material than the threshold circuit.
+        let threshold = initial_params("threshold", &mut big_rng()).unwrap();
+        assert_ne!(params_hash(&threshold), params_hash(&initial));
+    }
+
+    #[test]
+    #[cfg_attr(debug_assertions, ignore = "heavy: run with --release")]
+    fn ceremony_key_proves_and_verifies_real_circuit() {
+        use crate::ceremony::{
+            contribute, contribute_beacon, initial_params, verify_contribution,
+            verify_params_consistency, Transcript,
+        };
+
+        let mut rng = big_rng();
+        let initial = initial_params("threshold", &mut rng).unwrap();
+        // Same circuit as the dev key: the ceremony must not change the QAP.
+        assert_eq!(initial.vk.gamma_abc_g1.len(), 9, "8 public inputs + 1");
+
+        let mut transcript = Transcript::new("threshold", &initial);
+        let mut keys = vec![initial];
+        for name in ["alice", "bob"] {
+            let (next, c) = contribute(keys.last().unwrap(), name, &mut rng).unwrap();
+            transcript.contributions.push(c);
+            keys.push(next);
+        }
+        let (next, c) = contribute_beacon(keys.last().unwrap(), "beacon", b"ledger-hash").unwrap();
+        transcript.contributions.push(c);
+        keys.push(next);
+
+        for (i, c) in transcript.contributions.iter().enumerate() {
+            verify_contribution(&keys[i], &keys[i + 1], c, &mut rng).unwrap();
+        }
+        transcript.verify_delta_chain().unwrap();
+        verify_params_consistency(keys.last().unwrap()).unwrap();
+
+        let ceremony_pk = keys.last().unwrap();
+        let w = make_witness();
+        let public_inputs = make_public_inputs(&w, 600);
+        let proof = generate_proof(w, public_inputs.clone(), ceremony_pk, &mut rng).unwrap();
+        assert!(verify_proof(&proof, &public_inputs, &ceremony_pk.vk).unwrap());
+        // Wrong statement and the pre-ceremony key both reject it.
+        assert!(!verify_proof(
+            &proof,
+            &make_public_inputs(&make_witness(), 601),
+            &ceremony_pk.vk
+        )
+        .unwrap());
+        assert!(!verify_proof(&proof, &public_inputs, &keys[0].vk).unwrap());
     }
 
     #[test]

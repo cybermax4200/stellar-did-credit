@@ -409,7 +409,7 @@ impl ScoreRangeVerifier {
 | ---- | ----------- | ---------- |
 | 1 | Constraint count estimate for score > T circuit | This document |
 | 2 | Circom/arkworks circuit + unit tests against scoring-spec vectors | Step 1 |
-| 3 | Groth16 ceremony + vk hash | Step 2 |
+| 3 | Groth16 ceremony + vk hash (tooling: [`zk-trusted-setup.md`](zk-trusted-setup.md); Phase 2 only, Phase 1 import still open) | Step 2 |
 | 4 | `score-range-verifier` Soroban contract + tests | Step 3, CAP-0059 |
 | 6 | End-to-end integration test (testnet) | Steps 4–5 |
 | 7 | CLI command (`stellar-did prove-score`) | Steps 4–5 |

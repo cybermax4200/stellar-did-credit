@@ -327,6 +327,17 @@ fn validate_identity_oracle_ref(env: &Env, identity_oracle_id: &Address) -> bool
     )
 }
 
+/// Whether a score recorded at `last_updated` is older than `max_age_seconds`
+/// at time `now` (both Unix seconds).
+///
+/// A score is expired only when its age is **strictly greater** than
+/// `max_age_seconds`: a score exactly `max_age_seconds` old is still valid.
+/// A `last_updated` in the future (clock skew) counts as age 0, never as
+/// expired.
+pub(crate) fn is_age_expired(last_updated: u64, now: u64, max_age_seconds: u64) -> bool {
+    now.saturating_sub(last_updated) > max_age_seconds
+}
+
 /// Credit score record with metadata
 #[contracttype]
 #[derive(Clone)]
@@ -1730,6 +1741,33 @@ impl CreditOracle {
                 }
                 record
             })
+    }
+
+    /// Hard-expiry check for lenders: `true` if `subject` has no score, or the
+    /// stored score is older than `max_age_seconds`.
+    ///
+    /// Complements `get_score().stale` (a ledger-based freshness flag with a
+    /// fixed window) with a caller-chosen wall-clock limit, e.g. `90 * 86_400`
+    /// for "scores older than 90 days are invalid for loan origination".
+    ///
+    /// Age is `ledger timestamp - ScoreRecord.last_updated` in seconds. The
+    /// score expires strictly *after* `max_age_seconds`: a score exactly that
+    /// old is still fresh, and `max_age_seconds = 0` accepts only a score
+    /// written at the current ledger timestamp. Reads storage only (no
+    /// cross-contract calls) and does not mutate state.
+    pub fn is_score_expired(env: Env, subject: Address, max_age_seconds: u64) -> bool {
+        match env
+            .storage()
+            .persistent()
+            .get::<_, ScoreRecord>(&DataKey::Score(subject))
+        {
+            None => true,
+            Some(record) => is_age_expired(
+                record.last_updated,
+                env.ledger().timestamp(),
+                max_age_seconds,
+            ),
+        }
     }
 
     /// Return the most recent score computations for a user, oldest first.
@@ -4215,6 +4253,137 @@ mod tests {
         client.accept_admin(&human);
         assert_eq!(client.get_admin(), Some(human));
         assert_eq!(client.get_governance(), None);
+    }
+
+    #[test]
+    fn test_is_score_expired_unscored_subject_is_expired() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        client.initialize(&Address::generate(&env));
+
+        let subject = Address::generate(&env);
+        assert!(client.is_score_expired(&subject, &0));
+        assert!(client.is_score_expired(&subject, &(90 * 86_400)));
+        assert!(client.is_score_expired(&subject, &u64::MAX));
+    }
+
+    #[test]
+    fn test_is_score_expired_fresh_and_stale_scores() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        client.initialize(&Address::generate(&env));
+        let subject = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000_000);
+        client.compute_score(&subject);
+        let written = client.get_score(&subject).unwrap().last_updated;
+        assert_eq!(written, 1_000_000);
+
+        let ninety_days: u64 = 90 * 86_400;
+        // Just written: fresh.
+        assert!(!client.is_score_expired(&subject, &ninety_days));
+
+        // 89 days later: still fresh under a 90-day limit.
+        env.ledger().set_timestamp(written + 89 * 86_400);
+        assert!(!client.is_score_expired(&subject, &ninety_days));
+
+        // 91 days later: expired.
+        env.ledger().set_timestamp(written + 91 * 86_400);
+        assert!(client.is_score_expired(&subject, &ninety_days));
+        // ...but still fresh under a more lenient 120-day limit.
+        assert!(!client.is_score_expired(&subject, &(120 * 86_400)));
+    }
+
+    #[test]
+    fn test_is_score_expired_timestamp_boundaries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        client.initialize(&Address::generate(&env));
+        let subject = Address::generate(&env);
+
+        env.ledger().set_timestamp(5_000);
+        client.compute_score(&subject);
+        let max_age: u64 = 3_600;
+
+        // age == max_age - 1  -> fresh
+        env.ledger().set_timestamp(5_000 + max_age - 1);
+        assert!(!client.is_score_expired(&subject, &max_age));
+        // age == max_age      -> still fresh (expires strictly after)
+        env.ledger().set_timestamp(5_000 + max_age);
+        assert!(!client.is_score_expired(&subject, &max_age));
+        // age == max_age + 1  -> expired
+        env.ledger().set_timestamp(5_000 + max_age + 1);
+        assert!(client.is_score_expired(&subject, &max_age));
+    }
+
+    #[test]
+    fn test_is_score_expired_zero_max_age_and_clock_skew() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        client.initialize(&Address::generate(&env));
+        let subject = Address::generate(&env);
+
+        env.ledger().set_timestamp(10_000);
+        client.compute_score(&subject);
+
+        // Same timestamp: age 0 is not > 0.
+        assert!(!client.is_score_expired(&subject, &0));
+        // One second later with max_age 0: expired.
+        env.ledger().set_timestamp(10_001);
+        assert!(client.is_score_expired(&subject, &0));
+
+        // Ledger clock behind the record (skew): age saturates to 0, not expired.
+        env.ledger().set_timestamp(9_000);
+        assert!(!client.is_score_expired(&subject, &0));
+
+        // u64::MAX max age never expires a recorded score.
+        env.ledger().set_timestamp(u64::MAX);
+        assert!(!client.is_score_expired(&subject, &u64::MAX));
+    }
+
+    #[test]
+    fn test_is_score_expired_resets_after_recompute_and_is_per_subject() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let alice = Address::generate(&env);
+        let bob = Address::generate(&env);
+
+        env.ledger().set_timestamp(1_000);
+        client.compute_score(&alice);
+
+        // Alice's score ages out; Bob was never scored.
+        env.ledger().set_timestamp(1_000 + 500);
+        assert!(client.is_score_expired(&alice, &100));
+        assert!(client.is_score_expired(&bob, &u64::MAX));
+
+        // Change an input so the recompute actually writes a new record.
+        let feeder = Address::generate(&env);
+        client.register_feeder(&admin, &feeder);
+        client.anchor_vc(
+            &feeder,
+            &alice,
+            &BytesN::from_array(&env, &[7u8; 32]),
+            &None,
+        );
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + 1);
+        client.compute_score(&alice);
+
+        // Fresh again, and Bob is unaffected.
+        assert!(!client.is_score_expired(&alice, &100));
+        assert!(client.is_score_expired(&bob, &100));
     }
 
     #[test]

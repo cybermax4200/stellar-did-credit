@@ -6,7 +6,7 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, recency_multiplier_bps, CreditOracle, CreditOracleClient,
+    compute_score_pure, is_age_expired, recency_multiplier_bps, CreditOracle, CreditOracleClient,
     BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
@@ -557,6 +557,60 @@ proptest! {
                     rejected: rejected_count,
                 }
             );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Score expiry (`is_score_expired` core): age strictly greater than the limit
+// ---------------------------------------------------------------------------
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(1_000))]
+
+    /// Expired iff `now - last_updated > max_age`, with future records
+    /// (`last_updated > now`) treated as age 0 and never expired.
+    #[test]
+    fn prop_score_expiry_matches_definition(
+        last_updated in any::<u64>(),
+        now in any::<u64>(),
+        max_age in any::<u64>(),
+    ) {
+        let expected = now.saturating_sub(last_updated) > max_age;
+        prop_assert_eq!(is_age_expired(last_updated, now, max_age), expected);
+    }
+
+    /// Boundary: exactly `max_age` old is fresh; one second more is expired.
+    #[test]
+    fn prop_score_expiry_boundary(last_updated in 0u64..=(u64::MAX / 2), max_age in 0u64..=(u64::MAX / 2 - 1)) {
+        prop_assert!(!is_age_expired(last_updated, last_updated + max_age, max_age));
+        prop_assert!(is_age_expired(last_updated, last_updated + max_age + 1, max_age));
+    }
+
+    /// Monotone in time: once expired, always expired as `now` grows.
+    #[test]
+    fn prop_score_expiry_is_monotone_in_time(
+        last_updated in any::<u64>(),
+        max_age in any::<u64>(),
+        t1 in any::<u64>(),
+        dt in any::<u64>(),
+    ) {
+        let t2 = t1.saturating_add(dt);
+        if is_age_expired(last_updated, t1, max_age) {
+            prop_assert!(is_age_expired(last_updated, t2, max_age));
+        }
+    }
+
+    /// Monotone in the limit: a larger `max_age` never turns fresh into expired.
+    #[test]
+    fn prop_score_expiry_is_monotone_in_max_age(
+        last_updated in any::<u64>(),
+        now in any::<u64>(),
+        a in any::<u64>(),
+        b in any::<u64>(),
+    ) {
+        let (small, large) = if a <= b { (a, b) } else { (b, a) };
+        if !is_age_expired(last_updated, now, small) {
+            prop_assert!(!is_age_expired(last_updated, now, large));
         }
     }
 }
