@@ -542,8 +542,8 @@ proptest! {
         for (index, accepted) in decisions.iter().enumerate() {
             let key = keys[index % keys.len()].clone();
             client.flag_score_input(&subject, &key, &reason);
-            client.resolve_dispute(&subject, &key, &accepted);
-            if accepted {
+            client.resolve_dispute(&subject, &key, accepted);
+            if *accepted {
                 accepted_count += 1;
             } else {
                 rejected_count += 1;
