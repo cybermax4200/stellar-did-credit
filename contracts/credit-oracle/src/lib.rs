@@ -36,6 +36,18 @@ pub struct ProtocolMetrics {
     pub total_repayments_count: u64,
 }
 
+/// Aggregate dispute counts, stored independently from individual records.
+#[contracttype]
+#[derive(Clone, Default, Debug, Eq, PartialEq)]
+pub struct DisputeStats {
+    /// Number of disputes awaiting resolution or expiration.
+    pub pending: u64,
+    /// Cumulative number of accepted disputes.
+    pub accepted: u64,
+    /// Cumulative number of rejected disputes.
+    pub rejected: u64,
+}
+
 /// Storage keys for the credit oracle contract
 #[contracttype]
 pub enum DataKey {
@@ -124,6 +136,8 @@ pub enum DataKey {
     /// Written by `accept_admin` when the accepting address is a contract and
     /// removed when an account address accepts. Read via `get_governance`.
     GovernanceId,
+    /// Aggregate dispute status counters
+    DisputeCounts,
 }
 
 /// Basis-point denominator: 10_000 bps == 1.00x multiplier.
@@ -431,8 +445,7 @@ pub enum DisputeStatus {
     Resolved,
     /// Admin rejected the dispute; input deemed correct.
     Rejected,
-    /// Review timeout elapsed without an admin decision. The dispute no longer
-    /// blocks the subject from filing a new dispute for the same input.
+    /// The dispute passed its review deadline without a resolution.
     Expired,
 }
 
@@ -479,6 +492,8 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (â‰ˆ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
+/// Retain disputes beyond their deadline so they can be explicitly expired.
+const DISPUTE_RECORD_TTL_LEDGERS: u32 = PERS_TTL_EXTEND * 2;
 /// Instance-storage TTL bump threshold (ledgers).
 const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 /// Instance-storage TTL bump amount (â‰ˆ 29 days at 5 s/ledger).
@@ -530,6 +545,23 @@ fn save_protocol_metrics(env: &Env, metrics: &ProtocolMetrics) {
     env.storage()
         .instance()
         .set(&DataKey::ProtocolMetrics, metrics);
+}
+
+fn load_dispute_stats(env: &Env) -> DisputeStats {
+    env.storage()
+        .instance()
+        .get(&DataKey::DisputeCounts)
+        .unwrap_or_default()
+}
+
+fn save_dispute_stats(env: &Env, stats: &DisputeStats) {
+    env.storage().instance().set(&DataKey::DisputeCounts, stats);
+}
+
+fn bump_dispute_stats_ttl(env: &Env) {
+    env.storage()
+        .instance()
+        .extend_ttl(INSTANCE_BUMP_THRESHOLD, DISPUTE_RECORD_TTL_LEDGERS);
 }
 
 fn update_protocol_metrics_on_score(env: &Env, volume: i128) {
@@ -702,6 +734,7 @@ impl CreditOracle {
         env.storage()
             .instance()
             .set(&DataKey::StorageVersion, &2u32);
+        save_dispute_stats(&env, &DisputeStats::default());
         // Keep the instance entry (Admin, Config, singletons) from archiving
         // after the default instance TTL window.
         env.storage()
@@ -1948,6 +1981,11 @@ impl CreditOracle {
         load_protocol_metrics(&env)
     }
 
+    /// Returns aggregate dispute counts directly from instance storage.
+    pub fn get_dispute_stats(env: Env) -> DisputeStats {
+        load_dispute_stats(&env)
+    }
+
     /// Returns all currently registered (non-deregistered) feeder addresses.
     ///
     /// `FeedersIndex` is append-only and holds every address ever
@@ -2069,6 +2107,14 @@ impl CreditOracle {
         env.storage()
             .persistent()
             .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        let mut stats = load_dispute_stats(&env);
+        stats.pending = stats
+            .pending
+            .checked_sub(1)
+            .expect("pending dispute count underflow");
+        save_dispute_stats(&env, &stats);
+        bump_dispute_stats_ttl(&env);
 
         env.events()
             .publish((symbol_short!("DsptExpr"),), (subject, input_key));
@@ -2231,7 +2277,11 @@ impl CreditOracle {
         env.storage().persistent().set(&dispute_key, &record);
         env.storage()
             .persistent()
-            .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+            .extend_ttl(
+                &dispute_key,
+                PERS_TTL_THRESHOLD,
+                DISPUTE_RECORD_TTL_LEDGERS,
+            );
 
         // Maintain a per-subject index of disputed keys for `list_disputes`.
         let index_key = DataKey::DisputeIndex(subject.clone());
@@ -2269,13 +2319,21 @@ impl CreditOracle {
             env.storage().persistent().set(&bond_key, &bond);
             env.storage()
                 .persistent()
-                .extend_ttl(&bond_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+                .extend_ttl(&bond_key, PERS_TTL_THRESHOLD, DISPUTE_RECORD_TTL_LEDGERS);
             token::TokenClient::new(&env, &token_id).transfer(
                 &subject,
                 &env.current_contract_address(),
                 &bond_amount,
             );
         }
+
+        let mut stats = load_dispute_stats(&env);
+        stats.pending = stats
+            .pending
+            .checked_add(1)
+            .expect("pending dispute count overflow");
+        save_dispute_stats(&env, &stats);
+        bump_dispute_stats_ttl(&env);
 
         env.events()
             .publish((symbol_short!("DsptFild"),), (subject, input_key));
@@ -2344,6 +2402,25 @@ impl CreditOracle {
             }
             env.storage().persistent().remove(&bond_key);
         }
+
+        let mut stats = load_dispute_stats(&env);
+        stats.pending = stats
+            .pending
+            .checked_sub(1)
+            .expect("pending dispute count underflow");
+        if accepted {
+            stats.accepted = stats
+                .accepted
+                .checked_add(1)
+                .expect("accepted dispute count overflow");
+        } else {
+            stats.rejected = stats
+                .rejected
+                .checked_add(1)
+                .expect("rejected dispute count overflow");
+        }
+        save_dispute_stats(&env, &stats);
+        bump_dispute_stats_ttl(&env);
 
         if accepted {
             // DsptRslv signals feeders to re-fetch and correct the flagged input.

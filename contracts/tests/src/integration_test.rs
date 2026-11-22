@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStats, DisputeStatus,
         ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
         SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
     };
@@ -3292,6 +3292,140 @@ mod tests {
             DisputeStatus::Rejected
         );
         assert_eq!(credit.list_disputes(&subject).len(), 2);
+    }
+
+    #[test]
+    fn test_dispute_stats_track_resolutions_expiration_and_failures() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let credit_id = env.register(CreditOracle, ());
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        credit.initialize(&admin);
+
+        assert_eq!(credit.get_dispute_stats(), DisputeStats::default());
+
+        let tx_key = Symbol::new(&env, "tx_stats");
+        let repayment_key = Symbol::new(&env, "repayment");
+        let vc_key = Symbol::new(&env, "vc_count");
+        let bad_key = Symbol::new(&env, "bad_key");
+        let reason = String::from_str(&env, "test dispute");
+
+        assert_eq!(
+            credit.try_flag_score_input(&subject, &bad_key, &reason),
+            Err(Ok(CreditOracleError::InvalidInputKey))
+        );
+        assert_eq!(
+            credit.try_resolve_dispute(&subject, &tx_key, &true),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+        assert_eq!(credit.get_dispute_stats(), DisputeStats::default());
+
+        credit.flag_score_input(&subject, &tx_key, &reason);
+        credit.flag_score_input(&subject, &repayment_key, &reason);
+        credit.flag_score_input(&subject, &vc_key, &reason);
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 3,
+                accepted: 0,
+                rejected: 0,
+            }
+        );
+
+        assert_eq!(
+            credit.try_flag_score_input(&subject, &tx_key, &reason),
+            Err(Ok(CreditOracleError::DisputeAlreadyPending))
+        );
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 3,
+                accepted: 0,
+                rejected: 0,
+            }
+        );
+
+        credit.resolve_dispute(&subject, &repayment_key, &false);
+        credit.resolve_dispute(&subject, &tx_key, &true);
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 1,
+                accepted: 1,
+                rejected: 1,
+            }
+        );
+
+        assert_eq!(
+            credit.try_resolve_dispute(&subject, &tx_key, &true),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 1,
+                accepted: 1,
+                rejected: 1,
+            }
+        );
+
+        // A newly filed dispute can expire without changing resolved totals.
+        credit.resolve_dispute(&subject, &vc_key, &true);
+        credit.flag_score_input(&subject, &vc_key, &reason);
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 1,
+                accepted: 2,
+                rejected: 1,
+            }
+        );
+
+        let expiry_ledger = env.ledger().sequence() + credit.get_dispute_timeout_ledgers();
+        env.ledger()
+            .set_sequence_number(expiry_ledger.saturating_sub(1));
+        assert_eq!(
+            credit.try_expire_dispute(&subject, &vc_key),
+            Err(Ok(CreditOracleError::DisputeNotExpired))
+        );
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 1,
+                accepted: 2,
+                rejected: 1,
+            }
+        );
+
+        env.ledger().set_sequence_number(expiry_ledger);
+        credit.expire_dispute(&subject, &vc_key);
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 0,
+                accepted: 2,
+                rejected: 1,
+            }
+        );
+        assert_eq!(
+            credit.get_dispute(&subject, &vc_key).unwrap().status,
+            DisputeStatus::Expired
+        );
+        assert_eq!(
+            credit.try_expire_dispute(&subject, &vc_key),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+        assert_eq!(
+            credit.get_dispute_stats(),
+            DisputeStats {
+                pending: 0,
+                accepted: 2,
+                rejected: 1,
+            }
+        );
     }
 
     /// Subjects cannot file a dispute for an unrecognised input key.

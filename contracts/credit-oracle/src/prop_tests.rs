@@ -6,10 +6,11 @@
 //! Each property executes 1 000 random cases by default.
 
 use crate::{
-    compute_score_pure, is_dispute_expired, recency_multiplier_bps, BPS_DENOMINATOR,
-    DEFAULT_DISPUTE_TIMEOUT_LEDGERS, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
+    compute_score_pure, recency_multiplier_bps, CreditOracle, CreditOracleClient,
+    BPS_DENOMINATOR, MAX_BATCH_SIZE, MAX_SCORE, MIN_SCORE, SECONDS_PER_DAY,
 };
 use proptest::prelude::*;
+use soroban_sdk::{testutils::Address as _, Address, Env, String, Symbol};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -511,53 +512,51 @@ proptest! {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Property 15 — Dispute totals track successive accepted/rejected lifecycles.
+// ---------------------------------------------------------------------------
 proptest! {
-    //  7. Dispute expiry boundary: saturating arithmetic, exact at-threshold
+    #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn prop_dispute_not_expired_before_boundary(
-        filed_at in any::<u32>(),
-        timeout  in 1u32..=u32::MAX,
+    fn prop_dispute_stats_track_resolutions(
+        decisions in proptest::collection::vec(any::<bool>(), 1..=12),
     ) {
-        let expiry = filed_at.saturating_add(timeout);
-        if expiry > 0 {
-            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
-        }
-    }
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
 
-    #[test]
-    fn prop_dispute_expired_at_and_after_boundary(
-        filed_at in any::<u32>(),
-        timeout  in 1u32..=u32::MAX,
-        extra    in 0u32..=10_000,
-    ) {
-        let expiry = filed_at.saturating_add(timeout);
-        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
-        if let Some(after) = expiry.checked_add(extra) {
-            prop_assert!(is_dispute_expired(filed_at, timeout, after));
-        }
-    }
+        let keys = [
+            Symbol::new(&env, "tx_stats"),
+            Symbol::new(&env, "repayment"),
+            Symbol::new(&env, "vc_count"),
+        ];
+        let reason = String::from_str(&env, "property test");
+        let mut accepted_count = 0u64;
+        let mut rejected_count = 0u64;
 
-    #[test]
-    fn prop_dispute_expiry_saturates_at_u32_max(
-        filed_at in (u32::MAX / 2)..=u32::MAX,
-        timeout  in (u32::MAX / 2)..=u32::MAX,
-    ) {
-        prop_assert!(is_dispute_expired(filed_at, timeout, u32::MAX));
-        if filed_at > 0 {
-            prop_assert!(!is_dispute_expired(filed_at, timeout, filed_at - 1));
-        }
-    }
+        for (index, accepted) in decisions.iter().enumerate() {
+            let key = keys[index % keys.len()].clone();
+            client.flag_score_input(&subject, &key, &reason);
+            client.resolve_dispute(&subject, &key, accepted);
+            if *accepted {
+                accepted_count += 1;
+            } else {
+                rejected_count += 1;
+            }
 
-    #[test]
-    fn prop_dispute_expiry_default_timeout_exercises_172800(
-        filed_at in any::<u32>(),
-    ) {
-        let timeout = DEFAULT_DISPUTE_TIMEOUT_LEDGERS;
-        let expiry = filed_at.saturating_add(timeout);
-        prop_assert!(is_dispute_expired(filed_at, timeout, expiry));
-        if expiry > 0 {
-            prop_assert!(!is_dispute_expired(filed_at, timeout, expiry - 1));
+            assert_eq!(
+                client.get_dispute_stats(),
+                crate::DisputeStats {
+                    pending: 0,
+                    accepted: accepted_count,
+                    rejected: rejected_count,
+                }
+            );
         }
     }
 }
