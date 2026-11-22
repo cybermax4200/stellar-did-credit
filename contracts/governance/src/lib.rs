@@ -62,6 +62,9 @@ pub enum GovernanceError {
 /// Maximum allowed length in bytes for a proposal metadata CID/URI.
 pub const MAX_METADATA_CID_LEN: u32 = 128;
 
+/// Number of basis points representing 100% of registered voting weight.
+pub const QUORUM_BPS_DENOMINATOR: u32 = 10_000;
+
 /// Maximum number of entries accepted by either voter batch operation.
 pub const MAX_VOTER_BATCH: u32 = 50;
 
@@ -89,6 +92,9 @@ pub enum DataKey {
     QuorumRequired,
     /// Optional percentage of total registered voting weight required for new proposals.
     QuorumPercent,
+    /// Optional basis points (1/100 of a percent) of total registered voting
+    /// weight required for new proposals. Takes precedence over `QuorumPercent`.
+    QuorumBps,
     /// Proposal data stored by proposal ID.
     Proposal(u64),
     /// Original proposer address for a given proposal ID.
@@ -149,9 +155,12 @@ pub struct GovernanceProposal {
     /// executed. Only the original proposer or the contract admin may cancel.
     pub cancelled: bool,
     /// Minimum `votes_for + votes_against` required for `execute` to apply
-    /// this proposal's weights, snapshotted from the contract-wide default
-    /// at proposal-creation time so later `set_quorum` calls never change
-    /// the rules for a proposal already up for a vote.
+    /// this proposal's weights, snapshotted at proposal-creation time —
+    /// either from the contract-wide default quorum or, in relative mode,
+    /// from `TotalRegisteredWeight` scaled by the configured percentage or
+    /// basis points. Later `set_quorum`/`set_quorum_percent`/`set_quorum_bps`
+    /// calls and voter weight changes never alter a proposal already up for
+    /// a vote.
     pub quorum_required: i128,
     /// IPFS CID or URI explaining the rationale / discussion behind the proposal.
     pub metadata_cid: String,
@@ -283,6 +292,7 @@ impl Governance {
             .instance()
             .set(&DataKey::QuorumRequired, &quorum_required);
         env.storage().instance().remove(&DataKey::QuorumPercent);
+        env.storage().instance().remove(&DataKey::QuorumBps);
         Ok(())
     }
 
@@ -308,6 +318,39 @@ impl Governance {
         env.storage()
             .instance()
             .set(&DataKey::QuorumPercent, &percent);
+        env.storage().instance().remove(&DataKey::QuorumBps);
+        Ok(())
+    }
+
+    /// Configure the quorum for future proposals as a basis-point percentage
+    /// of the total registered voting weight (1 basis point = 0.01%, so
+    /// `2_000` means 20% and the value must be between 1 and 10_000).
+    ///
+    /// Each new proposal snapshots `TotalRegisteredWeight * quorum_bps / 10_000`
+    /// at creation time as its `quorum_required`, so later voter registrations,
+    /// deregistrations, or weight changes only affect future proposals.
+    /// Setting this disables `set_quorum_percent` mode. Admin only.
+    pub fn set_quorum_bps(
+        env: Env,
+        admin: Address,
+        quorum_bps: u32,
+    ) -> Result<(), GovernanceError> {
+        if quorum_bps == 0 || quorum_bps > QUORUM_BPS_DENOMINATOR {
+            return Err(GovernanceError::InvalidQuorum);
+        }
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .ok_or(GovernanceError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(GovernanceError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::QuorumBps, &quorum_bps);
+        env.storage().instance().remove(&DataKey::QuorumPercent);
         Ok(())
     }
 
@@ -344,6 +387,11 @@ impl Governance {
     /// Return the percentage-based quorum configuration, if enabled.
     pub fn get_quorum_percent(env: Env) -> Option<u32> {
         env.storage().instance().get(&DataKey::QuorumPercent)
+    }
+
+    /// Return the basis-point quorum configuration, if enabled.
+    pub fn get_quorum_bps(env: Env) -> Option<u32> {
+        env.storage().instance().get(&DataKey::QuorumBps)
     }
 
     /// Returns the contract-wide default quorum applied to newly created proposals.
@@ -399,24 +447,44 @@ impl Governance {
         let quorum_required = match env
             .storage()
             .instance()
-            .get::<_, u32>(&DataKey::QuorumPercent)
+            .get::<_, u32>(&DataKey::QuorumBps)
         {
-            Some(percent) => {
+            // Relative quorum in basis points: snapshot of
+            // TotalRegisteredWeight * bps / 10_000 at creation time,
+            // equivalent to (votes * 10_000) / weight_at_creation >= bps.
+            Some(bps) => {
                 let total: i128 = env
                     .storage()
                     .instance()
                     .get(&DataKey::TotalRegisteredWeight)
                     .unwrap_or(0);
                 total
-                    .checked_mul(i128::from(percent))
+                    .checked_mul(i128::from(bps))
                     .ok_or(GovernanceError::InvalidQuorum)?
-                    / 100
+                    / i128::from(QUORUM_BPS_DENOMINATOR)
             }
-            None => env
+            None => match env
                 .storage()
                 .instance()
-                .get(&DataKey::QuorumRequired)
-                .unwrap_or(0),
+                .get::<_, u32>(&DataKey::QuorumPercent)
+            {
+                Some(percent) => {
+                    let total: i128 = env
+                        .storage()
+                        .instance()
+                        .get(&DataKey::TotalRegisteredWeight)
+                        .unwrap_or(0);
+                    total
+                        .checked_mul(i128::from(percent))
+                        .ok_or(GovernanceError::InvalidQuorum)?
+                        / 100
+                }
+                None => env
+                    .storage()
+                    .instance()
+                    .get(&DataKey::QuorumRequired)
+                    .unwrap_or(0),
+            },
         };
 
         let proposal = GovernanceProposal {
@@ -2241,6 +2309,243 @@ mod tests {
         assert_eq!(
             client.get_proposal(&proposal_id).unwrap().quorum_required,
             20
+        );
+    }
+
+    #[test]
+    fn test_total_registered_weight_tracks_additions_updates_and_removals() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+
+        assert_eq!(client.get_total_registered_weight(), 0);
+
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        client.register_voter(&admin, &voter1, &600);
+        client.register_voter(&admin, &voter2, &400);
+        assert_eq!(client.get_total_registered_weight(), 1_000);
+
+        client.update_voter_weight(&admin, &voter1, &250);
+        assert_eq!(client.get_total_registered_weight(), 650);
+
+        client.deregister_voter(&admin, &voter2);
+        assert_eq!(client.get_total_registered_weight(), 250);
+
+        client.update_voter_weight(&admin, &voter1, &0);
+        assert_eq!(client.get_total_registered_weight(), 0);
+    }
+
+    #[test]
+    fn test_set_quorum_bps_validation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+
+        assert_eq!(
+            client.try_set_quorum_bps(&admin, &0),
+            Err(Ok(GovernanceError::InvalidQuorum))
+        );
+        assert_eq!(
+            client.try_set_quorum_bps(&admin, &10_001),
+            Err(Ok(GovernanceError::InvalidQuorum))
+        );
+
+        // Boundaries 1 and 10_000 are accepted.
+        client.set_quorum_bps(&admin, &1);
+        assert_eq!(client.get_quorum_bps(), Some(1));
+        client.set_quorum_bps(&admin, &10_000);
+        assert_eq!(client.get_quorum_bps(), Some(10_000));
+    }
+
+    #[test]
+    fn test_quorum_bps_snapshots_total_weight_at_creation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+
+        client.register_voter(&admin, &Address::generate(&env), &1_000);
+        client.set_quorum_bps(&admin, &2_000);
+        // 2_000 bps = 20% of 1_000 total weight = 200 votes.
+        assert_eq!(client.get_quorum_percent(), None);
+
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            200
+        );
+    }
+
+    #[test]
+    fn test_quorum_bps_passes_when_weight_grows_after_creation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        let credit_oracle_client = CreditOracleClient::new(&env, &credit_oracle_id);
+        credit_oracle_client.initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+        credit_oracle_client.propose_new_admin(&gov_id);
+        client.accept_oracle_admin();
+
+        let voter1 = Address::generate(&env);
+        client.register_voter(&admin, &voter1, &1_000);
+        client.set_quorum_bps(&admin, &2_000);
+
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            200
+        );
+
+        // Massive voter joins after creation: 200 votes would only be 2%
+        // against the new 10_000 total, but quorum is evaluated against
+        // the 1_000 total weight that existed at creation.
+        client.register_voter(&admin, &Address::generate(&env), &9_000);
+        client.vote(&voter1, &proposal_id, &true, &200);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 11;
+        });
+        client.execute(&proposal_id);
+        assert!(client.get_proposal(&proposal_id).unwrap().executed);
+    }
+
+    #[test]
+    fn test_quorum_bps_fails_when_weight_shrinks_after_creation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &1);
+
+        let voter1 = Address::generate(&env);
+        let voter2 = Address::generate(&env);
+        client.register_voter(&admin, &voter1, &600);
+        client.register_voter(&admin, &voter2, &400);
+        client.set_quorum_bps(&admin, &2_000);
+
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            200
+        );
+
+        // voter2 leaves after creation: current total is 600, where 150
+        // votes would be 25% (> 20%), but the snapshot at creation of
+        // 1_000 still requires 200 votes.
+        client.deregister_voter(&admin, &voter2);
+        client.vote(&voter1, &proposal_id, &true, &150);
+
+        env.ledger().with_mut(|l| {
+            l.sequence_number += 11;
+        });
+        assert_eq!(
+            client.try_execute(&proposal_id),
+            Err(Ok(GovernanceError::QuorumNotMet))
+        );
+        assert!(!client.get_proposal(&proposal_id).unwrap().executed);
+    }
+
+    #[test]
+    fn test_set_quorum_and_percent_clear_bps_mode() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let admin = Address::generate(&env);
+        let credit_oracle_id = env.register(CreditOracle, ());
+        CreditOracleClient::new(&env, &credit_oracle_id).initialize(&admin);
+        let gov_id = env.register(Governance, ());
+        let client = GovernanceClient::new(&env, &gov_id);
+        client.initialize(&admin, &credit_oracle_id, &500);
+
+        client.register_voter(&admin, &Address::generate(&env), &1_000);
+        client.set_quorum_bps(&admin, &2_000);
+
+        client.set_quorum(&admin, &300);
+        assert_eq!(client.get_quorum_bps(), None);
+        assert_eq!(client.get_quorum_percent(), None);
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            300
+        );
+
+        client.set_quorum_percent(&admin, &50);
+        assert_eq!(client.get_quorum_bps(), None);
+        let proposal_id = client.create_proposal(
+            &Address::generate(&env),
+            &ScoringWeights {
+                vc_weight: 40,
+                tx_weight: 30,
+                repayment_weight: 30,
+            },
+            &10,
+            &0,
+            &test_cid(&env),
+        );
+        assert_eq!(
+            client.get_proposal(&proposal_id).unwrap().quorum_required,
+            500
         );
     }
 
