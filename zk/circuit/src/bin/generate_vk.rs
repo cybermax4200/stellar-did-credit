@@ -20,6 +20,11 @@ fn print_array(name: &str, bytes: &[u8]) {
 /// setup) for the selected circuit as Rust byte arrays, ready to paste into
 /// `contracts/score-range-verifier/src/lib.rs`.
 fn main() {
+    eprintln!(
+        "WARNING: development key. The setup seed is public and fixed, so anyone can recompute the\n\
+         toxic waste and forge proofs. Do not use this key for production verification. For a\n\
+         multi-party Phase 2 key use `cargo run -p zk-circuit --bin ceremony` (docs/zk-trusted-setup.md)."
+    );
     let which = std::env::args()
         .nth(1)
         .unwrap_or_else(|| "threshold".to_string());

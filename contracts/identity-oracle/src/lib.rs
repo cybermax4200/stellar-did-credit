@@ -1314,6 +1314,44 @@ impl IdentityOracle {
         get_stored_credential_type(&env, &subject, &vc_hash)
     }
 
+    /// Returns `true` if `subject` has at least one active (non-revoked)
+    /// credential whose type label equals `cred_type`.
+    ///
+    /// A credential counts as revoked if it was marked via `mark_vc_revoked`
+    /// or the linked revocation registry reports its hash as revoked (same rule
+    /// as `is_verified` / `get_vc_details`). Like `is_verified`, this returns
+    /// `false` for a subject that has deactivated their identity. Credentials
+    /// anchored with `anchor_vc` (no type) carry the default `generic` label.
+    ///
+    /// Read-only: avoids fetching and filtering every credential off-chain.
+    pub fn has_credential_type(env: Env, subject: Address, cred_type: Symbol) -> bool {
+        if env
+            .storage()
+            .persistent()
+            .get(&DataKey::Deactivated(subject.clone()))
+            .unwrap_or(false)
+        {
+            return false;
+        }
+
+        let anchors: Vec<IdentityVCRecord> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::VCAnchors(subject.clone()))
+            .unwrap_or(Vec::new(&env));
+
+        for record in anchors.iter() {
+            // Check the (cheap) type label first so the cross-contract
+            // revocation lookup only runs for credentials that could match.
+            if get_stored_credential_type(&env, &subject, &record.vc_hash) == cred_type
+                && !is_record_revoked(&env, &record)
+            {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Set an issuer's trust multiplier in basis points (100 = 1Ã—, 200 = 2Ã—).
     ///
     /// Auth: admin only â€” verified via `require_admin`.
@@ -3390,6 +3428,160 @@ mod tests {
 
         let stored_type: CredentialType = client.get_vc_credential_type(&subject, &typed_hash);
         assert_eq!(stored_type, Symbol::new(&env, "kyc"));
+    }
+
+    #[test]
+    fn test_has_credential_type_true_for_active_matching_credential() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        client.anchor_vc_typed(
+            &issuer,
+            &subject,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &kyc,
+        );
+        assert!(client.has_credential_type(&subject, &kyc));
+    }
+
+    #[test]
+    fn test_has_credential_type_false_when_none_anchored_or_type_absent() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+        let stranger = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        // Nothing anchored at all.
+        assert!(!client.has_credential_type(&subject, &kyc));
+
+        // Anchored credential of a different type does not match.
+        client.anchor_vc_typed(
+            &issuer,
+            &subject,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &Symbol::new(&env, "income"),
+        );
+        assert!(!client.has_credential_type(&subject, &kyc));
+        // Another subject's credentials never leak across subjects.
+        assert!(!client.has_credential_type(&stranger, &Symbol::new(&env, "income")));
+    }
+
+    #[test]
+    fn test_has_credential_type_false_once_all_of_that_type_are_revoked() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        let kyc_a = BytesN::from_array(&env, &[1u8; 32]);
+        let kyc_b = BytesN::from_array(&env, &[2u8; 32]);
+        client.anchor_vc_typed(&issuer, &subject, &kyc_a, &kyc);
+        client.anchor_vc_typed(&issuer, &subject, &kyc_b, &kyc);
+        assert!(client.has_credential_type(&subject, &kyc));
+
+        // One of two revoked: still true.
+        client.mark_vc_revoked(&issuer, &subject, &kyc_a);
+        assert!(client.has_credential_type(&subject, &kyc));
+
+        // All revoked: false.
+        client.mark_vc_revoked(&issuer, &subject, &kyc_b);
+        assert!(!client.has_credential_type(&subject, &kyc));
+    }
+
+    #[test]
+    fn test_has_credential_type_with_multiple_credential_types() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        let income = Symbol::new(&env, "income");
+        let employment = Symbol::new(&env, "employment");
+        let kyc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let income_hash = BytesN::from_array(&env, &[2u8; 32]);
+        let employment_hash = BytesN::from_array(&env, &[3u8; 32]);
+        client.anchor_vc_typed(&issuer, &subject, &kyc_hash, &kyc);
+        client.anchor_vc_typed(&issuer, &subject, &income_hash, &income);
+        client.anchor_vc_typed(&issuer, &subject, &employment_hash, &employment);
+
+        assert!(client.has_credential_type(&subject, &kyc));
+        assert!(client.has_credential_type(&subject, &income));
+        assert!(client.has_credential_type(&subject, &employment));
+        assert!(!client.has_credential_type(&subject, &Symbol::new(&env, "education")));
+
+        // Revoking one type leaves the others untouched.
+        client.mark_vc_revoked(&issuer, &subject, &income_hash);
+        assert!(client.has_credential_type(&subject, &kyc));
+        assert!(!client.has_credential_type(&subject, &income));
+        assert!(client.has_credential_type(&subject, &employment));
+    }
+
+    #[test]
+    fn test_has_credential_type_untyped_credentials_are_generic() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        client.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[9u8; 32]));
+        assert!(client.has_credential_type(&subject, &symbol_short!("generic")));
+        assert!(!client.has_credential_type(&subject, &Symbol::new(&env, "kyc")));
+    }
+
+    #[test]
+    fn test_has_credential_type_false_after_identity_deactivation() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        let issuer = Address::generate(&env);
+        client.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        client.anchor_vc_typed(
+            &issuer,
+            &subject,
+            &BytesN::from_array(&env, &[1u8; 32]),
+            &kyc,
+        );
+        assert!(client.has_credential_type(&subject, &kyc));
+        client.deactivate_identity(&subject);
+        assert!(!client.has_credential_type(&subject, &kyc));
     }
 
     #[test]

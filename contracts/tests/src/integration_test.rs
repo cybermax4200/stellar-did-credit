@@ -4284,4 +4284,135 @@ mod tests {
         assert_eq!(refiled.status, DisputeStatus::Pending);
         assert_eq!(refiled.created_at_ledger, env.ledger().sequence());
     }
+
+    /// #1170: `has_credential_type` honours revocations made through the linked
+    /// revocation-registry (cross-contract), per credential type.
+    #[test]
+    fn test_has_credential_type_respects_registry_revocation_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+
+        let kyc = Symbol::new(&env, "kyc");
+        let income = Symbol::new(&env, "income");
+        let kyc_hash = BytesN::from_array(&env, &[1u8; 32]);
+        let income_hash = BytesN::from_array(&env, &[2u8; 32]);
+        identity.anchor_vc_typed(&issuer, &subject, &kyc_hash, &kyc);
+        identity.anchor_vc_typed(&issuer, &subject, &income_hash, &income);
+        assert!(identity.has_credential_type(&subject, &kyc));
+        assert!(identity.has_credential_type(&subject, &income));
+
+        // Revoke the income credential through the registry only.
+        revocation.revoke(&issuer, &subject, &income_hash);
+        assert!(!identity.has_credential_type(&subject, &income));
+        assert!(identity.has_credential_type(&subject, &kyc));
+
+        revocation.revoke(&issuer, &subject, &kyc_hash);
+        assert!(!identity.has_credential_type(&subject, &kyc));
+    }
+
+    /// #1172: pause blocks revocations (and therefore identity-oracle sees no
+    /// new revocation); `unpause(admin)` resumes them immediately.
+    #[test]
+    fn test_revocation_registry_pause_unpause_lifecycle_integration() {
+        use revocation_registry::RevocationRegistryError;
+
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let revocation_id = env.register(RevocationRegistry, ());
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        revocation.initialize(&admin);
+        identity.set_revocation_registry(&revocation_id);
+        revocation.set_identity_oracle(&identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+        let vc_hash = BytesN::from_array(&env, &[5u8; 32]);
+        identity.anchor_vc_typed(&issuer, &subject, &vc_hash, &Symbol::new(&env, "kyc"));
+
+        revocation.pause();
+        assert_eq!(
+            revocation.try_revoke(&issuer, &subject, &vc_hash),
+            Err(Ok(RevocationRegistryError::ContractPaused))
+        );
+        assert!(
+            identity.is_verified(&subject),
+            "revocation must not apply while paused"
+        );
+
+        // Wrong address cannot unpause; the real admin can.
+        let intruder = Address::generate(&env);
+        assert_eq!(
+            revocation.try_unpause(&intruder),
+            Err(Ok(RevocationRegistryError::NotAuthorized))
+        );
+        revocation.unpause(&admin);
+        assert_eq!(
+            revocation.try_unpause(&admin),
+            Err(Ok(RevocationRegistryError::NotPaused))
+        );
+
+        revocation.revoke(&issuer, &subject, &vc_hash);
+        assert!(!identity.is_verified(&subject));
+    }
+
+    /// #1175: `is_score_expired` against a score computed with a linked
+    /// identity-oracle, as time passes.
+    #[test]
+    fn test_is_score_expired_with_linked_identity_oracle_integration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register(IdentityOracle, ());
+        let credit_id = env.register(CreditOracle, ());
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+
+        let admin = Address::generate(&env);
+        identity.initialize(&admin);
+        credit.initialize(&admin);
+        credit.set_identity_oracle(&admin, &identity_id);
+
+        let issuer = Address::generate(&env);
+        identity.register_issuer(&issuer);
+        let subject = Address::generate(&env);
+        identity.anchor_vc(&issuer, &subject, &BytesN::from_array(&env, &[3u8; 32]));
+
+        // Unscored subject is expired.
+        let ninety_days: u64 = 90 * 86_400;
+        assert!(credit.is_score_expired(&subject, &ninety_days));
+
+        env.ledger().set_timestamp(2_000_000);
+        credit.compute_score(&subject);
+        assert!(!credit.is_score_expired(&subject, &ninety_days));
+
+        env.ledger().set_timestamp(2_000_000 + ninety_days);
+        assert!(
+            !credit.is_score_expired(&subject, &ninety_days),
+            "exactly at the limit is fresh"
+        );
+        env.ledger().set_timestamp(2_000_000 + ninety_days + 1);
+        assert!(credit.is_score_expired(&subject, &ninety_days));
+    }
 }

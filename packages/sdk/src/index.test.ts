@@ -4569,8 +4569,9 @@ describe("batchRevokeVC", () => {
       expect(mockContractCalls[0]).toMatchObject({
         contractId: mockConfig.revocationRegistryId,
         method: "unpause",
-        args: [],
       });
+      // The admin address is now passed explicitly.
+      expect(mockContractCalls[0].args).toHaveLength(1);
       expect(mockSendTransaction).toHaveBeenCalledTimes(1);
     });
 

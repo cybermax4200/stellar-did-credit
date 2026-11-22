@@ -69,6 +69,8 @@ pub enum RevocationRegistryError {
     EmptyBatch = 9,
     /// Revocation reason code must be between 0 and 4.
     InvalidRevocationReason = 10,
+    /// `unpause` was called while the contract is not paused.
+    NotPaused = 11,
 }
 
 /// Standard revocation reason codes.
@@ -195,8 +197,41 @@ impl RevocationRegistry {
         Ok(())
     }
 
-    pub fn unpause(env: Env) -> Result<(), RevocationRegistryError> {
-        require_admin(&env);
+    /// Resume revocations after an emergency `pause`.
+    ///
+    /// Auth: `admin` must be the stored admin and must authorize the call. The
+    /// admin may be a Stellar multi-signature account (or a custom account
+    /// contract), in which case the network enforces its signing thresholds
+    /// before this function runs; no separate multi-sig logic is needed here.
+    ///
+    /// Errors:
+    /// - `NotAuthorized` if `admin` is not the stored admin (or the contract is
+    ///   not initialized).
+    /// - `NotPaused` if the contract is not currently paused. No state is
+    ///   written and no event is emitted in that case.
+    ///
+    /// On success sets `Paused` to `false` and emits `Unpaused`; revocations
+    /// resume immediately.
+    pub fn unpause(env: Env, admin: Address) -> Result<(), RevocationRegistryError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&RevocationKey::Admin)
+            .ok_or(RevocationRegistryError::NotAuthorized)?;
+        if admin != stored_admin {
+            return Err(RevocationRegistryError::NotAuthorized);
+        }
+        admin.require_auth();
+
+        let paused: bool = env
+            .storage()
+            .instance()
+            .get(&RevocationKey::Paused)
+            .unwrap_or(false);
+        if !paused {
+            return Err(RevocationRegistryError::NotPaused);
+        }
+
         env.storage()
             .instance()
             .extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
@@ -784,6 +819,158 @@ mod tests {
         assert_eq!(res, Err(Ok(RevocationRegistryError::IssuerMismatch)));
     }
 
+    fn paused_registry(env: &Env) -> (RevocationRegistryClient<'_>, Address) {
+        env.mock_all_auths();
+        let contract_id = env.register(RevocationRegistry, ());
+        let client = RevocationRegistryClient::new(env, &contract_id);
+        let admin = Address::generate(env);
+        client.initialize(&admin);
+        (client, admin)
+    }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        assert!(!client.is_paused());
+
+        client.pause();
+        assert!(client.is_paused());
+        assert_eq!(
+            client.try_set_batch_limit(&admin, &10),
+            Err(Ok(RevocationRegistryError::ContractPaused))
+        );
+
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+        assert!(client.try_set_batch_limit(&admin, &10).is_ok());
+    }
+
+    /// Lifecycle: revocations work, are blocked while paused, and resume
+    /// immediately after `unpause`; the cycle can repeat.
+    #[test]
+    fn test_pause_unpause_lifecycle_revocations_resume_immediately() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        let issuer = Address::generate(&env);
+        let subject = Address::generate(&env);
+        let h1 = BytesN::from_array(&env, &[1u8; 32]);
+        let h2 = BytesN::from_array(&env, &[2u8; 32]);
+        let h3 = BytesN::from_array(&env, &[3u8; 32]);
+
+        client.revoke(&issuer, &subject, &h1);
+        assert!(client.is_revoked(&h1));
+
+        client.pause();
+        assert_eq!(
+            client.try_revoke(&issuer, &subject, &h2),
+            Err(Ok(RevocationRegistryError::ContractPaused))
+        );
+        assert!(!client.is_revoked(&h2));
+        // Reads stay available while paused.
+        assert!(client.is_revoked(&h1));
+
+        client.unpause(&admin);
+        client.revoke(&issuer, &subject, &h2);
+        assert!(client.is_revoked(&h2));
+
+        // A second cycle behaves the same.
+        client.pause();
+        assert!(client.try_revoke(&issuer, &subject, &h3).is_err());
+        client.unpause(&admin);
+        client.revoke(&issuer, &subject, &h3);
+        assert!(client.is_revoked(&h3));
+    }
+
+    #[test]
+    fn test_unpause_emits_unpaused_event() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        client.pause();
+        env.events().all(); // drain
+
+        client.unpause(&admin);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1, "expected exactly one event");
+        let (_, topics, _) = events.get(0).unwrap();
+        assert_eq!(topics.len(), 1);
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic, symbol_short!("Unpaused"));
+    }
+
+    #[test]
+    fn test_unpause_on_unpaused_contract_returns_not_paused() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        assert_eq!(
+            client.try_unpause(&admin),
+            Err(Ok(RevocationRegistryError::NotPaused))
+        );
+        assert!(!client.is_paused());
+
+        // After a full cycle, a second unpause is again rejected.
+        client.pause();
+        client.unpause(&admin);
+        assert_eq!(
+            client.try_unpause(&admin),
+            Err(Ok(RevocationRegistryError::NotPaused))
+        );
+    }
+
+    #[test]
+    fn test_unpause_rejects_non_admin_and_keeps_paused() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        client.pause();
+
+        let intruder = Address::generate(&env);
+        assert_eq!(
+            client.try_unpause(&intruder),
+            Err(Ok(RevocationRegistryError::NotAuthorized))
+        );
+        assert!(client.is_paused());
+
+        // The real admin still can.
+        client.unpause(&admin);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    fn test_unpause_uninitialized_contract_is_not_authorized() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(RevocationRegistry, ());
+        let client = RevocationRegistryClient::new(&env, &contract_id);
+        assert_eq!(
+            client.try_unpause(&Address::generate(&env)),
+            Err(Ok(RevocationRegistryError::NotAuthorized))
+        );
+    }
+
+    #[test]
+    fn test_pause_requires_admin_auth() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        env.mock_auths(&[]);
+        assert!(client.try_pause().is_err());
+        client.mock_auths(&[]);
+        assert!(client.try_unpause(&admin).is_err());
+    }
+
+    /// The stored admin must actually authorize `unpause`: passing the right
+    /// address without its signature fails and leaves the contract paused.
+    #[test]
+    fn test_unpause_requires_admin_signature() {
+        let env = Env::default();
+        let (client, admin) = paused_registry(&env);
+        client.pause();
+        env.mock_auths(&[]);
+        assert!(client.try_unpause(&admin).is_err());
+        env.mock_all_auths();
+        assert!(client.is_paused());
+    }
+
     #[test]
     fn test_batch_revoke_five_hashes() {
         let env = Env::default();
@@ -956,46 +1143,6 @@ mod tests {
         client.propose_new_admin(&admin2);
 
         client.accept_admin(&non_admin);
-    }
-
-    #[test]
-    fn test_pause_and_unpause() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(RevocationRegistry, ());
-        let client = RevocationRegistryClient::new(&env, &contract_id);
-
-        assert!(!client.is_paused());
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-        assert!(!client.is_paused());
-
-        client.pause();
-        assert!(client.is_paused());
-        assert_eq!(
-            client.try_set_batch_limit(&admin, &10),
-            Err(Ok(RevocationRegistryError::ContractPaused))
-        );
-
-        client.unpause();
-        assert!(!client.is_paused());
-        assert!(client.try_set_batch_limit(&admin, &10).is_ok());
-    }
-
-    #[test]
-    fn test_pause_requires_admin_auth() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register(RevocationRegistry, ());
-        let client = RevocationRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        client.initialize(&admin);
-
-        env.mock_auths(&[]);
-        assert!(client.try_pause().is_err());
-        assert!(client.try_unpause().is_err());
     }
 
     proptest! {

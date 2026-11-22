@@ -283,6 +283,9 @@ const REVOCATION_REGISTRY_ERROR_CODES: Record<number, string> = {
   6: "ContractPaused",
   7: "ReentrancyDetected",
   8: "InvalidBatchLimit",
+  9: "EmptyBatch",
+  10: "InvalidRevocationReason",
+  11: "NotPaused",
 };
 
 const GOVERNANCE_ERROR_CODES: Record<number, string> = {
@@ -3823,18 +3826,21 @@ export class StellarDIDCreditSDK {
   /**
    * Resume write operations on the revocation-registry contract.
    *
-   * Submits a signed transaction to the revocation-registry contract. Requires the admin
-   * keypair to authorize the operation.
+   * Submits a signed transaction to the revocation-registry contract. The admin
+   * address is passed explicitly and must match the stored admin; the contract
+   * rejects the call with `NotPaused` if it is not currently paused. Requires the
+   * admin keypair to authorize the operation.
    *
    * @param adminKeypair - Stellar keypair (or object with publicKey) of the contract admin
    * @returns Transaction hash after successful ledger confirmation
    */
   async unpauseRevocationRegistry(adminKeypair: KeypairLike): Promise<string> {
+    const publicKey = getPublicKey(adminKeypair);
     const contract = new Contract(this.config.revocationRegistryId);
     return this.submitContractTransaction(
       adminKeypair,
       "revocation-registry",
-      contract.call("unpause"),
+      contract.call("unpause", new Address(publicKey).toScVal()),
       "unpauseRevocationRegistry",
     );
   }
