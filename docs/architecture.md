@@ -371,16 +371,20 @@ The `input_key` parameter must be one of three recognised values:
 | `repayment`  | On-time / total repayment counts                    |
 | `vc_count`   | Cached verifiable credential count                  |
 
-### Anti-griefing
+### Anti-griefing, review timeout, and bond
 
-Only **one pending dispute per `(subject, input_key)` pair** is allowed at a time. Attempting to re-file while an existing dispute is `Pending` returns `DisputeAlreadyPending`. After the admin resolves a dispute (`Resolved` or `Rejected`), the subject may file a new one for the same key.
+Only **one pending dispute per `(subject, input_key)` pair** is allowed at a time. Attempting to re-file while an existing dispute is `Pending` returns `DisputeAlreadyPending`. After the admin resolves a dispute (`Resolved` or `Rejected`), or the review window expires (`Expired`), the subject may file a new one for the same key.
+
+A `Pending` dispute records `created_at_ledger`. If it is still pending after `dispute_timeout_ledgers` (default **172,800 ledgers**, ≈ 10 days), **anyone** may call `expire_dispute(subject, input_key)` to move it to `Expired`. This guarantees an abandoned admin review cannot lock a subject's input forever. Expiration is a liveness fallback, not a ruling: the flagged input is left unchanged and no feeder re-sync is requested. Any escrowed bond is refunded to the depositor. Calling `expire_dispute` before the timeout elapses returns `DisputeNotExpired`; once a dispute is resolved or expired, `expire_dispute` and `resolve_dispute` return `DisputeNotFound`.
+
+The admin can change the window with `set_dispute_timeout_ledgers(admin, ledgers)` (`ledgers > 0`), and read it with `get_dispute_timeout_ledgers()`.
 
 The admin may also configure an optional **dispute bond** to make spam flagging expensive:
 
 - `set_dispute_bond_token(admin, token)` records the SEP-41 token used for bonds. For XLM, pass the native Stellar Asset Contract (SAC) address.
 - `set_dispute_bond(admin, amount)` sets the bond amount. `0` (the default) disables bonds; a positive amount requires the token to be configured first, otherwise the setter returns `DisputeBondTokenNotConfigured`.
 - When a bond is active, `flag_score_input` transfers `amount` from the subject to the contract and records the escrow under `DisputeBond(subject, input_key)`.
-- `resolve_dispute(..., accepted=true)` refunds the bond to the subject. `resolve_dispute(..., accepted=false)` forfeits the bond, leaving the tokens in the contract. The escrow record is cleared either way, and the refund always uses the token/amount originally paid even if the admin changes the configuration afterwards.
+- `resolve_dispute(..., accepted=true)` refunds the bond to the subject. `resolve_dispute(..., accepted=false)` forfeits the bond, leaving the tokens in the contract. `expire_dispute` refunds the bond. The escrow record is cleared either way, and the refund always uses the token/amount originally paid even if the admin changes the configuration afterwards.
 
 ### Dispute lifecycle
 
@@ -388,7 +392,8 @@ The admin may also configure an optional **dispute bond** to make spam flagging 
 [filed]    subject calls flag_score_input  ->  Pending   (+ bond escrowed if configured)
 [accepted] admin calls resolve_dispute(accepted=true)  ->  Resolved  (+ bond refunded)
 [rejected] admin calls resolve_dispute(accepted=false) ->  Rejected  (bond forfeited)
-[re-filed] after Resolved/Rejected, subject may file again ->  Pending
+[expired]  anyone calls expire_dispute after timeout  ->  Expired   (+ bond refunded)
+[re-filed] after Resolved, Rejected, or Expired, subject may file again ->  Pending
 ```
 
 ### Resolution and feeder re-sync
@@ -403,8 +408,11 @@ When the admin rejects a dispute, a `DsptRjct` event is emitted. The subject may
 | -------- | ------ | ----------- |
 | `flag_score_input(subject, input_key, reason)` | subject | Files a dispute against a score input (escrows bond if configured) |
 | `resolve_dispute(subject, input_key, accepted)` | admin   | Accepts or rejects a pending dispute (refunds or forfeits bond) |
+| `expire_dispute(subject, input_key)`            | anyone  | Expires a pending dispute after the review timeout (refunds bond) |
 | `get_dispute(subject, input_key)`               | anyone  | Returns the dispute record, or `None` |
 | `list_disputes(subject)`                        | anyone  | Returns all dispute records for a subject |
+| `get_dispute_timeout_ledgers()`                 | anyone  | Returns the review timeout in ledgers |
+| `set_dispute_timeout_ledgers(admin, ledgers)`   | admin   | Updates the review timeout (`ledgers > 0`) |
 | `set_dispute_bond_token(admin, token)`          | admin   | Configures the SEP-41 token used for dispute bonds |
 | `set_dispute_bond(admin, amount)`               | admin   | Sets the bond amount; `0` disables bonds |
 | `get_dispute_bond()`                            | anyone  | Returns the configured bond amount |
@@ -417,6 +425,7 @@ When the admin rejects a dispute, a `DsptRjct` event is emitted. The subject may
 | -------------------------- | --------------- | ----------- |
 | `Dispute(Address, Symbol)` | `DisputeRecord` | Persistent - one record per (subject, input_key) pair |
 | `DisputeIndex(Address)`    | `Vec<Symbol>`   | Persistent - index of all disputed input keys for a subject |
+| `DisputeTimeoutLedgers`    | `u32`           | Instance - pending review window; default 172,800 ledgers |
 | `DisputeBond(Address, Symbol)` | `DisputeBondRecord` | Persistent - escrowed bond for a pending dispute |
 | `DisputeBondAmount`        | `i128`          | Instance - bond amount; `0` disables bonds |
 | `DisputeBondToken`         | `Address`       | Instance - SEP-41 token used for dispute bonds |

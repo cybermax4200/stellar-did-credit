@@ -78,7 +78,7 @@ export interface DisputeRecord {
   subject: string;
   inputKey: string;
   reason: string;
-  filedAtLedger: number;
+  createdAtLedger: number;
   status: DisputeStatus;
 }
 
@@ -133,10 +133,10 @@ export interface ProtocolConfig {
 export type Unsubscribe = () => void;
 
 /** Credit-oracle event topics of the dispute lifecycle. */
-export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct";
+export type DisputeEventType = "DsptFild" | "DsptRslv" | "DsptRjct" | "DsptExpr";
 
 /** `DisputeStatus` stored by the credit-oracle once a dispute event fires. */
-export type DisputeStatus = "Pending" | "Resolved" | "Rejected";
+export type DisputeStatus = "Pending" | "Resolved" | "Rejected" | "Expired";
 
 /**
  * A score event emitted by the credit-oracle on every successful
@@ -159,7 +159,7 @@ export interface ScoreEvent {
  * {@link StellarDIDCreditSDK.subscribeToDisputeEvents}.
  */
 export interface DisputeEvent {
-  /** Lifecycle transition: DsptFild, DsptRslv or DsptRjct. */
+  /** Lifecycle transition: DsptFild, DsptRslv, DsptRjct or DsptExpr. */
   eventType: DisputeEventType;
   /** Subject address the dispute was filed against. */
   subject: string;
@@ -173,12 +173,14 @@ const DISPUTE_EVENT_STATUS: Record<DisputeEventType, DisputeStatus> = {
   DsptFild: "Pending",
   DsptRslv: "Resolved",
   DsptRjct: "Rejected",
+  DsptExpr: "Expired",
 };
 
 const DISPUTE_EVENT_TOPICS: DisputeEventType[] = [
   "DsptFild",
   "DsptRslv",
   "DsptRjct",
+  "DsptExpr",
 ];
 
 export type SDKErrorCode =
@@ -3147,9 +3149,10 @@ export class StellarDIDCreditSDK {
 
     const subjectHash = hash(nativeToScVal(subjectAddress, { type: "address" }).address().toXDR());
     const oracleHash = hash(nativeToScVal(this.config.creditOracleId, { type: "address" }).address().toXDR());
-    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v1"));
+    const domainHash = hash(Buffer.from("stellar-did-credit::score-gt-threshold::v2"));
 
-    const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
+    // The scoring inputs shared by the prover and the commitment helper.
+    const scoringArgs = [
       vcPoints,
       Number(txStats.volume30d),
       txStats.avgCounterparties,
@@ -3164,6 +3167,10 @@ export class StellarDIDCreditSDK {
       scoreRecord.computedAtLedger,
       scoreRecord.stale,
       blinding,
+    ] as const;
+
+    const proofBytes: Uint8Array = ZkWasm.generate_score_proof(
+      ...scoringArgs,
       threshold,
       subjectHash,
       oracleHash,
@@ -3173,16 +3180,12 @@ export class StellarDIDCreditSDK {
 
     // Append public inputs as a 68-byte trailer so verifyScoreProof can
     // reconstruct the ScoreRangePublicInputs without extra round-trips:
-    //   [0..32)  score_commitment (SHA-256 of the blinded score fields, 32 bytes)
+    //   [0..32)  score_commitment (Poseidon over BLS12-381 Fr, 32 bytes big-endian)
     //   [32..36) snapshot_ledger  (u32 big-endian)
     //   [36..68) domain_separator (32 bytes)
-    const scoreCommitment = hash(Buffer.concat([
-      Buffer.from(new Uint32Array([scoreRecord.score]).buffer).reverse(),
-      Buffer.from(new Uint32Array([scoreRecord.vcCount]).buffer).reverse(),
-      Buffer.from(new BigInt64Array([BigInt(scoreRecord.lastUpdated)]).buffer).reverse(),
-      Buffer.from(new Uint32Array([scoreRecord.computedAtLedger]).buffer).reverse(),
-      Buffer.from(new Uint32Array([blinding]).buffer).reverse(),
-    ]));
+    // The commitment comes from the same Rust code the circuit uses, so the
+    // off-chain value matches the in-circuit one bit-for-bit.
+    const scoreCommitment = Buffer.from(ZkWasm.compute_score_commitment(...scoringArgs));
     const snapshotLedgerBuf = Buffer.alloc(4);
     snapshotLedgerBuf.writeUInt32BE(scoreRecord.computedAtLedger, 0);
 
@@ -3358,14 +3361,16 @@ export class StellarDIDCreditSDK {
 
   /**
    * Poll for the credit-oracle's dispute events (`DsptFild`, `DsptRslv`,
-   * `DsptRjct`) for a single subject.
+   * `DsptRjct`, `DsptExpr`) for a single subject.
    *
    * A dispute is raised by `flag_score_input` and closed by `resolve_dispute`,
    * which emits `DsptRslv` when the admin accepts the flag and `DsptRjct` when
-   * they reject it. All three events carry `(subject, input_key)`, so the
-   * subscription filters on `subject` locally and derives `status` from the
-   * event topic. Events from before the subscription started are skipped, and
-   * the three topics share one poll per interval.
+   * they reject it. A stale dispute can also be closed by `expire_dispute`,
+   * which emits `DsptExpr` once the review timeout has elapsed. All events
+   * carry `(subject, input_key)`, so the subscription filters on `subject`
+   * locally and derives `status` from the event topic. Events from before the
+   * subscription started are skipped, and all topics share one poll per
+   * interval.
    *
    * @param subject - Subject address whose disputes to watch
    * @param callback - Called with each matching {@link DisputeEvent}
@@ -4171,7 +4176,9 @@ function parseDisputeRecord(native: unknown): DisputeRecord {
     subject: String(raw["subject"]),
     inputKey: String(raw["input_key"]),
     reason: String(raw["reason"]),
-    filedAtLedger: Number(raw["filed_at_ledger"]),
+    createdAtLedger: Number(
+      raw["created_at_ledger"] ?? raw["filed_at_ledger"],
+    ),
     status,
   };
 }

@@ -114,6 +114,8 @@ pub enum IdentityOracleError {
     VCLimitReached = 10,
     /// The issuer tier weight is not within the valid range.
     InvalidIssuerTier = 11,
+    /// The deactivation reason exceeds the maximum allowed length.
+    ReasonTooLong = 12,
 }
 
 /// Maximum number of active (non-revoked) VCs a subject can have anchored.
@@ -199,6 +201,9 @@ pub const MAX_ISSUER_TIER_BPS: u32 = 300;
 
 /// Maximum allowed CID length in bytes.
 pub const MAX_CID_LENGTH: u32 = 128;
+
+/// Maximum allowed deactivation reason length in bytes.
+pub const MAX_DEACTIVATION_REASON_LENGTH: u32 = 256;
 
 /// Maximum number of trusted issuers returned by a single paginated query.
 pub const MAX_ISSUER_PAGE_LIMIT: u32 = 50;
@@ -462,6 +467,14 @@ fn deactivate_core(env: &Env, subject: &Address) -> u32 {
     record_last_state_change(env, subject);
 
     revoked_count
+}
+
+fn validate_deactivation_reason(reason: &String) -> Result<(), IdentityOracleError> {
+    if reason.len() > MAX_DEACTIVATION_REASON_LENGTH {
+        Err(IdentityOracleError::ReasonTooLong)
+    } else {
+        Ok(())
+    }
 }
 
 #[contractimpl]
@@ -770,7 +783,23 @@ impl IdentityOracle {
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_did(env: Env, subject: Address) -> Result<(), IdentityOracleError> {
+        let reason = String::from_str(&env, "unspecified");
+        Self::deactivate_did_with_reason(env, subject, reason)
+    }
+
+    /// Deactivate the subject's DID and record a reason in the `DIDDeact` event.
+    ///
+    /// The reason is limited to 256 bytes. Validation occurs before any state
+    /// change or event emission.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_did_with_reason(
+        env: Env,
+        subject: Address,
+        reason: String,
+    ) -> Result<(), IdentityOracleError> {
         subject.require_auth();
+        validate_deactivation_reason(&reason)?;
 
         // 1 & 2: shared with `deactivate_identity` â€” sets the Deactivated
         // flag and revokes all anchored VCs.
@@ -782,7 +811,8 @@ impl IdentityOracle {
             .remove(&DataKey::DIDDocument(subject.clone()));
 
         // 4. Emit event
-        env.events().publish((symbol_short!("DIDDeact"),), subject);
+        env.events()
+            .publish((symbol_short!("DIDDeact"),), (subject, reason));
 
         Ok(())
     }
@@ -975,15 +1005,35 @@ impl IdentityOracle {
     ///
     /// Auth: The `subject` must provide a valid signature.
     pub fn deactivate_identity(env: Env, subject: Address) -> u32 {
+        let reason = String::from_str(&env, "unspecified");
+        Self::deactivate_identity_with_reason(env, subject, reason)
+            .expect("default deactivation reason is valid")
+    }
+
+    /// Deactivate a subject's identity without removing their DID document,
+    /// and record a reason in the `IdDeact` event.
+    ///
+    /// The reason is limited to 256 bytes. Validation occurs before any state
+    /// change or event emission.
+    ///
+    /// Auth: The `subject` must provide a valid signature.
+    pub fn deactivate_identity_with_reason(
+        env: Env,
+        subject: Address,
+        reason: String,
+    ) -> Result<u32, IdentityOracleError> {
         subject.require_auth();
+        validate_deactivation_reason(&reason)?;
 
         let revoked_count = deactivate_core(&env, &subject);
 
         // Emit event
-        env.events()
-            .publish((symbol_short!("IdDeact"),), (subject, revoked_count));
+        env.events().publish(
+            (symbol_short!("IdDeact"),),
+            (subject, revoked_count, reason),
+        );
 
-        revoked_count
+        Ok(revoked_count)
     }
 
     /// Re-activate a previously deactivated identity.
@@ -1371,7 +1421,8 @@ impl IdentityOracle {
 mod tests {
     use super::*;
     use soroban_sdk::testutils::storage::Persistent;
-    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::testutils::{Address as _, Events, Ledger};
+    use soroban_sdk::TryIntoVal;
 
     #[contract]
     pub struct MockRevocationRegistry;
@@ -1411,6 +1462,153 @@ mod tests {
 
         assert!(!client.is_verified(&subject));
         assert!(client.get_did_document(&subject).is_none());
+    }
+
+    #[test]
+    fn test_deactivate_did_with_reason_emits_reason() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let subject = Address::generate(&env);
+        let reason = String::from_str(&env, "Key compromised");
+
+        client.deactivate_did_with_reason(&subject, &reason);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic, symbol_short!("DIDDeact"));
+        let (event_subject, event_reason): (Address, String) = data
+            .try_into_val(&env)
+            .expect("data should include the reason");
+        assert_eq!(event_subject, subject);
+        assert_eq!(event_reason, reason);
+    }
+
+    #[test]
+    fn test_deactivate_identity_with_reason_emits_reason() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let subject = Address::generate(&env);
+        let reason = String::from_str(&env, "User requested deletion");
+
+        assert_eq!(client.deactivate_identity_with_reason(&subject, &reason), 0);
+
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+        let (_, topics, data) = events.get(0).unwrap();
+        let topic: Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(topic, symbol_short!("IdDeact"));
+        let (event_subject, revoked_count, event_reason): (Address, u32, String) = data
+            .try_into_val(&env)
+            .expect("data should include the reason");
+        assert_eq!(event_subject, subject);
+        assert_eq!(revoked_count, 0);
+        assert_eq!(event_reason, reason);
+    }
+
+    #[test]
+    fn test_deactivate_wrappers_emit_unspecified_reason() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let did_subject = Address::generate(&env);
+        let identity_subject = Address::generate(&env);
+        let unspecified = String::from_str(&env, "unspecified");
+
+        client.deactivate_did(&did_subject);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (_, did_topics, did_data) = events.get(0).unwrap();
+        let did_topic: Symbol = did_topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(did_topic, symbol_short!("DIDDeact"));
+        let (event_did_subject, did_reason): (Address, String) = did_data
+            .try_into_val(&env)
+            .expect("DIDDeact data should include a reason");
+        assert_eq!(event_did_subject, did_subject);
+        assert_eq!(did_reason, unspecified);
+
+        client.deactivate_identity(&identity_subject);
+        let events = env.events().all();
+        assert_eq!(events.len(), 1);
+
+        let (_, identity_topics, identity_data) = events.get(0).unwrap();
+        let identity_topic: Symbol = identity_topics.get(0).unwrap().try_into_val(&env).unwrap();
+        assert_eq!(identity_topic, symbol_short!("IdDeact"));
+        let (event_identity_subject, revoked_count, identity_reason): (Address, u32, String) =
+            identity_data
+                .try_into_val(&env)
+                .expect("IdDeact data should include a reason");
+        assert_eq!(event_identity_subject, identity_subject);
+        assert_eq!(revoked_count, 0);
+        assert_eq!(identity_reason, unspecified);
+    }
+
+    #[test]
+    fn test_deactivation_reason_length_boundaries() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(IdentityOracle, ());
+        let client = IdentityOracleClient::new(&env, &contract_id);
+        let max_reason = String::from_str(&env, &"r".repeat(256));
+        let too_long_reason = String::from_str(&env, &"r".repeat(257));
+        let empty_reason = String::from_str(&env, "");
+        let valid_subject = Address::generate(&env);
+        let empty_reason_subject = Address::generate(&env);
+        let invalid_did_subject = Address::generate(&env);
+        let invalid_identity_subject = Address::generate(&env);
+        let issuer = Address::generate(&env);
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+        client.register_issuer(&issuer);
+
+        for subject in [&invalid_did_subject, &invalid_identity_subject] {
+            let cid = String::from_str(&env, "ipfs://QmReasonLengthTest");
+            client.anchor_did(subject, &cid);
+            let vc_hash = BytesN::from_array(&env, &[42u8; 32]);
+            client.anchor_vc(&issuer, subject, &vc_hash);
+        }
+
+        client.deactivate_did_with_reason(&valid_subject, &max_reason);
+        assert!(client.is_deactivated(&valid_subject));
+
+        env.events().all();
+        assert_eq!(
+            client.try_deactivate_identity_with_reason(&empty_reason_subject, &empty_reason),
+            Ok(Ok(0))
+        );
+        assert!(client.is_deactivated(&empty_reason_subject));
+        env.events().all();
+
+        assert_eq!(
+            client.try_deactivate_did_with_reason(&invalid_did_subject, &too_long_reason),
+            Err(Ok(IdentityOracleError::ReasonTooLong))
+        );
+        assert!(!client.is_deactivated(&invalid_did_subject));
+        assert_eq!(
+            client.get_did_document(&invalid_did_subject),
+            Some(String::from_str(&env, "ipfs://QmReasonLengthTest"))
+        );
+        assert_eq!(client.get_active_vc_count(&invalid_did_subject), 1);
+        assert!(env.events().all().is_empty());
+
+        assert_eq!(
+            client.try_deactivate_identity_with_reason(&invalid_identity_subject, &too_long_reason),
+            Err(Ok(IdentityOracleError::ReasonTooLong))
+        );
+        assert!(!client.is_deactivated(&invalid_identity_subject));
+        assert_eq!(
+            client.get_did_document(&invalid_identity_subject),
+            Some(String::from_str(&env, "ipfs://QmReasonLengthTest"))
+        );
+        assert_eq!(client.get_active_vc_count(&invalid_identity_subject), 1);
+        assert!(env.events().all().is_empty());
     }
 
     #[test]

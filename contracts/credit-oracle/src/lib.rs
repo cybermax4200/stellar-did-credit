@@ -110,6 +110,9 @@ pub enum DataKey {
     Dispute(Address, Symbol),
     /// Index of all disputed input keys for a subject
     DisputeIndex(Address),
+    /// Number of ledgers a dispute may remain `Pending` before anyone can
+    /// expire it. Absent means [`DEFAULT_DISPUTE_TIMEOUT_LEDGERS`].
+    DisputeTimeoutLedgers,
     /// Escrowed bond paid for a specific pending dispute
     DisputeBond(Address, Symbol),
     /// Bond amount (in `DisputeBondToken`) required to file a dispute.
@@ -460,7 +463,7 @@ pub struct DisputeRecord {
     /// Free-text reason provided by the subject.
     pub reason: String,
     /// Ledger sequence number when the dispute was filed.
-    pub filed_at_ledger: u32,
+    pub created_at_ledger: u32,
     /// Current resolution status.
     pub status: DisputeStatus,
 }
@@ -499,6 +502,25 @@ const INSTANCE_BUMP_THRESHOLD: u32 = 5_000;
 const INSTANCE_BUMP_AMOUNT: u32 = 500_000;
 /// Maximum number of entries allowed in a single batch operation.
 pub const MAX_BATCH_SIZE: u32 = 50;
+/// Default dispute review timeout (≈ 10 days at 5 s/ledger).
+///
+/// After this many ledgers a `Pending` dispute can be expired by anyone via
+/// `expire_dispute`, so an abandoned review cannot lock the subject's input
+/// indefinitely.
+pub const DEFAULT_DISPUTE_TIMEOUT_LEDGERS: u32 = 172_800;
+
+/// Return `true` once `current_ledger` has reached a dispute's expiry ledger
+/// (`created_at_ledger + timeout_ledgers`).
+///
+/// Uses saturating addition so an extreme timeout cannot overflow. A dispute is
+/// never considered expired before its timeout has fully elapsed.
+pub fn is_dispute_expired(
+    created_at_ledger: u32,
+    timeout_ledgers: u32,
+    current_ledger: u32,
+) -> bool {
+    current_ledger >= created_at_ledger.saturating_add(timeout_ledgers)
+}
 
 #[contract]
 pub struct CreditOracle;
@@ -1993,6 +2015,106 @@ impl CreditOracle {
         active
     }
 
+    /// Return the number of ledgers a dispute may stay `Pending` before it can
+    /// be expired. Defaults to [`DEFAULT_DISPUTE_TIMEOUT_LEDGERS`].
+    pub fn get_dispute_timeout_ledgers(env: Env) -> u32 {
+        env.storage()
+            .instance()
+            .get(&DataKey::DisputeTimeoutLedgers)
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_LEDGERS)
+    }
+
+    /// Update the dispute review timeout. Admin only.
+    ///
+    /// `ledgers` must be greater than zero; `0` would let a dispute be expired
+    /// in the same ledger it was filed.
+    pub fn set_dispute_timeout_ledgers(
+        env: Env,
+        admin: Address,
+        ledgers: u32,
+    ) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::Admin)
+            .expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        if ledgers == 0 {
+            return Err(CreditOracleError::InvalidDisputeTimeout);
+        }
+        admin.require_auth();
+        env.storage()
+            .instance()
+            .set(&DataKey::DisputeTimeoutLedgers, &ledgers);
+        env.events()
+            .publish((Symbol::new(&env, "DisputeTimeoutUpdated"),), ledgers);
+        Ok(())
+    }
+
+    /// Expire a `Pending` dispute once its review timeout has elapsed.
+    ///
+    /// Callable by anyone. Expiration is a liveness fallback, not a ruling: the
+    /// flagged input is left unchanged and no feeder re-sync is requested. The
+    /// record's status becomes `Expired`, which clears the one-pending-dispute
+    /// lock so the subject can file again.
+    ///
+    /// If the admin resolves the dispute first, this returns `DisputeNotFound`
+    /// because the record is no longer pending. Any escrowed bond is refunded to
+    /// the depositor. Emits a `DsptExpr` event.
+    pub fn expire_dispute(
+        env: Env,
+        subject: Address,
+        input_key: Symbol,
+    ) -> Result<(), CreditOracleError> {
+        let dispute_key = DataKey::Dispute(subject.clone(), input_key.clone());
+        let mut record: DisputeRecord = env
+            .storage()
+            .persistent()
+            .get(&dispute_key)
+            .ok_or(CreditOracleError::DisputeNotFound)?;
+
+        if record.status != DisputeStatus::Pending {
+            return Err(CreditOracleError::DisputeNotFound);
+        }
+
+        let timeout = env
+            .storage()
+            .instance()
+            .get(&DataKey::DisputeTimeoutLedgers)
+            .unwrap_or(DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+
+        if !is_dispute_expired(record.created_at_ledger, timeout, env.ledger().sequence()) {
+            return Err(CreditOracleError::DisputeNotExpired);
+        }
+
+        // Refund any escrowed bond on liveness expiry (no ruling/forfeit).
+        let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
+        if let Some(bond) = env
+            .storage()
+            .persistent()
+            .get::<_, DisputeBondRecord>(&bond_key)
+        {
+            token::TokenClient::new(&env, &bond.token).transfer(
+                &env.current_contract_address(),
+                &bond.depositor,
+                &bond.amount,
+            );
+            env.storage().persistent().remove(&bond_key);
+        }
+
+        record.status = DisputeStatus::Expired;
+        env.storage().persistent().set(&dispute_key, &record);
+        env.storage()
+            .persistent()
+            .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
+
+        env.events()
+            .publish((symbol_short!("DsptExpr"),), (subject, input_key));
+        Ok(())
+    }
+
     /// Set the dispute bond amount, denominated in the configured bond token.
     ///
     /// When non-zero, `flag_score_input` escrows this amount from the subject
@@ -2142,7 +2264,7 @@ impl CreditOracle {
             subject: subject.clone(),
             input_key: input_key.clone(),
             reason,
-            filed_at_ledger: env.ledger().sequence(),
+            created_at_ledger: env.ledger().sequence(),
             status: DisputeStatus::Pending,
         };
 
@@ -4466,7 +4588,197 @@ mod tests {
         assert_eq!(record.subject, subject);
         assert_eq!(record.input_key, input_key);
         assert_eq!(record.status, DisputeStatus::Pending);
-        assert_eq!(record.filed_at_ledger, env.ledger().sequence());
+        assert_eq!(record.created_at_ledger, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_expire_dispute_rejected_before_timeout() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client.get_dispute_timeout_ledgers(),
+            DEFAULT_DISPUTE_TIMEOUT_LEDGERS
+        );
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
+        let created = env.ledger().sequence();
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        env.ledger()
+            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS - 1);
+        assert_eq!(
+            client.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotExpired))
+        );
+        assert_eq!(
+            client.get_dispute(&subject, &input_key).unwrap().status,
+            DisputeStatus::Pending
+        );
+    }
+
+    #[test]
+    fn test_expire_dispute_after_timeout_emits_event_and_allows_refile() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
+        let created = env.ledger().sequence();
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        env.ledger()
+            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        client.expire_dispute(&subject, &input_key);
+
+        let events = env.events().all();
+        let mut expired_events = 0u32;
+        let mut payload_matches = false;
+        for i in 0..events.len() {
+            let (id, topics, data) = events.get(i).unwrap();
+            if id == contract_id && topics.len() == 1 {
+                let topic: soroban_sdk::Symbol = topics.get(0).unwrap().try_into_val(&env).unwrap();
+                if topic == symbol_short!("DsptExpr") {
+                    expired_events += 1;
+                    let payload: (Address, soroban_sdk::Symbol) = data.try_into_val(&env).unwrap();
+                    payload_matches = payload.0 == subject && payload.1 == input_key;
+                }
+            }
+        }
+
+        let record = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(record.status, DisputeStatus::Expired);
+        assert_eq!(record.created_at_ledger, created);
+        assert_eq!(expired_events, 1, "expected exactly one DsptExpr event");
+        assert!(payload_matches, "DsptExpr payload must name the dispute");
+
+        let reason2 = soroban_sdk::String::from_str(&env, "Still wrong after timeout");
+        client.flag_score_input(&subject, &input_key, &reason2);
+        let refiled = client.get_dispute(&subject, &input_key).unwrap();
+        assert_eq!(refiled.status, DisputeStatus::Pending);
+        assert_eq!(refiled.created_at_ledger, env.ledger().sequence());
+    }
+
+    #[test]
+    fn test_custom_dispute_timeout_is_honored() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+        client.set_dispute_timeout_ledgers(&admin, &5);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "vc_count");
+        let reason = soroban_sdk::String::from_str(&env, "VC count is wrong");
+        let created = env.ledger().sequence();
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        env.ledger().set_sequence_number(created + 4);
+        assert_eq!(
+            client.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotExpired))
+        );
+
+        env.ledger().set_sequence_number(created + 5);
+        client.expire_dispute(&subject, &input_key);
+        assert_eq!(
+            client.get_dispute(&subject, &input_key).unwrap().status,
+            DisputeStatus::Expired
+        );
+    }
+
+    #[test]
+    fn test_expire_dispute_requires_pending_record() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "repayment");
+        assert_eq!(
+            client.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+
+        let reason = soroban_sdk::String::from_str(&env, "Repayment missing");
+        client.flag_score_input(&subject, &input_key, &reason);
+        client.resolve_dispute(&subject, &input_key, &true);
+        env.ledger()
+            .set_sequence_number(env.ledger().sequence() + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        assert_eq!(
+            client.try_expire_dispute(&subject, &input_key),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+    }
+
+    #[test]
+    fn test_expired_dispute_cannot_be_resolved() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        let input_key = soroban_sdk::Symbol::new(&env, "tx_stats");
+        let reason = soroban_sdk::String::from_str(&env, "Volume is wrong");
+        let created = env.ledger().sequence();
+        client.flag_score_input(&subject, &input_key, &reason);
+
+        env.ledger()
+            .set_sequence_number(created + DEFAULT_DISPUTE_TIMEOUT_LEDGERS);
+        client.expire_dispute(&subject, &input_key);
+
+        assert_eq!(
+            client.try_resolve_dispute(&subject, &input_key, &true),
+            Err(Ok(CreditOracleError::DisputeNotFound))
+        );
+    }
+
+    #[test]
+    fn test_set_dispute_timeout_validates_admin_and_value() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register(CreditOracle, ());
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let non_admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        assert_eq!(
+            client.try_set_dispute_timeout_ledgers(&non_admin, &10),
+            Err(Ok(CreditOracleError::NotAuthorized))
+        );
+        assert_eq!(
+            client.try_set_dispute_timeout_ledgers(&admin, &0),
+            Err(Ok(CreditOracleError::InvalidDisputeTimeout))
+        );
+
+        client.set_dispute_timeout_ledgers(&admin, &42);
+        assert_eq!(client.get_dispute_timeout_ledgers(), 42);
     }
 
     #[test]
