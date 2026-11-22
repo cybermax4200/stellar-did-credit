@@ -1,9 +1,9 @@
 #[cfg(test)]
 mod tests {
     use credit_oracle::{
-        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStatus,
-        DisputeStats, ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1,
-        ScoringWeights, SubjectTxStatsEntry, TxStats, DISPUTE_EXPIRY_LEDGERS, MAX_BATCH_SIZE,
+        CreditOracle, CreditOracleClient, CreditOracleError, DataKey, DisputeStats, DisputeStatus,
+        ProtocolMetrics, RepaymentEntry, RepaymentRecord, RepaymentRecordV1, ScoringWeights,
+        SubjectTxStatsEntry, TxStats, MAX_BATCH_SIZE,
     };
     use governance::{Governance, GovernanceClient, GovernanceError};
     use identity_oracle::{IdentityOracle, IdentityOracleClient, IdentityOracleError};
@@ -3384,7 +3384,7 @@ mod tests {
             }
         );
 
-        let expiry_ledger = env.ledger().sequence() + DISPUTE_EXPIRY_LEDGERS;
+        let expiry_ledger = env.ledger().sequence() + credit.get_dispute_timeout_ledgers();
         env.ledger()
             .set_sequence_number(expiry_ledger.saturating_sub(1));
         assert_eq!(

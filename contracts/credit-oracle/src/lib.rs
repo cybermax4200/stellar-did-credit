@@ -492,8 +492,6 @@ pub const MAX_COMPUTE_COOLDOWN_LEDGERS: u32 = 86_400;
 const PERS_TTL_THRESHOLD: u32 = 120_960;
 /// Persistent-entry TTL extension (â‰ˆ 30 days at 5 s/ledger).
 const PERS_TTL_EXTEND: u32 = 518_400;
-/// Pending disputes expire after the standard persistent-entry TTL interval.
-pub const DISPUTE_EXPIRY_LEDGERS: u32 = PERS_TTL_EXTEND;
 /// Retain disputes beyond their deadline so they can be explicitly expired.
 const DISPUTE_RECORD_TTL_LEDGERS: u32 = PERS_TTL_EXTEND * 2;
 /// Instance-storage TTL bump threshold (ledgers).
@@ -2110,6 +2108,14 @@ impl CreditOracle {
             .persistent()
             .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
 
+        let mut stats = load_dispute_stats(&env);
+        stats.pending = stats
+            .pending
+            .checked_sub(1)
+            .expect("pending dispute count underflow");
+        save_dispute_stats(&env, &stats);
+        bump_dispute_stats_ttl(&env);
+
         env.events()
             .publish((symbol_short!("DsptExpr"),), (subject, input_key));
         Ok(())
@@ -2424,63 +2430,6 @@ impl CreditOracle {
             env.events()
                 .publish((symbol_short!("DsptRjct"),), (subject, input_key));
         }
-        Ok(())
-    }
-
-    /// Expire a pending dispute after its review deadline.
-    ///
-    /// This operation is permissionless. Any escrowed bond is returned to the
-    /// subject because expiration is not an accepted or rejected resolution.
-    pub fn expire_dispute(
-        env: Env,
-        subject: Address,
-        input_key: Symbol,
-    ) -> Result<(), CreditOracleError> {
-        let dispute_key = DataKey::Dispute(subject.clone(), input_key.clone());
-        let mut record: DisputeRecord = env
-            .storage()
-            .persistent()
-            .get(&dispute_key)
-            .ok_or(CreditOracleError::DisputeNotFound)?;
-
-        if record.status != DisputeStatus::Pending {
-            return Err(CreditOracleError::DisputeNotFound);
-        }
-        let expiry_ledger = record
-            .filed_at_ledger
-            .saturating_add(DISPUTE_EXPIRY_LEDGERS);
-        if env.ledger().sequence() < expiry_ledger {
-            return Err(CreditOracleError::DisputeNotExpired);
-        }
-
-        record.status = DisputeStatus::Expired;
-        env.storage().persistent().set(&dispute_key, &record);
-        env.storage()
-            .persistent()
-            .extend_ttl(&dispute_key, PERS_TTL_THRESHOLD, PERS_TTL_EXTEND);
-
-        let bond_key = DataKey::DisputeBond(subject.clone(), input_key.clone());
-        if let Some(bond) = env
-            .storage()
-            .persistent()
-            .get::<_, DisputeBondRecord>(&bond_key)
-        {
-            token::TokenClient::new(&env, &bond.token).transfer(
-                &env.current_contract_address(),
-                &bond.depositor,
-                &bond.amount,
-            );
-            env.storage().persistent().remove(&bond_key);
-        }
-
-        let mut stats = load_dispute_stats(&env);
-        stats.pending = stats
-            .pending
-            .checked_sub(1)
-            .expect("pending dispute count underflow");
-        save_dispute_stats(&env, &stats);
-        bump_dispute_stats_ttl(&env);
-
         Ok(())
     }
 
